@@ -8,7 +8,7 @@ from typing import Protocol
 
 from tqdm import tqdm
 
-from utils import log_rank_0
+from utils import log_rank_0, check_distributed_is_synchronized
 
 class SVDDictBase(t.TypedDict):
     U_high: torch.Tensor
@@ -21,6 +21,13 @@ class SVDDictBase(t.TypedDict):
 
 class SVDDecompositionDict(SVDDictBase, total=False):
     rank_high: int
+
+
+def is_svd_param(name: str, param: torch.Tensor, svd_config: dict) -> bool:
+    """
+    Utility function to make it easier to classify SVD parameters.
+    """
+    return len(param.shape) == 2 and name in svd_config and svd_config[name] > 0
 
 
 class SVDModelProtocol(Protocol):
@@ -281,7 +288,7 @@ def get_svd_target_parameters(model, svd_config):
         # TODO(osilkin): Right now we are only training 2D parameters, but some 1D parameters (like bias vectors)
         # are vectors stored as a list, but may be interpreted as a (1, N) or (N, 1) matrix.
         # SVD can processs these in general, but maybe they should be targeted normally
-        if len(param.shape) == 2 and name in svd_config and svd_config[name] > 0:
+        if is_svd_param(name, param, svd_config):
             target_params.append((name, param))
     return target_params
 
@@ -335,32 +342,31 @@ def broadcast_svd_parameters(model, assignments, world_size):
             f"{safe_name}_V_high",
         ]
 
+        # In this loop, all of the processes broadcast their
+        # respective SVD components that they generated.
         for component_name in buffer_components:
-            try:
-                if hasattr(model, component_name):
-                    tensor = getattr(model, component_name)
-                    dist.broadcast(tensor, src=src_rank)
-                else:
-                    print(f"Warning: Buffer {component_name} not found in model")
-            except Exception as e:
-                print(f"Warning: Failed to broadcast buffer {component_name}: {e}")
-                continue
+            if hasattr(model, component_name):
+                tensor = getattr(model, component_name)
+                dist.broadcast(tensor, src=src_rank)
+            else:
+                raise AttributeError(f"Warning: Buffer {component_name} not found in model")
+
+        # wait for all processes to synchronize
+        dist.barrier()
 
         # Broadcast trainable components (low-rank parameters)
-        try:
-            if safe_name in model.svd_params:
-                svd_module = model.svd_params[safe_name]
+        if safe_name in model.svd_params:
+            svd_module = model.svd_params[safe_name]
 
-                # Broadcast U_low, S_low, V_low
-                dist.broadcast(svd_module.U_low, src=src_rank)
-                dist.broadcast(svd_module.S_low, src=src_rank)
-                dist.broadcast(svd_module.V_low, src=src_rank)
-            else:
-                print(f"Warning: SVD module {safe_name} not found in model.svd_params")
-        except Exception as e:
-            print(f"Warning: Failed to broadcast SVD module {safe_name}: {e}")
-            continue
+            # Broadcast U_low, S_low, V_low
+            dist.broadcast(svd_module.U_low, src=src_rank)
+            dist.broadcast(svd_module.S_low, src=src_rank)
+            dist.broadcast(svd_module.V_low, src=src_rank)
+        else:
+            raise AttributeError(f"Warning: SVD module {safe_name} not found in model.svd_params")
 
+    # wait for all processes to synchronize
+    dist.barrier()
 
 # Pre-defined model configurations for common architectures
 MODEL_CONFIGS = {
@@ -515,7 +521,9 @@ def get_model_config(model_name_or_class=None, custom_patterns=None):
     return get_model_patterns(model_name_or_class)
 
 
-def auto_generate_target_svd_config(model, model_name_or_class=None, custom_patterns=None, rank_ratio=0.5):
+def auto_generate_target_svd_config(
+    model, model_name_or_class=None, custom_patterns=None, rank_ratio=0.5
+) -> dict[str, int]:
     """
     Automatically selects which weight matrices to decompose using SVD and determines their top-k values.
 
@@ -559,10 +567,12 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
     """
 
     class ModelWithSVD(base_cls):
+        svd_config: dict[str, int]
+
         def __init__(
             self,
             config,
-            svd_config=None,
+            svd_config: dict[str, int] | None = None,
             initialize_svd=True,
             upcast_dtype: torch.dtype = torch.float32,
             output_dtype: torch.dtype | None = None,
@@ -587,10 +597,10 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
 
         @classmethod
         def from_pretrained(
-            cls, 
-            pretrained_model_name_or_path, 
-            *model_args, 
-            svd_config=None, 
+            cls,
+            pretrained_model_name_or_path,
+            *model_args,
+            svd_config: dict[str, int] | None = None,
             model_name_or_class=None,
             custom_patterns=None,
             rank_ratio=0.5,
@@ -735,7 +745,10 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
                 )
 
             # Step 5: Broadcast results from each rank
-            torch.distributed.barrier()
+            # It's possible for processes to be dysynchronized by this point due to the
+            # uneven split of work when processing model layers in parallel.
+            # So here we ensure that everything is synchronized before proceeding.
+            check_distributed_is_synchronized() 
             broadcast_svd_parameters(self, assignments, world_size)
             torch.distributed.barrier()
 
@@ -799,7 +812,7 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
             log_rank_0("\033[33m!!!! Initializing SVD Params!!!!\033[0m")
             for name, param in named_params:
                 # Apply SVD only to 2D matrices in the target config (e.g., q_proj, down_proj, etc.)
-                if len(param.shape) == 2 and name in self.svd_config and self.svd_config[name] > 0:
+                if is_svd_param(name, param, self.svd_config):
                     top_k = self.svd_config[name]
                     # log_rank_0(f"[SVD Init] Decomposing {name} with top_k={top_k}")
                     svd_dict = create_svd_dict(
@@ -846,9 +859,9 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
                     mod._parameters.pop(attr, None)
                     torch.cuda.empty_cache()
 
-                # Barrier for synchronization in distributed setting
-                if torch.distributed.is_initialized():
-                    torch.distributed.barrier()
+            # Barrier for synchronization in distributed setting
+            if dist.is_initialized():
+                torch.distributed.barrier()
 
         def _reconstruct_weight_by_safe_name(
             self,

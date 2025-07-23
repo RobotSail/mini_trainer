@@ -16,7 +16,11 @@ from svd_utils import SVDModel
 # This mirrors TorchTitan: checkpoint each block, then shard each block and the full model.
 def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     # Move model to GPU and disable HuggingFace cache
-    model = model.to(torch.device("cuda"))
+    if model.device.type != 'cuda':
+        # Move the model to the GPU if it's not already there
+        device = torch.device('cuda', dist.get_rank())
+        model.to(device)
+
     if hasattr(model, 'config'):
         try:
             model.config.use_cache = False
@@ -141,7 +145,7 @@ def setup_model(
         cfg = tmp.config
         del tmp
         torch.cuda.empty_cache()
-        model = svd_cls.from_pretrained(
+        model: SVDModel = svd_cls.from_pretrained(
             **base_model_args,
             config=cfg,
             initialize_svd=False,

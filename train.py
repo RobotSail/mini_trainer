@@ -77,7 +77,7 @@ def train(model, optimizer, lr_scheduler, data_loader, output_dir, min_samples_p
     model.train()
     metric_logger = AsyncStructuredLogger(output_dir + f"/training_metrics_{os.environ.get('RANK')}.jsonl")
     world_size = int(os.environ["WORLD_SIZE"])
-    is_main_process = os.environ.get("RANK") == "0"
+    is_main_process = dist.get_rank() == 0
 
     batch_totals = BatchMetrics()
     step = 0
@@ -186,7 +186,7 @@ def main(
     output_path.mkdir(parents=True, exist_ok=True)
     
     # Log parameters only on rank 0
-    rank = int(os.environ.get("RANK", 0))
+    rank = dist.get_rank()
     if rank == 0:
         params = {
             "model_name_or_path": model_name_or_path,
