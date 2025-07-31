@@ -11,17 +11,16 @@ from utils import log_rank_0, patch_target_module
 from svd_utils import SVDModel
 
 
-
 # New simple HF-only activation-checkpointing + FSDP2 wrapper
 # This mirrors TorchTitan: checkpoint each block, then shard each block and the full model.
 def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     # Move model to GPU and disable HuggingFace cache
-    if model.device.type != 'cuda':
+    if model.device.type != "cuda":
         # Move the model to the GPU if it's not already there
-        device = torch.device('cuda', dist.get_rank())
+        device = torch.device("cuda", dist.get_rank())
         model.to(device)
 
-    if hasattr(model, 'config'):
+    if hasattr(model, "config"):
         try:
             model.config.use_cache = False
         except Exception as e:
@@ -44,18 +43,22 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
 
     # 4) Mixed-precision policy (bf16)
     mp_policy = MixedPrecisionPolicy(
-        param_dtype=torch.bfloat16, 
+        param_dtype=torch.bfloat16,
         reduce_dtype=torch.bfloat16,
-        output_dtype=torch.bfloat16)
+        output_dtype=torch.bfloat16,
+    )
 
     # 4) FSDP2 wrap each block
     for idx, block in enumerate(layers):
         reshard = idx < len(layers) - 1
-        fully_shard(block, mesh=mesh, mp_policy=mp_policy, reshard_after_forward=reshard)
+        fully_shard(
+            block, mesh=mesh, mp_policy=mp_policy, reshard_after_forward=reshard
+        )
 
     # 5) FSDP2 wrap full model
     fully_shard(model, mesh=mesh, mp_policy=mp_policy, reshard_after_forward=True)
     return model
+
 
 def align_model_and_tokenizer(model, tokenizer):
     """
@@ -71,17 +74,20 @@ def align_model_and_tokenizer(model, tokenizer):
 
     # Fix any discrepancy between model and tokenizer
     special_tokens = {
-        'pad': ('pad_token_id', 'Fixing model pad token id'),
-        'bos': ('bos_token_id', 'Fixing model bos token id'),
-        'eos': ('eos_token_id', 'Fixing model eos token id')
+        "pad": ("pad_token_id", "Fixing model pad token id"),
+        "bos": ("bos_token_id", "Fixing model bos token id"),
+        "eos": ("eos_token_id", "Fixing model eos token id"),
     }
 
     for token_type, (token_attr, message) in special_tokens.items():
         model_token = getattr(model.config, token_attr)
         tokenizer_token = getattr(tokenizer, token_attr)
-        
-        if (model_token is not None and tokenizer_token is not None 
-            and model_token != tokenizer_token):
+
+        if (
+            model_token is not None
+            and tokenizer_token is not None
+            and model_token != tokenizer_token
+        ):
             log_rank_0(
                 "\033[38;5;226m"
                 f"WARNING: There is a mismatch between {token_type} token id of "
@@ -103,7 +109,7 @@ def setup_model(
     **kwargs,
 ) -> torch.nn.Module | SVDModel:
     base_model_args = {
-        "pretrained_model_name_or_path": kwargs['model_name_or_path'],
+        "pretrained_model_name_or_path": kwargs["model_name_or_path"],
         "torch_dtype": torch.bfloat16,
     }
     base_model_args["attn_implementation"] = "flash_attention_2"
@@ -123,16 +129,17 @@ def setup_model(
         from liger_kernel.transformers import AutoLigerKernelForCausalLM as ModelClass
     else:
         from none_reduction_losses import hf_fixed_cross_entropy_none_reduction
+
         patch_target_module(
             "transformers.loss.loss_utils.fixed_cross_entropy",
             hf_fixed_cross_entropy_none_reduction,
         )
         ModelClass = AutoModelForCausalLM
-    
+
     def load_standard_model():
         model = ModelClass.from_pretrained(**base_model_args)
         return align_model_and_tokenizer(model, tokenizer)
-    
+
     # Load a subclassed model that supports orthogonal subspace learning using SVD decomposition
     def load_svd_model():
         # Import utility to decompose weights and inject projected low-rank updates
@@ -150,7 +157,7 @@ def setup_model(
             config=cfg,
             initialize_svd=False,
         )
-        
+
         # we need to set these as attributes because HF Transformers
         # doesn't like torch.dtype to be passed in through kwargs (aside from the `torch_dtype` kwarg)
         model.upcast_dtype = upcast_dtype
@@ -184,14 +191,14 @@ def setup_model(
         log_rank_0("✅ Distributed SVD computation complete")
         torch.cuda.empty_cache()
         return model
-    
+
     # Choose whether to apply orthogonal subspace learning (OSL) based on `orthogonal_subspace_learning` flag
     # OSL enables continual fine-tuning by constraining updates to low-rank directions orthogonal to critical knowledge that is to be preserved
     model = load_svd_model() if orthogonal_subspace_learning else load_standard_model()
 
     if model.__class__.__name__ not in [
         "MistralForCausalLM",
-        "GPTDolomiteForCausalLM", 
+        "GPTDolomiteForCausalLM",
         "LlamaForCausalLM",
         "Starcoder2ForCausalLM",
         "GemmaForCausalLM",
@@ -210,27 +217,28 @@ def setup_model(
     # torch.compile(model)
     return model
 
+
 def setup_training_components(model, **kwargs):
     from transformers import get_scheduler
-    
+
     # Using FSDP2 wrapper
     log_rank_0("Using FSDP2 wrapper")
     model = wrap_fsdp2(model)
-    
+
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=kwargs['learning_rate'],
+        lr=kwargs["learning_rate"],
         betas=(0.9, 0.95),
         weight_decay=0.0,
     )
     from svd_utils import optim_wrapper
+
     optimizer = optim_wrapper(optimizer, model)
     lr_scheduler = get_scheduler(
-        name=kwargs['lr_scheduler'],
+        name=kwargs["lr_scheduler"],
         optimizer=optimizer,
-        num_warmup_steps=kwargs['num_warmup_steps'],
+        num_warmup_steps=kwargs["num_warmup_steps"],
     )
     lr_scheduler.split_batches = True
-    lr_scheduler.step() #the scheduler starts at 0 and there's no learning.
+    lr_scheduler.step()  # the scheduler starts at 0 and there's no learning.
     return model, optimizer, lr_scheduler
-
