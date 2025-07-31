@@ -13,17 +13,16 @@ from mini_trainer.utils import log_rank_0, patch_target_module
 from mini_trainer.osft_utils import OSFTModel
 
 
-
 # New simple HF-only activation-checkpointing + FSDP2 wrapper
 # This mirrors TorchTitan: checkpoint each block, then shard each block and the full model.
 def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     # Move model to GPU and disable HuggingFace cache
-    if model.device.type != 'cuda':
+    if model.device.type != "cuda":
         # Move the model to the GPU if it's not already there
-        device = torch.device('cuda', dist.get_rank())
+        device = torch.device("cuda", dist.get_rank())
         model.to(device)
 
-    if hasattr(model, 'config'):
+    if hasattr(model, "config"):
         try:
             model.config.use_cache = False
         except Exception as e:
@@ -53,11 +52,14 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     # 4) FSDP2 wrap each block
     for idx, block in enumerate(layers):
         reshard = idx < len(layers) - 1
-        fully_shard(block, mesh=mesh, mp_policy=mp_policy, reshard_after_forward=reshard)
+        fully_shard(
+            block, mesh=mesh, mp_policy=mp_policy, reshard_after_forward=reshard
+        )
 
     # 5) FSDP2 wrap full model
     fully_shard(model, mesh=mesh, mp_policy=mp_policy, reshard_after_forward=True)
     return model
+
 
 def align_model_and_tokenizer(model, tokenizer):
     """
@@ -73,17 +75,20 @@ def align_model_and_tokenizer(model, tokenizer):
 
     # Fix any discrepancy between model and tokenizer
     special_tokens = {
-        'pad': ('pad_token_id', 'Fixing model pad token id'),
-        'bos': ('bos_token_id', 'Fixing model bos token id'),
-        'eos': ('eos_token_id', 'Fixing model eos token id')
+        "pad": ("pad_token_id", "Fixing model pad token id"),
+        "bos": ("bos_token_id", "Fixing model bos token id"),
+        "eos": ("eos_token_id", "Fixing model eos token id"),
     }
 
     for token_type, (token_attr, message) in special_tokens.items():
         model_token = getattr(model.config, token_attr)
         tokenizer_token = getattr(tokenizer, token_attr)
-        
-        if (model_token is not None and tokenizer_token is not None 
-            and model_token != tokenizer_token):
+
+        if (
+            model_token is not None
+            and tokenizer_token is not None
+            and model_token != tokenizer_token
+        ):
             log_rank_0(
                 "\033[38;5;226m"
                 f"WARNING: There is a mismatch between {token_type} token id of "
@@ -140,11 +145,11 @@ def setup_model(
             hf_fixed_cross_entropy_none_reduction,
         )
         ModelClass = AutoModelForCausalLM
-    
+
     def load_standard_model():
         model = ModelClass.from_pretrained(**base_model_args)
         return align_model_and_tokenizer(model, tokenizer)
-    
+
     # Load a subclassed model that supports orthogonal subspace learning using SVD decomposition
     def load_osft_model():
         # Import utility to decompose weights and inject projected low-rank updates
@@ -170,7 +175,7 @@ def setup_model(
             initialize_osft=False,
             **osft_kwargs,
         )
-        
+
         # we need to set these as attributes because HF Transformers
         # doesn't like torch.dtype to be passed in through kwargs (aside from the `torch_dtype` kwarg)
         model.upcast_dtype = upcast_dtype
@@ -211,7 +216,7 @@ def setup_model(
 
     if model.__class__.__name__ not in [
         "MistralForCausalLM",
-        "GPTDolomiteForCausalLM", 
+        "GPTDolomiteForCausalLM",
         "LlamaForCausalLM",
         "Starcoder2ForCausalLM",
         "GemmaForCausalLM",
@@ -253,11 +258,11 @@ def setup_training_components(
         Tuple of (wrapped_model, optimizer, lr_scheduler)
     """
     from transformers import get_scheduler
-    
+
     # Using FSDP2 wrapper
     log_rank_0("Using FSDP2 wrapper")
     model = wrap_fsdp2(model)
-    
+
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=learning_rate,
@@ -278,6 +283,5 @@ def setup_training_components(
         scheduler_specific_kwargs=scheduler_kwargs,
     )
     lr_scheduler.split_batches = True
-    lr_scheduler.step() #the scheduler starts at 0 and there's no learning.
+    lr_scheduler.step()  # the scheduler starts at 0 and there's no learning.
     return model, optimizer, lr_scheduler
-
