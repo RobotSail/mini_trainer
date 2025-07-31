@@ -1,0 +1,12 @@
+numpy<2
+datasets
+transformers
+typer
+liger-kernel-nightly
+aiofiles
+torch<2.7.0
+rich
+flash-attn
+pytest
+Deprecated
+numba
