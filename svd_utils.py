@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from utils import log_rank_0, check_distributed_is_synchronized
 
+
 class SVDDictBase(t.TypedDict):
     U_high: torch.Tensor
     S_high: torch.Tensor
@@ -109,6 +110,7 @@ def cast_to_svd_model(model: torch.nn.Module) -> SVDModel:
         raise TypeError(f"Model {type(model)} does not implement SVD interface")
     return model  # type: ignore
 
+
 def create_svd_dict(
     weight: torch.Tensor,
     top_k: int,
@@ -172,7 +174,7 @@ def create_svd_dict(
         "U_low": nn.Parameter(U[:, k:].contiguous().detach().to(device=device_local)),
         "S_low": nn.Parameter(S[k:].contiguous().detach().to(device=device_local)),
         "V_low": nn.Parameter(Vt[k:, :].contiguous().detach().to(device=device_local)),
-        "rank_high": k, # Store for later use in orthogonal projection
+        "rank_high": k,  # Store for later use in orthogonal projection
     }
     return svd
 
@@ -349,7 +351,9 @@ def broadcast_svd_parameters(model, assignments, world_size):
                 tensor = getattr(model, component_name)
                 dist.broadcast(tensor, src=src_rank)
             else:
-                raise AttributeError(f"Warning: Buffer {component_name} not found in model")
+                raise AttributeError(
+                    f"Warning: Buffer {component_name} not found in model"
+                )
 
         # wait for all processes to synchronize
         dist.barrier()
@@ -363,17 +367,20 @@ def broadcast_svd_parameters(model, assignments, world_size):
             dist.broadcast(svd_module.S_low, src=src_rank)
             dist.broadcast(svd_module.V_low, src=src_rank)
         else:
-            raise AttributeError(f"Warning: SVD module {safe_name} not found in model.svd_params")
+            raise AttributeError(
+                f"Warning: SVD module {safe_name} not found in model.svd_params"
+            )
 
     # wait for all processes to synchronize
     dist.barrier()
+
 
 # Pre-defined model configurations for common architectures
 MODEL_CONFIGS = {
     "llama": {
         "patterns": [
             "self_attn.q_proj",
-            "self_attn.k_proj", 
+            "self_attn.k_proj",
             "self_attn.v_proj",
             "self_attn.o_proj",
             "mlp.gate_proj",
@@ -385,7 +392,7 @@ MODEL_CONFIGS = {
         "patterns": [
             "attn.q_proj",
             "attn.k_proj",
-            "attn.v_proj", 
+            "attn.v_proj",
             "attn.out_proj",
             "mlp.fc_in",
             "mlp.fc_out",
@@ -396,7 +403,7 @@ MODEL_CONFIGS = {
             "attn.attention.q_proj",
             "attn.attention.k_proj",
             "attn.attention.v_proj",
-            "attn.attention.out_proj", 
+            "attn.attention.out_proj",
             "mlp.c_fc",
             "mlp.c_proj",
         ]
@@ -415,7 +422,7 @@ MODEL_CONFIGS = {
         "patterns": [
             "self_attn.q_proj",
             "self_attn.k_proj",
-            "self_attn.v_proj", 
+            "self_attn.v_proj",
             "self_attn.o_proj",
             "mlp.gate_proj",
             "mlp.down_proj",
@@ -438,7 +445,7 @@ MODEL_CONFIGS = {
             "self_attn.o_proj",
             "self_attn.qkv_proj",
             "mlp.gate_up_proj",
-            "mlp.down_proj"
+            "mlp.down_proj",
         ]
     },
     "default": {
@@ -446,38 +453,39 @@ MODEL_CONFIGS = {
             "self_attn.q_proj",
             "self_attn.k_proj",
             "self_attn.v_proj",
-            "self_attn.o_proj", 
+            "self_attn.o_proj",
             "mlp.gate_proj",
             "mlp.down_proj",
             "mlp.up_proj",
         ]
-    }
+    },
 }
 
 # Define model name mappings at module level (add this near the top with other constants)
 MODEL_NAME_MAPPINGS = {
     "llama": "llama",
-    "gpt-j": "gpt-j", 
+    "gpt-j": "gpt-j",
     "gptj": "gpt-j",  # Handle both "gpt-j" and "gptj" variants
     "gpt-neo": "gpt-neo",
     "gptneo": "gpt-neo",  # Handle both "gpt-neo" and "gptneo" variants
     "opt": "opt",
     "qwen": "qwen",
     "gemma": "gemma",
-    "phi-4-mini-instruct": "phi-4-mini-instruct"
+    "phi-4-mini-instruct": "phi-4-mini-instruct",
     # Easy to add more mappings
     # "mistral": "mistral",
-    # "phi": "phi", 
+    # "phi": "phi",
     # "gemma": "gemma",
 }
+
 
 def _get_model_patterns_from_name(name: str) -> list:
     """
     Get model patterns from a model name string.
-    
+
     Args:
         name: Model name string (already lowercased)
-        
+
     Returns:
         List of patterns for the model
     """
@@ -485,9 +493,10 @@ def _get_model_patterns_from_name(name: str) -> list:
     for identifier, config_key in MODEL_NAME_MAPPINGS.items():
         if identifier in name:
             return MODEL_CONFIGS[config_key]["patterns"]
-    
+
     # Default fallback
     return MODEL_CONFIGS["default"]["patterns"]
+
 
 def get_model_patterns(model_name_or_class):
     """Get patterns for a model from name string or class object."""
@@ -495,7 +504,7 @@ def get_model_patterns(model_name_or_class):
     if isinstance(model_name_or_class, str):
         model_name = model_name_or_class.lower()
         return _get_model_patterns_from_name(model_name)
-    
+
     # Handle model class objects
     class_name = model_name_or_class.__name__.lower()
     return _get_model_patterns_from_name(class_name)
@@ -504,20 +513,20 @@ def get_model_patterns(model_name_or_class):
 def get_model_config(model_name_or_class=None, custom_patterns=None):
     """
     Get SVD target patterns for a model.
-    
+
     Args:
         model_name_or_class: Model name/class to get predefined patterns for, or None
         custom_patterns: Custom list of patterns to use instead of predefined ones
-        
+
     Returns:
         List of patterns to match against parameter names
     """
     if custom_patterns is not None:
         return custom_patterns
-        
+
     if model_name_or_class is None:
         return MODEL_CONFIGS["default"]["patterns"]
-    
+
     return get_model_patterns(model_name_or_class)
 
 
@@ -532,12 +541,12 @@ def auto_generate_target_svd_config(
         model_name_or_class: Model name/class to get predefined patterns for, or None for auto-detection
         custom_patterns: Custom list of patterns to use instead of predefined ones
         rank_ratio: Ratio of the smaller dimension to use for top-k rank (default: 0.5)
-        
+
     Returns:
         Dictionary mapping parameter names to their top-k values
     """
     target_patterns = get_model_config(model_name_or_class, custom_patterns)
-    
+
     config = {}
     for name, param in model.named_parameters():
         if any(pat in name for pat in target_patterns) and len(param.shape) == 2:
@@ -604,21 +613,22 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
             model_name_or_class=None,
             custom_patterns=None,
             rank_ratio=0.5,
-            **kwargs
+            **kwargs,
         ) -> type[SVDModel]:
             """Load pretrained weights and automatically initialize SVD parameters."""
+            assert rank_ratio == 0.4
             # Do not initialize SVD during the initial construction so we load
             # the original dense weights first
             # First load the base model normally without any SVD kwargs
             init_cfg = svd_config if svd_config is not None else {}
             log_rank_0("\033[33m!!!! Calling from_pretrained !!!!\033[0m")
-            initialize_svd = kwargs.pop('initialize_svd', False)
+            initialize_svd = kwargs.pop("initialize_svd", False)
             model = super(ModelWithSVD, cls).from_pretrained(
                 pretrained_model_name_or_path,
                 *model_args,
                 svd_config=init_cfg,
                 # we also have initialize_svd as an optin in __init__, so disable it here
-                initialize_svd=False,  
+                initialize_svd=False,
                 **kwargs,
             )
 
@@ -629,10 +639,10 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
                 if model_name_or_class is None:
                     model_name_or_class = pretrained_model_name_or_path
                 svd_config = auto_generate_target_svd_config(
-                    model, 
+                    model,
                     model_name_or_class=model_name_or_class,
                     custom_patterns=custom_patterns,
-                    rank_ratio=rank_ratio
+                    rank_ratio=rank_ratio,
                 )
 
             model.svd_config = svd_config
@@ -748,7 +758,7 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
             # It's possible for processes to be dysynchronized by this point due to the
             # uneven split of work when processing model layers in parallel.
             # So here we ensure that everything is synchronized before proceeding.
-            check_distributed_is_synchronized() 
+            check_distributed_is_synchronized()
             broadcast_svd_parameters(self, assignments, world_size)
             torch.distributed.barrier()
 
@@ -851,6 +861,7 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
                             if W.dtype != x.dtype:
                                 W = W.to(x.dtype)
                             return F.linear(x, W, bias)
+
                         return forward
 
                     mod.forward = make_forward(safe_name, bias)
@@ -902,13 +913,13 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
 
         def get_svd_dict(self, safe_name: str) -> SVDDecompositionDict:
             if safe_name not in self.svd_params:
-                raise ValueError(f'{safe_name} doesnt exist in the SVD parameters')
+                raise ValueError(f"{safe_name} doesnt exist in the SVD parameters")
 
             module_svd = self.svd_params[safe_name]
 
             # we infer rank_high since it's just the number of high singular values
-            S_high = getattr(self, f"{safe_name}_S_high") 
-            rank_high = S_high.shape[0]  
+            S_high = getattr(self, f"{safe_name}_S_high")
+            rank_high = S_high.shape[0]
 
             svd_dict: SVDDecompositionDict = {
                 "U_high": getattr(self, f"{safe_name}_U_high"),
@@ -917,7 +928,7 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
                 "U_low": module_svd.U_low,
                 "S_low": module_svd.S_low,
                 "V_low": module_svd.V_low,
-                "rank_high": rank_high
+                "rank_high": rank_high,
             }
             return svd_dict
 
@@ -968,6 +979,7 @@ def optim_wrapper(optimizer, model):
         return optimizer
 
     import types
+
     orig_step = optimizer.step
 
     def step(self, *args, **kwargs):
@@ -981,30 +993,29 @@ def optim_wrapper(optimizer, model):
 def create_svd_config(model, model_type=None, custom_patterns=None, rank_ratio=0.5):
     """
     Simple API to create SVD configuration for any model.
-    
+
     Args:
         model: The model to create config for
         model_type: Model type ("llama", "gpt-j", "gpt-neo", "opt", "qwen") or None for auto-detection
         custom_patterns: Custom list of parameter name patterns to target
         rank_ratio: Ratio of the smaller dimension to use for top-k rank (default: 0.5)
-    
+
     Returns:
         Dictionary mapping parameter names to their top-k values
-        
+
     Example:
         # Use predefined patterns for Llama
         config = create_svd_config(model, model_type="llama")
-        
+
         # Use custom patterns for any model
         config = create_svd_config(model, custom_patterns=["attn.q_proj", "attn.k_proj"])
-        
+
         # Auto-detect model type
         config = create_svd_config(model)
     """
     return auto_generate_target_svd_config(
-        model, 
+        model,
         model_name_or_class=model_type,
         custom_patterns=custom_patterns,
-        rank_ratio=rank_ratio
+        rank_ratio=rank_ratio,
     )
-
