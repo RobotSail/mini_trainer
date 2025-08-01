@@ -40,6 +40,7 @@ BATCH_SIZE=128
 SEED=67
 WARMUP_STEPS=0
 MAX_TOKENS_PER_GPU='65536'
+RANK_RATIO='0.5'
 
 
 # data processing hyperparams
@@ -101,7 +102,7 @@ fi
 # next we test againt the original orthogonal subspace implementation
 CUDA_LAUNCH_BLOCKING=1 torchrun \
     --nnodes=1 \
-    --nproc-per-node=8 /home/vpcuser/osilkin/mini_trainer_og/train.py \
+    --nproc-per-node=8 /home/vpcuser/osilkin/mini_trainer_frozen/train.py \
     --data-path "${STD_DATA_OUTPUT_PATH}/data.jsonl" \
     --output-dir "${STANDARD_OUTPUT_DIR}" \
     --model-name-or-path "${BASE_MODEL}" \
@@ -112,6 +113,7 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --learning-rate "${LEARNING_RATE}" \
     --seed="${SEED}" \
     --orthogonal-subspace-learning \
-    --max-steps="${STANDARD_MAX_STEPS}"
+    --max-steps="${STANDARD_MAX_STEPS}" \
+    --osft-rank-ratio="${RANK_RATIO}"
 
 

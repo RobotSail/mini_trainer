@@ -227,6 +227,9 @@ def main(
     max_steps: int | None = Option(
         None, help="Max number of steps we should train for"
     ),
+    osft_rank_ratio: float = Option(
+        0.0, help="The % of high rank singular values we should train."
+    ),
 ):
     init_distributed_environment()
     output_path = Path(output_dir)
@@ -268,6 +271,7 @@ def main(
         use_liger_kernels=use_liger_kernels,
         orthogonal_subspace_learning=orthogonal_subspace_learning,
         rank=rank,
+        osft_rank_ratio=osft_rank_ratio,
     )
     model, optimizer, lr_scheduler = setup_training_components(
         model,

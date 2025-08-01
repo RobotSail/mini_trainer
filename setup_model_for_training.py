@@ -106,6 +106,7 @@ def setup_model(
     rank: int = 0,
     upcast_dtype: torch.dtype = torch.float32,
     output_dtype: torch.dtype | None = None,
+    osft_rank_ratio: float = 0.5,  # arbitrary default
     **kwargs,
 ) -> torch.nn.Module | SVDModel:
     base_model_args = {
@@ -156,6 +157,7 @@ def setup_model(
             **base_model_args,
             config=cfg,
             initialize_svd=False,
+            rank_ratio=osft_rank_ratio,
         )
 
         # we need to set these as attributes because HF Transformers
