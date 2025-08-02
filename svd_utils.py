@@ -616,7 +616,6 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
             **kwargs,
         ) -> type[SVDModel]:
             """Load pretrained weights and automatically initialize SVD parameters."""
-            assert rank_ratio == 0.4
             # Do not initialize SVD during the initial construction so we load
             # the original dense weights first
             # First load the base model normally without any SVD kwargs
