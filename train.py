@@ -11,7 +11,7 @@ import torch
 import torch.distributed as dist
 
 from batch_metrics import BatchMetrics
-from sampler import get_data_loader
+from sampler import get_data_loader, InfiniteSampler
 from setup_model_for_training import setup_model, setup_training_components
 from utils import init_distributed_environment, log_rank_0, setup_logger
 
@@ -36,6 +36,7 @@ def save_model(fsdp_model, samples_seen, output_dir, model_name_or_path):
     from safetensors.torch import save_file
 
     # Only on rank 0
+    samples_seen = int(samples_seen)
     log_rank_0(f"Saving model at {samples_seen} samples")
     start = time.time()
     rank = torch.distributed.get_rank()
@@ -90,12 +91,14 @@ def save_model(fsdp_model, samples_seen, output_dir, model_name_or_path):
 def train(
     model,
     optimizer,
-    lr_scheduler,
-    data_loader,
+    lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+    data_loader: torch.utils.data.DataLoader,
     output_dir,
-    min_samples_per_checkpoint,
+    min_samples_per_checkpoint: int | None,
     model_name_or_path,
     max_steps: int,
+    save_last_checkpoint: bool,
+    save_on_epoch: bool
 ):
     model.train()
     metric_logger = AsyncStructuredLogger(
@@ -110,8 +113,27 @@ def train(
     last_saved_samples = 0
     device = next(model.parameters()).device
 
+    sampler: InfiniteSampler = data_loader.sampler
     data_loader = iter(data_loader)
+    last_epoch = 0
     for batch in data_loader:
+        # first we want to double-check that if the epoch changes, all processes agree collectively
+        epoch_data = torch.tensor([last_epoch, sampler.epoch]).to(device, dtype=torch.int32)
+        dist.broadcast(epoch_data, src=0)
+        _other_last_epoch, _other_current_epoch = epoch_data[0], epoch_data[1]
+        if last_epoch != _other_last_epoch or sampler.epoch != _other_current_epoch:
+            raise RuntimeError("nodes are misaligned on the sampler's epoch information")
+
+        # save at the beginning of a new epoch, since the information is currently
+        # stored inside of the sampler
+        # Then we can do one final checkpoint save at the very end, since this won't catch the **very** last
+        # checkpoint
+        if last_epoch < sampler.epoch and save_on_epoch:
+            save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
+ 
+        # then we finally update our local epoch data here, so that it always has the effect we want
+        last_epoch = sampler.epoch
+        
         batch_start_time = time.time()
         batch_totals.reset_batch()
         torch.cuda.reset_peak_memory_stats()
@@ -152,6 +174,7 @@ def train(
         if is_main_process:
             batch_time = time.time() - batch_start_time
             batch_metrics = {
+                "current_epoch": sampler.epoch,
                 "step": step,
                 "lr": lr_scheduler.get_last_lr()[0],
                 "grad_norm": grad_norm.item(),
@@ -173,15 +196,24 @@ def train(
             }
             metric_logger.log_sync(batch_metrics)
 
+        # frequency-based checkpointing
         torch.distributed.barrier()
-        if total_samples_accumulated - last_saved_samples >= min_samples_per_checkpoint:
+        if min_samples_per_checkpoint is not None and (total_samples_accumulated - last_saved_samples >= min_samples_per_checkpoint):
             save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
             last_saved_samples = total_samples_accumulated
+        torch.cuda.synchronize()
+        torch.distributed.barrier()
+        
 
         # stop training
-        if step >= max_steps:
+        if max_steps is not None and step >= max_steps:
             log_rank_0(f"\033[32mreached {max_steps=}, ending training\033[0m")
             break
+
+    # save one last checkpoint before quitting the training loop, if we are saving on epoch then by default we should save one last time here
+    if (save_on_epoch and last_epoch < sampler.epoch) or save_last_checkpoint:
+        save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
+    dist.barrier()
 
 
 class LogLevelEnum(str, Enum):
@@ -220,17 +252,28 @@ def main(
     logging_level: LogLevelEnum = Option(
         LogLevelEnum.INFO, help="Logging level", case_sensitive=False
     ),
-    min_samples_per_checkpoint: int = Option(
-        ...,
-        help="Minimum number of samples processed before saving a checkpoint (required)",
-    ),
+    min_samples_per_checkpoint: int | None = Option(None, help="Minimum number of samples processed before saving a checkpoint (required)"),
+    save_on_epoch: bool = Option(False, help="Whether or not the script should save a checkpoint at the end of each epoch."),
     max_steps: int | None = Option(
         None, help="Max number of steps we should train for"
+    ),
+    max_epochs: int | None = Option(
+        None, help="Max number of epochs we should train for"
+    ),
+    save_last_checkpoint: bool = Option(
+        True,
+        help="When this is enabled, we additionally save a checkpoint at the end of the training loop. This is helpful when you need precision over the exact amount of data that your model has seen.",
     ),
     osft_rank_ratio: float = Option(
         0.0, help="The % of high rank singular values we should train."
     ),
 ):
+    # ensure we don't have to deal with this case 😅
+    if max_steps and max_epochs:
+        raise ValueError(
+            "`max_steps` and `max_epochs` cannot be specified at the same time."
+        )
+
     init_distributed_environment()
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -284,6 +327,7 @@ def main(
         batch_size=batch_size,
         max_tokens_per_gpu=max_tokens_per_gpu,
         seed=seed,
+        max_epochs=max_epochs,
     )
 
     train(
@@ -295,6 +339,8 @@ def main(
         min_samples_per_checkpoint,
         model_name_or_path,
         max_steps=max_steps,
+        save_last_checkpoint=save_last_checkpoint,
+        save_on_epoch=save_on_epoch
     )
 
 

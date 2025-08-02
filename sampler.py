@@ -95,8 +95,41 @@ def batch_lengths_to_minibatches(batch_lengths: list[int], max_tokens_per_rank: 
     return [m[rank] for m in minibatches_indices]
 
 class JsonlDataset(Dataset):
-    def __init__(self, path: str = "/new_data/aldo/v1_reasoning/math_simplerl_qwen_data_token_ids.jsonl"):
+    def __init__(
+        self,
+        path: str = "/new_data/aldo/v1_reasoning/math_simplerl_qwen_data_token_ids.jsonl",
+        max_seq_len: int = None,
+    ):
         dataset = load_dataset("json", data_files=path, split="train")
+        # Ensure required fields are present in the dataset
+        assert "input_ids" in dataset.features, "Dataset must contain 'input_ids' field"
+        assert "labels" in dataset.features, "Dataset must contain 'labels' field"
+
+        # Set the length there if it's not already there
+        if "len" not in dataset.features:
+            dataset = dataset.map(lambda s: {"len": len(s["input_ids"])})
+
+        # Set the number of loss counted tokens per-sample:
+        if "num_loss_counted_tokens" not in dataset.features:
+            dataset = dataset.map(
+                lambda s: {
+                    "num_loss_counted_tokens": sum(
+                        1 for tok in s["labels"] if tok != -100
+                    )
+                }
+            )
+
+        # Filter out samples that are too long if max_seq_len is specified
+        if max_seq_len is not None:
+            original_size = len(dataset)
+            dataset = dataset.filter(lambda x: x["len"] <= max_seq_len)
+            filtered_size = len(dataset)
+            removed_count = original_size - filtered_size
+            if removed_count > 0:
+                print(
+                    f"\033[33mFiltered out {removed_count} samples (out of {original_size}) that exceed max_seq_len={max_seq_len}\033[0m"
+                )
+
         self.dataset = dataset
 
     def __len__(self):
@@ -133,20 +166,34 @@ class InfiniteSampler(Sampler):
         len_data: The size of the dataset.
         seed: Initial random seed for shuffling (incremented each cycle).
     """
-    def __init__(self, len_data, seed: int = 37):
+
+    def __init__(self, len_data, seed: int = 37, max_epochs: int | None = None):
         self.len_data = len_data
         self.seed = seed
+        self.max_epochs = max_epochs
+        self._epoch = None 
+
+    @property
+    def epoch(self) -> int:
+        return self._epoch if self._epoch is not None else 0
 
     def __iter__(self):
         """Yields an infinite stream of shuffled dataset indices."""
-        epoch = 0
+        self._epoch = 0
         while True:
             g = torch.Generator()
-            g.manual_seed(self.seed + epoch)
+            g.manual_seed(self.seed + self.epoch)
             indices = torch.randperm(self.len_data, generator=g).tolist()
             yield from indices
-            epoch += 1
-    
+            self._epoch += 1
+            if self.max_epochs and self.epoch >= self.max_epochs:
+                # exit the sampler early
+                break
+        
+        # unlock the sampler
+        self._epoch = 0
+
+
     def __len__(self):
         return self.len_data
     
@@ -277,21 +324,29 @@ class MaxTokensPerRankCollator:
     
 def get_data_loader(**kwargs):
     # from ipdb import set_trace; set_trace()
-    dataset = JsonlDataset(kwargs['data_path'])
-    batch_size = kwargs['batch_size']
-    max_tokens_per_rank = kwargs['max_tokens_per_gpu']
-    seed = kwargs['seed']
-    rank = kwargs.get('rank', None)
-    world_size = kwargs.get('world_size', None)
-    dummy_sample = kwargs.get('dummy_sample', None)
-    return DataLoader(dataset, 
-                      batch_size, 
-                      sampler=InfiniteSampler(len(dataset), seed=seed),
-                      collate_fn=MaxTokensPerRankCollator(max_tokens_per_rank, 
-                                                          rank=rank, 
-                                                          world_size=world_size, 
-                                                          dummy_sample=dummy_sample),
-                      num_workers=4)
+    dataset = JsonlDataset(
+        kwargs["data_path"], max_seq_len=kwargs["max_tokens_per_gpu"]
+    )
+    batch_size = kwargs["batch_size"]
+    max_tokens_per_rank = kwargs["max_tokens_per_gpu"]
+    seed = kwargs["seed"]
+    rank = kwargs.get("rank", None)
+    world_size = kwargs.get("world_size", None)
+    dummy_sample = kwargs.get("dummy_sample", None)
+    max_epochs = kwargs.get("max_epochs")
+    return DataLoader(
+        dataset,
+        batch_size,
+        sampler=InfiniteSampler(len(dataset), seed=seed, max_epochs=max_epochs),
+        collate_fn=MaxTokensPerRankCollator(
+            max_tokens_per_rank,
+            rank=rank,
+            world_size=world_size,
+            dummy_sample=dummy_sample,
+        ),
+        num_workers=4,
+    )
+
 
 if __name__ == "__main__":
     data_loader = get_data_loader(data_path="test.jsonl",
