@@ -4,31 +4,21 @@
 set -eo pipefail
 
 # ================================================================================
-# PARSE INPUT ARGUMENTS TO THE SCRIPT
+# SET VARIABLES
 # ================================================================================
-# Parse arguments for --skip-process or -s
-for arg in "$@"; do
-    if [[ "$arg" == "--skip-process" || "$arg" == "-s" ]]; then
-        SKIP_PROCESS=1
-        # Remove the skip flag from the arguments so it doesn't get passed to python scripts
-        set -- "${@/"$arg"}"
-    fi
-done
-
-# variables 
 # BASE_MODEL='qwen/Qwen2.5-7B-Instruct'
 BASE_MODEL='meta-llama/Llama-3.1-8B-Instruct'
 
 # datasets 
-FULL_DATASET='/mnt/vde/experiment-data/os-cl-scenario-1-experiment-0/bmo/train_p07.jsonl'
-DATASET_CHUNK_1='/mnt/vde/experiment-data/os-cl-scenario-1-experiment-0/bmo/3-chunks/chunk_0.jsonl'
-DATASET_CHUNK_2='/mnt/vde/experiment-data/os-cl-scenario-1-experiment-0/bmo/3-chunks/chunk_1.jsonl'
-DATASET_CHUNK_3='/mnt/vde/experiment-data/os-cl-scenario-1-experiment-0/bmo/3-chunks/chunk_2.jsonl'
+FULL_DATASET='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/bmo/train_p07.jsonl'
+DATASET_CHUNK_1='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/bmo/3-chunks/chunk_0.jsonl'
+DATASET_CHUNK_2='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/bmo/3-chunks/chunk_1.jsonl'
+DATASET_CHUNK_3='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/bmo/3-chunks/chunk_2.jsonl'
 
 # outputs 
-EXPERIMENT_DIR="/mnt/vde/experiments/os-cl-scenario-1-experiment-0/${BASE_MODEL}"
-CHUNKED_OUTPUT_DIR="${EXPERIMENT_DIR}/chunked-dataset-0"
-STANDARD_OUTPUT_DIR="${EXPERIMENT_DIR}/full-dataset-0"
+EXPERIMENT_DIR="/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/${BASE_MODEL}"
+CHUNKED_OUTPUT_DIR="${EXPERIMENT_DIR}/output/chunked-dataset-0"
+STANDARD_OUTPUT_DIR="${EXPERIMENT_DIR}/output/full-dataset-0"
 mkdir -p "${EXPERIMENT_DIR}"
 mkdir -p "${CHUNKED_OUTPUT_DIR}"
 mkdir -p "${STANDARD_OUTPUT_DIR}"
@@ -55,15 +45,30 @@ DATASET_CHUNK_3_OUTPUT_PATH='/dev/shm/chunk-3'
 STANDARD_SAVE_FREQUENCY=10856  # save per-epoch
 STANDARD_MAX_STEPS=595  # there are 10856 samples in std ds, so ceil(10856/128)*7 = 595
 
+# Script locations
+DATA_PROCESS_PYTHON='/mnt/7TB-a/osilkin/training/.venv/bin/python'
+DATA_PROCESS_SCRIPT='/mnt/7TB-a/osilkin/training/src/instructlab/training/data_process.py'
+MINI_TRAINER_SCRIPT='/mnt/7TB-a/osilkin/mini_trainer/train.py'
 
-# we need the instructlab processor to parse the dataset
+# ================================================================================
+# PARSE INPUT ARGUMENTS TO THE SCRIPT
+# ================================================================================
+# Parse arguments for --skip-process or -s
+for arg in "$@"; do
+    if [[ "$arg" == "--skip-process" || "$arg" == "-s" ]]; then
+        SKIP_PROCESS=1
+        # Remove the skip flag from the arguments so it doesn't get passed to python scripts
+        set -- "${@/"$arg"}"
+    fi
+done
+
 # ================================================================================
 # DATASET PARSING
 # ================================================================================
 if [[ $SKIP_PROCESS -eq 0 ]]; then
 
     # first, we process the standard dataset
-    /home/vpcuser/osilkin/temp-repo/.venv/bin/python /home/vpcuser/osilkin/temp-repo/src/instructlab/training/data_process.py \
+    "${DATA_PROCESS_PYTHON}" "${DATA_PROCESS_SCRIPT}" \
         --data_path="${FULL_DATASET}" \
         --data_output_path="${STD_DATA_OUTPUT_PATH}" \
         --max_seq_len="${MAX_SEQ_LEN}" \
@@ -71,7 +76,7 @@ if [[ $SKIP_PROCESS -eq 0 ]]; then
         --num_cpu_procs=24
 
     # process chunk 1 here
-    /home/vpcuser/osilkin/temp-repo/.venv/bin/python /home/vpcuser/osilkin/temp-repo/src/instructlab/training/data_process.py \
+    "${DATA_PROCESS_PYTHON}" "${DATA_PROCESS_SCRIPT}" \
         --data_path="${DATASET_CHUNK_1}" \
         --data_output_path="${DATASET_CHUNK_1_OUTPUT_PATH}" \
         --max_seq_len="${MAX_SEQ_LEN}" \
@@ -79,7 +84,7 @@ if [[ $SKIP_PROCESS -eq 0 ]]; then
         --num_cpu_procs=24
 
     # process chunk 2 here
-    /home/vpcuser/osilkin/temp-repo/.venv/bin/python /home/vpcuser/osilkin/temp-repo/src/instructlab/training/data_process.py \
+    "${DATA_PROCESS_PYTHON}" "${DATA_PROCESS_SCRIPT}" \
         --data_path="${DATASET_CHUNK_2}" \
         --data_output_path="${DATASET_CHUNK_2_OUTPUT_PATH}" \
         --max_seq_len="${MAX_SEQ_LEN}" \
@@ -87,7 +92,7 @@ if [[ $SKIP_PROCESS -eq 0 ]]; then
         --num_cpu_procs=24
 
     # process chunk 3 here
-    /home/vpcuser/osilkin/temp-repo/.venv/bin/python /home/vpcuser/osilkin/temp-repo/src/instructlab/training/data_process.py \
+    "${DATA_PROCESS_PYTHON}" "${DATA_PROCESS_SCRIPT}" \
         --data_path="${DATASET_CHUNK_3}" \
         --data_output_path="${DATASET_CHUNK_3_OUTPUT_PATH}" \
         --max_seq_len="${MAX_SEQ_LEN}" \
@@ -95,14 +100,13 @@ if [[ $SKIP_PROCESS -eq 0 ]]; then
         --num_cpu_procs=24
 fi
 
-# run the dataset in 3 chunks
 
-# original dataset
-
-# next we test againt the original orthogonal subspace implementation
+# ================================================================================
+# Launch complete dataset training script
+# ================================================================================
 CUDA_LAUNCH_BLOCKING=1 torchrun \
     --nnodes=1 \
-    --nproc-per-node=8 /home/vpcuser/osilkin/mini_trainer_frozen/train.py \
+    --nproc-per-node=8 "${MINI_TRAINER_SCRIPT}" \
     --data-path "${STD_DATA_OUTPUT_PATH}/data.jsonl" \
     --output-dir "${STANDARD_OUTPUT_DIR}" \
     --model-name-or-path "${BASE_MODEL}" \
@@ -117,3 +121,8 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --osft-rank-ratio="${RANK_RATIO}"
 
 
+
+# ================================================================================
+# Launch multi-chunk training script here
+# ================================================================================
+# < implementation left as exercise to the reader >
