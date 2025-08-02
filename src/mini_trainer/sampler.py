@@ -101,8 +101,41 @@ def batch_lengths_to_minibatches(batch_lengths: list[int], max_tokens_per_rank: 
     return [m[rank] for m in minibatches_indices]
 
 class JsonlDataset(Dataset):
-    def __init__(self, path: str = "/new_data/aldo/v1_reasoning/math_simplerl_qwen_data_token_ids.jsonl"):
+    def __init__(
+        self,
+        path: str = "/new_data/aldo/v1_reasoning/math_simplerl_qwen_data_token_ids.jsonl",
+        max_seq_len: int = None,
+    ):
         dataset = load_dataset("json", data_files=path, split="train")
+        # Ensure required fields are present in the dataset
+        assert "input_ids" in dataset.features, "Dataset must contain 'input_ids' field"
+        assert "labels" in dataset.features, "Dataset must contain 'labels' field"
+
+        # Set the length there if it's not already there
+        if "len" not in dataset.features:
+            dataset = dataset.map(lambda s: {"len": len(s["input_ids"])})
+
+        # Set the number of loss counted tokens per-sample:
+        if "num_loss_counted_tokens" not in dataset.features:
+            dataset = dataset.map(
+                lambda s: {
+                    "num_loss_counted_tokens": sum(
+                        1 for tok in s["labels"] if tok != -100
+                    )
+                }
+            )
+
+        # Filter out samples that are too long if max_seq_len is specified
+        if max_seq_len is not None:
+            original_size = len(dataset)
+            dataset = dataset.filter(lambda x: x["len"] <= max_seq_len)
+            filtered_size = len(dataset)
+            removed_count = original_size - filtered_size
+            if removed_count > 0:
+                print(
+                    f"\033[33mFiltered out {removed_count} samples (out of {original_size}) that exceed max_seq_len={max_seq_len}\033[0m"
+                )
+
         self.dataset = dataset
 
     def __len__(self):
