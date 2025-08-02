@@ -10,3 +10,7 @@ flash-attn
 pytest
 Deprecated
 numba
+typer
+aiofiles
+deprecated
+numpy
