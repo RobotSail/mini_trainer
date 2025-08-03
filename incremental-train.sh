@@ -232,6 +232,7 @@ function multi_chunk_training() {
         --seed="${SEED}" \
         --orthogonal-subspace-learning \
         --osft-rank-ratio="${RANK_RATIO}" \
+        --max-epochs="${EPOCHS}" \
         --save-last-checkpoint
 
     # then get the most recent checkpoint
@@ -251,6 +252,7 @@ function multi_chunk_training() {
         --seed="${SEED}" \
         --orthogonal-subspace-learning \
         --osft-rank-ratio="${RANK_RATIO}" \
+        --max-epochs="${EPOCHS}" \
         --save-last-checkpoint
 
     # then get the most recent checkpoint
@@ -270,6 +272,7 @@ function multi_chunk_training() {
         --seed="${SEED}" \
         --orthogonal-subspace-learning \
         --osft-rank-ratio="${RANK_RATIO}" \
+        --max-epochs="${EPOCHS}" \
         --save-last-checkpoint
 
     # final checkpoint
