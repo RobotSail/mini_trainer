@@ -1,4 +1,10 @@
 #!/bin/bash
+#
+# Incremental Training Script
+# Supports BMO and Finance-Bench experiment modes with Qwen2.5-7B or Llama-3.1-8B models
+# Usage: ./incremental-train.sh [--mode MODE] [--model MODEL] [TRAINING_FLAGS] [--skip-process]
+# Training flags: --full-sft, --complete-dataset, --multi-chunk
+#
 
 # stops early in case of problem
 set -eo pipefail
@@ -6,22 +12,44 @@ set -eo pipefail
 # ================================================================================
 # SET VARIABLES
 # ================================================================================
-# BASE_MODEL='qwen/Qwen2.5-7B-Instruct'
+# Default values - can be overridden by command line arguments
 BASE_MODEL='meta-llama/Llama-3.1-8B-Instruct'
+EXPERIMENT_MODE='bmo'
 
-# datasets 
-FULL_DATASET='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/bmo/train_p07.jsonl'
-DATASET_CHUNK_1='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/bmo/3-chunks/chunk_0.jsonl'
-DATASET_CHUNK_2='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/bmo/3-chunks/chunk_1.jsonl'
-DATASET_CHUNK_3='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/bmo/3-chunks/chunk_2.jsonl'
+# Training function flags - control which functions to run
+RUN_FULL_SFT=0
+RUN_COMPLETE_DATASET=0
+RUN_MULTI_CHUNK=0
 
-# outputs 
-EXPERIMENT_DIR="/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/${BASE_MODEL}"
-CHUNKED_OUTPUT_DIR="${EXPERIMENT_DIR}/output/chunked-dataset-0"
-STANDARD_OUTPUT_DIR="${EXPERIMENT_DIR}/output/full-dataset-0"
-mkdir -p "${EXPERIMENT_DIR}"
-mkdir -p "${CHUNKED_OUTPUT_DIR}"
-mkdir -p "${STANDARD_OUTPUT_DIR}"
+# datasets - will be populated based on mode
+export FULL_DATASET=''
+export DATASET_CHUNK_1=''
+export DATASET_CHUNK_2=''
+export DATASET_CHUNK_3=''
+
+# BMO datasets
+export BMO_FULL_DATASET='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/bmo/train_p07.jsonl'
+export BMO_DATASET_CHUNK_1='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/bmo/3-chunks/chunk_0.jsonl'
+export BMO_DATASET_CHUNK_2='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/bmo/3-chunks/chunk_1.jsonl'
+export BMO_DATASET_CHUNK_3='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/bmo/3-chunks/chunk_2.jsonl'
+
+# Finance-Bench Datasets
+export FIN_BENCH_FULL_DATASET="/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/finance-bench/training_combined_cut_50x.jsonl"
+export FIN_BENCH_DATASET_CHUNK_1='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/finance-bench/3-chunks/chunk_0.jsonl'
+export FIN_BENCH_DATASET_CHUNK_2='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/finance-bench/3-chunks/chunk_1.jsonl'
+export FIN_BENCH_DATASET_CHUNK_3='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/finance-bench/3-chunks/chunk_2.jsonl'
+
+
+# outputs - will be updated based on experiment mode
+BASE_EXPERIMENT_DIR='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0'
+EXPERIMENT_DIR=''  # Will be set after mode is determined
+
+
+
+# Directory variables will be set by configure_experiment_mode()
+CHUNKED_OUTPUT_DIR=''
+FULL_OUTPUT_DIR=''
+SFT_BASELINE_OUTPUT_DIR=''
 
 # hyperparams
 LEARNING_RATE='2e-5'
@@ -51,18 +79,166 @@ DATA_PROCESS_SCRIPT='/mnt/7TB-a/osilkin/training/src/instructlab/training/data_p
 MINI_TRAINER_SCRIPT='/mnt/7TB-a/osilkin/mini_trainer/train.py'
 
 # ================================================================================
+# HELPER FUNCTIONS
+# ================================================================================
+function show_usage() {
+    echo "Usage: $0 [OPTIONS] [TRAINING_FLAGS]"
+    echo ""
+    echo "Configuration Options:"
+    echo "  --mode, -m MODE      Set experiment mode (bmo or finance-bench). Default: bmo"
+    echo "  --model, -b MODEL    Set base model (qwen or llama). Default: llama"
+    echo "  --skip-process, -s   Skip data processing step"
+    echo "  --help, -h          Show this help message"
+    echo ""
+    echo "Training Functions (at least one required):"
+    echo "  --full-sft          Run full SFT baseline training"
+    echo "  --complete-dataset   Run complete dataset training"
+    echo "  --multi-chunk       Run multi-chunk incremental training"
+    echo ""
+    echo "Available models:"
+    echo "  qwen    - qwen/Qwen2.5-7B-Instruct"
+    echo "  llama   - meta-llama/Llama-3.1-8B-Instruct"
+    echo ""
+    echo "Examples:"
+    echo "  $0 --mode bmo --model qwen --full-sft"
+    echo "  $0 -m finance-bench -b llama --multi-chunk --complete-dataset"
+    echo "  $0 --model qwen --full-sft --complete-dataset --multi-chunk"
+    echo "  $0 --skip-process --full-sft"
+    echo ""
+}
+
+# ================================================================================
 # PARSE INPUT ARGUMENTS TO THE SCRIPT
 # ================================================================================
-# Parse arguments for --skip-process or -s
-for arg in "$@"; do
-    if [[ "$arg" == "--skip-process" || "$arg" == "-s" ]]; then
-        SKIP_PROCESS=1
-        # Remove the skip flag from the arguments so it doesn't get passed to python scripts
-        set -- "${@/"$arg"}"
-    fi
+# Parse arguments for configuration and training flags
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --skip-process|-s)
+            SKIP_PROCESS=1
+            shift
+            ;;
+        --mode|-m)
+            if [[ -n "$2" && "$2" != --* ]]; then
+                if [[ "$2" == "bmo" || "$2" == "finance-bench" ]]; then
+                    EXPERIMENT_MODE="$2"
+                    shift 2
+                else
+                    echo "Error: Invalid mode '$2'. Must be 'bmo' or 'finance-bench'" >&2
+                    show_usage
+                    exit 1
+                fi
+            else
+                echo "Error: --mode requires a value (bmo or finance-bench)" >&2
+                show_usage
+                exit 1
+            fi
+            ;;
+        --model|-b)
+            if [[ -n "$2" && "$2" != --* ]]; then
+                if [[ "$2" == "qwen" ]]; then
+                    BASE_MODEL='qwen/Qwen2.5-7B-Instruct'
+                    shift 2
+                elif [[ "$2" == "llama" ]]; then
+                    BASE_MODEL='meta-llama/Llama-3.1-8B-Instruct'
+                    shift 2
+                else
+                    echo "Error: Invalid model '$2'. Must be 'qwen' or 'llama'" >&2
+                    show_usage
+                    exit 1
+                fi
+            else
+                echo "Error: --model requires a value (qwen or llama)" >&2
+                show_usage
+                exit 1
+            fi
+            ;;
+        --full-sft)
+            RUN_FULL_SFT=1
+            shift
+            ;;
+        --complete-dataset)
+            RUN_COMPLETE_DATASET=1
+            shift
+            ;;
+        --multi-chunk)
+            RUN_MULTI_CHUNK=1
+            shift
+            ;;
+        --help|-h)
+            show_usage
+            exit 0
+            ;;
+        *)
+            echo "Error: Unknown option '$1'" >&2
+            show_usage
+            exit 1
+            ;;
+    esac
 done
 
+# Check if at least one training function is specified
+if [[ $RUN_FULL_SFT -eq 0 && $RUN_COMPLETE_DATASET -eq 0 && $RUN_MULTI_CHUNK -eq 0 ]]; then
+    echo "Error: At least one training function must be specified" >&2
+    echo "Use --full-sft, --complete-dataset, or --multi-chunk" >&2
+    echo ""
+    show_usage
+    exit 1
+fi
 
+
+# ================================================================================
+#  CONFIGURATION FUNCTIONS
+# ================================================================================
+function configure_experiment_mode() {
+    echo "Configuring experiment:"
+    echo "  Mode: $EXPERIMENT_MODE"
+    echo "  Base Model: $BASE_MODEL"
+    
+    # Show which training functions will run
+    echo "  Training functions to run:"
+    if [[ $RUN_FULL_SFT -eq 1 ]]; then
+        echo "    - Full SFT Baseline"
+    fi
+    if [[ $RUN_COMPLETE_DATASET -eq 1 ]]; then
+        echo "    - Complete Dataset Training"
+    fi
+    if [[ $RUN_MULTI_CHUNK -eq 1 ]]; then
+        echo "    - Multi-Chunk Training"
+    fi
+    
+    # Configure datasets based on mode
+    if [[ "$EXPERIMENT_MODE" == "bmo" ]]; then
+        export FULL_DATASET="$BMO_FULL_DATASET"
+        export DATASET_CHUNK_1="$BMO_DATASET_CHUNK_1"
+        export DATASET_CHUNK_2="$BMO_DATASET_CHUNK_2"
+        export DATASET_CHUNK_3="$BMO_DATASET_CHUNK_3"
+    elif [[ "$EXPERIMENT_MODE" == "finance-bench" ]]; then
+        export FULL_DATASET="$FIN_BENCH_FULL_DATASET"
+        export DATASET_CHUNK_1="$FIN_BENCH_DATASET_CHUNK_1"
+        export DATASET_CHUNK_2="$FIN_BENCH_DATASET_CHUNK_2"
+        export DATASET_CHUNK_3="$FIN_BENCH_DATASET_CHUNK_3"
+    else
+        echo "Error: Unknown experiment mode '$EXPERIMENT_MODE'" >&2
+        exit 1
+    fi
+    
+    # Configure directory structure with mode subdirectory
+    EXPERIMENT_DIR="${BASE_EXPERIMENT_DIR}/${EXPERIMENT_MODE}/${BASE_MODEL}"
+    
+    # Update dependent directories
+    CHUNKED_OUTPUT_DIR="${EXPERIMENT_DIR}/output/chunked-dataset-0"
+    FULL_OUTPUT_DIR="${EXPERIMENT_DIR}/output/full-dataset-0"
+    SFT_BASELINE_OUTPUT_DIR="${EXPERIMENT_DIR}/output/sft-baseline-0"
+    
+    echo "  Experiment directory: $EXPERIMENT_DIR"
+    echo "Configuration complete!"
+    
+    # Create directories
+    mkdir -p "${EXPERIMENT_DIR}"
+    mkdir -p "${CHUNKED_OUTPUT_DIR}"
+    mkdir -p "${FULL_OUTPUT_DIR}"
+    mkdir -p "${SFT_BASELINE_OUTPUT_DIR}"
+}
 # ================================================================================
 #  UTILITY FUNCTIONS
 # ================================================================================
@@ -99,6 +275,13 @@ function process_full_dataset() {
     # Process the dataset if we need to 
     if [[ "${SKIP_PROCESS}" -eq 0 ]]; then
         # this function processes the full dataset
+        echo "Processing full dataset with arguments:"
+        echo "  --data_path=${FULL_DATASET}"
+        echo "  --data_output_path=${STD_DATA_OUTPUT_PATH}" 
+        echo "  --max_seq_len=${MAX_SEQ_LEN}"
+        echo "  --model_name_or_path=${BASE_MODEL}"
+        echo "  --num_cpu_procs=24"
+
         "${DATA_PROCESS_PYTHON}" "${DATA_PROCESS_SCRIPT}" \
             --data_path="${FULL_DATASET}" \
             --data_output_path="${STD_DATA_OUTPUT_PATH}" \
@@ -156,7 +339,7 @@ function complete_dataset_training() {
         --nnodes=1 \
         --nproc-per-node=8 "${MINI_TRAINER_SCRIPT}" \
         --data-path "${STD_DATA_OUTPUT_PATH}/data.jsonl" \
-        --output-dir "${STANDARD_OUTPUT_DIR}" \
+        --output-dir "${FULL_OUTPUT_DIR}" \
         --model-name-or-path "${BASE_MODEL}" \
         --min-samples-per-checkpoint "${STANDARD_SAVE_FREQUENCY}" \
         --num-warmup-steps "${WARMUP_STEPS}" \
@@ -280,7 +463,57 @@ function multi_chunk_training() {
     printf '\033[0;33mFinal checkpoint: %s\033[0m\n' "${model_chunk_3}"
 
 }
+
+function full_sft_baseline() {
+    # process dataset full
+    process_full_dataset
+
+    # then launch training 
+    CUDA_LAUNCH_BLOCKING=1 torchrun \
+        --nnodes=1 \
+        --nproc-per-node=8 "${MINI_TRAINER_SCRIPT}" \
+        --data-path "${STD_DATA_OUTPUT_PATH}/data.jsonl" \
+        --output-dir "${SFT_BASELINE_OUTPUT_DIR}" \
+        --model-name-or-path "${BASE_MODEL}" \
+        --num-warmup-steps "${WARMUP_STEPS}" \
+        --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU}" \
+        --batch-size "${BATCH_SIZE}" \
+        --learning-rate "${LEARNING_RATE}" \
+        --seed="${SEED}" \
+        --max-epochs="${EPOCHS}" \
+        --save-last-checkpoint
+}
+
+
 # complete_dataset_training_test
 # recent=$(get_most_recent_checkpoint)
 # printf 'got most recent: "%s"\n' "$(get_most_recent_checkpoint '/mnt/7TB-a/models/test_mini-trainer-new-changes/hf_format')"
-multi_chunk_training
+
+
+# Configure experiment first
+configure_experiment_mode
+
+# Execute selected training functions
+echo ""
+echo "Starting training functions..."
+
+if [[ $RUN_FULL_SFT -eq 1 ]]; then
+    echo ""
+    echo "==================== Running Full SFT Baseline ===================="
+    full_sft_baseline
+fi
+
+if [[ $RUN_COMPLETE_DATASET -eq 1 ]]; then
+    echo ""
+    echo "================== Running Complete Dataset Training ================="
+    complete_dataset_training
+fi
+
+if [[ $RUN_MULTI_CHUNK -eq 1 ]]; then
+    echo ""
+    echo "================== Running Multi-Chunk Training ===================="
+    multi_chunk_training
+fi
+
+echo ""
+echo "All selected training functions completed!"
