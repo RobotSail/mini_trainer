@@ -44,6 +44,16 @@ dependencies = [
 cuda = [
     "flash-attn>=2.8.2",
 ]
+test = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "pytest-mock",
+]
+dev = [
+    "ruff",
+    "ipython", 
+    "ipdb",
+]
 
 [project.urls]
 Homepage = "https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer"

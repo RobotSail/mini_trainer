@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-Simple test runner for batch_lengths_to_minibatches performance comparison.
+Comprehensive test runner for mini_trainer test suite.
 
-This script runs both the correctness tests and the performance comparison
-between the greedy and LPT algorithms.
+This script runs all unit tests for the training pipeline including:
+- Batch packing algorithms
+- Data loading and sampling
+- Model initialization
+- Training components
+- Main training loop
 """
 
 import sys
@@ -14,22 +18,42 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def run_correctness_tests():
-    """Run pytest for correctness verification."""
+    """Run pytest for all unit tests."""
     print("=" * 60)
-    print("RUNNING CORRECTNESS TESTS")
+    print("RUNNING ALL UNIT TESTS")
     print("=" * 60)
     
-    result = subprocess.run([
-        sys.executable, "-m", "pytest", 
-        "test_batch_lengths_to_minibatches.py::TestBatchLengthsToMinibatches", 
-        "-v"
-    ], capture_output=True, text=True, cwd=os.path.dirname(__file__))
+    # Run all test files
+    test_files = [
+        "test_batch_lengths_to_minibatches.py::TestBatchLengthsToMinibatches",
+        "test_data_loader.py",
+        "test_model_initialization.py", 
+        "test_training_components.py",
+        "test_training_loop.py",
+        "test_async_logger.py",
+        "test_integration_small_models.py"
+    ]
     
-    print(result.stdout)
-    if result.stderr:
-        print("STDERR:", result.stderr)
+    all_passed = True
+    for test_file in test_files:
+        print(f"\n>>> Running {test_file}")
+        result = subprocess.run([
+            sys.executable, "-m", "pytest", 
+            test_file, 
+            "-v", "--tb=short"
+        ], capture_output=True, text=True, cwd=os.path.dirname(__file__))
+        
+        print(result.stdout)
+        if result.stderr:
+            print("STDERR:", result.stderr)
+        
+        if result.returncode != 0:
+            all_passed = False
+            print(f"❌ {test_file} FAILED")
+        else:
+            print(f"✅ {test_file} PASSED")
     
-    return result.returncode == 0
+    return all_passed
 
 def run_performance_comparison():
     """Run the performance comparison between algorithms."""
@@ -49,20 +73,27 @@ def run_performance_comparison():
 
 def main():
     """Run all tests."""
-    print("Batch Lengths to Minibatches - Test Suite")
-    print("=========================================")
+    print("Mini Trainer - Comprehensive Test Suite")
+    print("========================================")
+    print("Testing critical components:")
+    print("  • Data loading and sampling")
+    print("  • Batch packing algorithms") 
+    print("  • Model initialization")
+    print("  • Training utilities")
+    print("  • Main training loop")
+    print()
     
     # Run correctness tests first
     correctness_passed = run_correctness_tests()
     
     if not correctness_passed:
-        print("\n❌ CORRECTNESS TESTS FAILED!")
+        print("\n❌ UNIT TESTS FAILED!")
         print("Please fix the issues before running performance comparison.")
         return 1
     
-    print("\n✅ ALL CORRECTNESS TESTS PASSED!")
+    print("\n✅ ALL UNIT TESTS PASSED!")
     
-    # Run performance comparison
+    # Run performance comparison for batch packing
     performance_passed = run_performance_comparison()
     
     if not performance_passed:

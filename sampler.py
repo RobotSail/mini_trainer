@@ -264,13 +264,14 @@ class MaxTokensPerRankCollator:
         batch_ = [b for b in batch if b['len'] <= self.max_tokens_per_rank]
         if len(batch_) < len(batch):
             print(f"\033[38;5;196mremoved {len(batch) - len(batch_)} samples from batch because they are longer than the max tokens per gpu\033[0m")
-        batch_lengths = [sample['len'] for sample in batch]
-        batch_num_loss_counted_tokens = sum([sample['num_loss_counted_tokens'] for sample in batch])
+        # Use filtered batch for lengths and loss counts
+        batch_lengths = [sample['len'] for sample in batch_]
+        batch_num_loss_counted_tokens = sum([sample['num_loss_counted_tokens'] for sample in batch_])
         all_minibatches_indices = batch_lengths_to_minibatches_lpt(batch_lengths, self.max_tokens_per_rank, self.world_size, self.rank)
         
         all_minibatches = []
         for mb_indices in all_minibatches_indices:
-            mb = [batch[i] if i != -1 else self.dummy_sample for i in mb_indices]
+            mb = [batch_[i] if i != -1 else self.dummy_sample for i in mb_indices]
             all_minibatches.append(mb_collate_fn(mb, batch_num_loss_counted_tokens))
 
         return all_minibatches

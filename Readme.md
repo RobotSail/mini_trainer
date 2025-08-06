@@ -195,7 +195,14 @@ Adjust the SBATCH directives and paths (`train.py`, `--data-path`, `--output-dir
 
 # Testing
 
-The project uses tox with uv for fast, isolated testing across multiple Python versions. Tests are located in the `tests/` directory.
+The project uses tox with uv for fast, isolated testing across multiple Python versions. Tests are located in the `tests/` directory and provide comprehensive coverage of:
+
+- **Data Pipeline**: Dataset loading, sampling, batching, and collation
+- **Model Setup**: Initialization, FSDP wrapping, optimizer configuration, and Liger kernels
+- **Training Loop**: Forward/backward passes, gradient accumulation, and checkpointing
+- **Distributed Training**: Multi-rank coordination, metrics reduction, and synchronization
+- **Batch Packing**: Performance comparisons between greedy and LPT algorithms
+- **Utilities**: Logging, memory management, and configuration handling
 
 ## Quick Testing
 
