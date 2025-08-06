@@ -10,6 +10,7 @@ from torch.distributed import is_initialized, get_rank
 import torch.distributed as dist
 from rich.logging import RichHandler
 
+
 def get_caller(num_frames=1):
     frame = inspect.currentframe().f_back
     for _ in range(num_frames - 1):
@@ -17,6 +18,7 @@ def get_caller(num_frames=1):
     file_name = frame.f_code.co_filename
     line_number = frame.f_lineno
     return f"In {file_name}, line {line_number}"
+
 
 def log_rank_0(msg, include_caller=False, rank=None, to_print=True):
     if rank is None:
@@ -29,10 +31,12 @@ def log_rank_0(msg, include_caller=False, rank=None, to_print=True):
         else:
             logging.info(msg)
 
+
 def setup_logger(level="DEBUG"):
     logging.basicConfig(
         level=level, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()]
     )
+
 
 def patch_target_module(
     to_patch: str,
@@ -54,7 +58,7 @@ def check_distributed_is_synchronized():
     """
     device = torch.device("cuda", dist.get_rank())
     t = torch.tensor([1]).to(device, torch.int32)
-    
+
     # Here, every process group increments the counter
     # so the total amount should equal the world size.
     # all_reduce here is functionally equivalent to `dist.barrier`

@@ -23,6 +23,7 @@ Key Features:
   to fill a minibatch by using dummy samples, ensuring all ranks process the
   same number of minibatches.
 """
+
 from itertools import chain
 from deprecated import deprecated
 
@@ -33,13 +34,17 @@ import numpy as np
 from datasets import load_dataset
 from batch_packer import batch_lengths_to_minibatches_lpt
 
+
 def reset_minibatches(num_ranks: int):
     return [[] for _ in range(num_ranks)], np.zeros(num_ranks)
 
 
-
-@deprecated("Use batch_lengths_to_minibatches_lpt instead for better load balancing performance")
-def batch_lengths_to_minibatches(batch_lengths: list[int], max_tokens_per_rank: int, num_ranks: int, rank: int):
+@deprecated(
+    "Use batch_lengths_to_minibatches_lpt instead for better load balancing performance"
+)
+def batch_lengths_to_minibatches(
+    batch_lengths: list[int], max_tokens_per_rank: int, num_ranks: int, rank: int
+):
     """Distributes indices from a batch into minibatches across ranks.
 
     Takes a list of sequence lengths corresponding to samples in an initial batch
@@ -75,27 +80,36 @@ def batch_lengths_to_minibatches(batch_lengths: list[int], max_tokens_per_rank: 
     current_minibatches_ids, current_minibatches_loads = reset_minibatches(num_ranks)
     for sid, sample_len in enumerate(batch_lengths):
         least_full_batch_id = np.argmin(current_minibatches_loads)
-        
-        if current_minibatches_loads[least_full_batch_id] + sample_len > max_tokens_per_rank:
-            '''when the least full minibatch is full, we need to start a new minibatch'''
+
+        if (
+            current_minibatches_loads[least_full_batch_id] + sample_len
+            > max_tokens_per_rank
+        ):
+            """when the least full minibatch is full, we need to start a new minibatch"""
             minibatches_indices.append(current_minibatches_ids)
-            current_minibatches_ids, current_minibatches_loads = reset_minibatches(num_ranks)
+            current_minibatches_ids, current_minibatches_loads = reset_minibatches(
+                num_ranks
+            )
             least_full_batch_id = 0
-        
-        '''add sample to the least full minibatch'''
+
+        """add sample to the least full minibatch"""
         current_minibatches_ids[least_full_batch_id].append(sid)
         current_minibatches_loads[least_full_batch_id] += sample_len
-    
+
     if any(current_minibatches_loads):
         for i in range(num_ranks):
             if current_minibatches_loads[i] == 0:
                 current_minibatches_ids[i].append(-1)
         minibatches_indices.append(current_minibatches_ids)
-        
+
     return [m[rank] for m in minibatches_indices]
 
+
 class JsonlDataset(Dataset):
-    def __init__(self, path: str = "/new_data/aldo/v1_reasoning/math_simplerl_qwen_data_token_ids.jsonl"):
+    def __init__(
+        self,
+        path: str = "/new_data/aldo/v1_reasoning/math_simplerl_qwen_data_token_ids.jsonl",
+    ):
         dataset = load_dataset("json", data_files=path, split="train")
         self.dataset = dataset
 
@@ -115,13 +129,13 @@ class JsonlDataset(Dataset):
             )
 
         return {
-            'input_ids': torch.tensor(sample['input_ids'], dtype=torch.long),
-            'labels': torch.tensor(sample['labels'], dtype=torch.long),
-            'len': sample['len'],
-            'num_loss_counted_tokens': loss_counted_tokens,
+            "input_ids": torch.tensor(sample["input_ids"], dtype=torch.long),
+            "labels": torch.tensor(sample["labels"], dtype=torch.long),
+            "len": sample["len"],
+            "num_loss_counted_tokens": loss_counted_tokens,
         }
-    
-        
+
+
 class InfiniteSampler(Sampler):
     """Infinitely yields shuffled dataset indices. Crucially, in distributed
     training, it provides the *same* index sequence to all ranks.
@@ -133,6 +147,7 @@ class InfiniteSampler(Sampler):
         len_data: The size of the dataset.
         seed: Initial random seed for shuffling (incremented each cycle).
     """
+
     def __init__(self, len_data, seed: int = 37):
         self.len_data = len_data
         self.seed = seed
@@ -146,10 +161,11 @@ class InfiniteSampler(Sampler):
             indices = torch.randperm(self.len_data, generator=g).tolist()
             yield from indices
             epoch += 1
-    
+
     def __len__(self):
         return self.len_data
-    
+
+
 def mb_collate_fn(minibatch, batch_num_loss_counted_tokens):
     """Collates a list of samples into a single packed batch for Flash Attention.
 
@@ -198,9 +214,9 @@ def mb_collate_fn(minibatch, batch_num_loss_counted_tokens):
         total_len += item_len
         # sample_loss_counted_tokens = (item["labels"] != -100).sum().item()
         num_loss_counted_tokens += item["num_loss_counted_tokens"]
-        
-        '''dummy samples don't have labels != -100 and should not count'''
-        num_samples += 1 if item["num_loss_counted_tokens"] > 0 else 0 
+
+        """dummy samples don't have labels != -100 and should not count"""
+        num_samples += 1 if item["num_loss_counted_tokens"] > 0 else 0
 
     # print(
     #     f"\033[96m total length: {total_len} "
@@ -215,7 +231,8 @@ def mb_collate_fn(minibatch, batch_num_loss_counted_tokens):
         "num_samples": num_samples,
         "batch_num_loss_counted_tokens": batch_num_loss_counted_tokens,
     }
-    
+
+
 class MaxTokensPerRankCollator:
     """A collate function for PyTorch DataLoader for distributed training.
 
@@ -240,15 +257,28 @@ class MaxTokensPerRankCollator:
         dummy_sample (dict, optional): A sample used for padding when a rank
             has no real samples assigned in a minibatch.
     """
-    def __init__(self, max_tokens_per_rank: int, rank: int=None, world_size: int=None, dummy_sample=None):
+
+    def __init__(
+        self,
+        max_tokens_per_rank: int,
+        rank: int = None,
+        world_size: int = None,
+        dummy_sample=None,
+    ):
         self.max_tokens_per_rank = max_tokens_per_rank
         self.rank = rank if rank is not None else dist.get_rank()
-        self.world_size = world_size if world_size is not None else dist.get_world_size()
+        self.world_size = (
+            world_size if world_size is not None else dist.get_world_size()
+        )
         if dummy_sample is None:
-            dummy_sample = {'input_ids': torch.tensor([15, 14, 13, 12, 11], dtype=torch.long),
-                            'labels': torch.tensor([-100, -100, -100, -100, -100], dtype=torch.long),
-                            'len': 5,
-                            'num_loss_counted_tokens': 0}
+            dummy_sample = {
+                "input_ids": torch.tensor([15, 14, 13, 12, 11], dtype=torch.long),
+                "labels": torch.tensor(
+                    [-100, -100, -100, -100, -100], dtype=torch.long
+                ),
+                "len": 5,
+                "num_loss_counted_tokens": 0,
+            }
         self.dummy_sample = dummy_sample
 
     def __call__(self, batch: list[dict]):
@@ -261,56 +291,71 @@ class MaxTokensPerRankCollator:
             A list where each element is a dictionary representing a collated minibatch
             (output of `mb_collate_fn`) ready for processing by the current rank.
         """
-        batch_ = [b for b in batch if b['len'] <= self.max_tokens_per_rank]
+        batch_ = [b for b in batch if b["len"] <= self.max_tokens_per_rank]
         if len(batch_) < len(batch):
-            print(f"\033[38;5;196mremoved {len(batch) - len(batch_)} samples from batch because they are longer than the max tokens per gpu\033[0m")
-        batch_lengths = [sample['len'] for sample in batch]
-        batch_num_loss_counted_tokens = sum([sample['num_loss_counted_tokens'] for sample in batch])
-        all_minibatches_indices = batch_lengths_to_minibatches_lpt(batch_lengths, self.max_tokens_per_rank, self.world_size, self.rank)
-        
+            print(
+                f"\033[38;5;196mremoved {len(batch) - len(batch_)} samples from batch because they are longer than the max tokens per gpu\033[0m"
+            )
+        batch_lengths = [sample["len"] for sample in batch]
+        batch_num_loss_counted_tokens = sum(
+            [sample["num_loss_counted_tokens"] for sample in batch]
+        )
+        all_minibatches_indices = batch_lengths_to_minibatches_lpt(
+            batch_lengths, self.max_tokens_per_rank, self.world_size, self.rank
+        )
+
         all_minibatches = []
         for mb_indices in all_minibatches_indices:
             mb = [batch[i] if i != -1 else self.dummy_sample for i in mb_indices]
             all_minibatches.append(mb_collate_fn(mb, batch_num_loss_counted_tokens))
 
         return all_minibatches
-    
+
+
 def get_data_loader(**kwargs):
     # from ipdb import set_trace; set_trace()
-    dataset = JsonlDataset(kwargs['data_path'])
-    batch_size = kwargs['batch_size']
-    max_tokens_per_rank = kwargs['max_tokens_per_gpu']
-    seed = kwargs['seed']
-    rank = kwargs.get('rank', None)
-    world_size = kwargs.get('world_size', None)
-    dummy_sample = kwargs.get('dummy_sample', None)
-    return DataLoader(dataset, 
-                      batch_size, 
-                      sampler=InfiniteSampler(len(dataset), seed=seed),
-                      collate_fn=MaxTokensPerRankCollator(max_tokens_per_rank, 
-                                                          rank=rank, 
-                                                          world_size=world_size, 
-                                                          dummy_sample=dummy_sample),
-                      num_workers=4)
+    dataset = JsonlDataset(kwargs["data_path"])
+    batch_size = kwargs["batch_size"]
+    max_tokens_per_rank = kwargs["max_tokens_per_gpu"]
+    seed = kwargs["seed"]
+    rank = kwargs.get("rank", None)
+    world_size = kwargs.get("world_size", None)
+    dummy_sample = kwargs.get("dummy_sample", None)
+    return DataLoader(
+        dataset,
+        batch_size,
+        sampler=InfiniteSampler(len(dataset), seed=seed),
+        collate_fn=MaxTokensPerRankCollator(
+            max_tokens_per_rank,
+            rank=rank,
+            world_size=world_size,
+            dummy_sample=dummy_sample,
+        ),
+        num_workers=4,
+    )
+
 
 if __name__ == "__main__":
-    data_loader = get_data_loader(data_path="test.jsonl",
-                                  batch_size=40,
-                                  max_tokens_per_gpu=5000,
-                                  seed=37,
-                                  rank=0,
-                                  world_size=2)
-    data_loader2 = get_data_loader(data_path="test.jsonl",
-                                  batch_size=26,
-                                  max_tokens_per_gpu=5000,
-                                  seed=37,
-                                  rank=1,
-                                  world_size=2)
+    data_loader = get_data_loader(
+        data_path="test.jsonl",
+        batch_size=40,
+        max_tokens_per_gpu=5000,
+        seed=37,
+        rank=0,
+        world_size=2,
+    )
+    data_loader2 = get_data_loader(
+        data_path="test.jsonl",
+        batch_size=26,
+        max_tokens_per_gpu=5000,
+        seed=37,
+        rank=1,
+        world_size=2,
+    )
     data_loader = iter(data_loader)
     data_loader2 = iter(data_loader2)
     batch = next(data_loader)
     batch2 = next(data_loader2)
     from IPython import embed
-    embed()
 
-                
+    embed()
