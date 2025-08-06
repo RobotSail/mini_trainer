@@ -36,6 +36,8 @@ dependencies = [
     "numba",
     "rich",
     "pytest",
+    "tox",
+    "tox-uv",
 ]
 
 [project.optional-dependencies]
@@ -54,3 +56,20 @@ include = ["mini_trainer*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.md", "*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--disable-warnings",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
