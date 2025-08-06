@@ -62,7 +62,7 @@ SEED=67
 WARMUP_STEPS=0
 MAX_TOKENS_PER_GPU='65536'
 RANK_RATIO='0.5'
-UPCAST_DTYPE='float64'
+UPCAST_DTYPE='float32'
 
 
 # data processing hyperparams
