@@ -215,6 +215,12 @@ def train(
         save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
     dist.barrier()
 
+# TODO: add moar data types later
+UPCAST_DTYPE_MAP = {
+    'float32': torch.float32,
+    'float64': torch.float64,
+    'bfloat16': torch.bfloat16,
+}
 
 class LogLevelEnum(str, Enum):
     DEBUG = "DEBUG"
@@ -267,6 +273,9 @@ def main(
     osft_rank_ratio: float = Option(
         0.0, help="The % of high rank singular values we should train."
     ),
+    osft_upcast_dtype: str = Option(
+        'float32', help="The data-type used when upcasting parameters during OSFT."
+    )
 ):
     # ensure we don't have to deal with this case 😅
     if max_steps and max_epochs:
@@ -309,12 +318,14 @@ def main(
 
     setup_logger(level=logging_level.value)
     # If Orthogonal Subspace Learning is enabled, loads a model with decomposed trainable low-rank + fixed high-rank subspace weights (see svd_utils)
+    upcast_dtype = UPCAST_DTYPE_MAP[osft_upcast_dtype]
     model = setup_model(
         model_name_or_path=model_name_or_path,
         use_liger_kernels=use_liger_kernels,
         orthogonal_subspace_learning=orthogonal_subspace_learning,
         rank=rank,
         osft_rank_ratio=osft_rank_ratio,
+        upcast_dtype=upcast_dtype,
     )
     model, optimizer, lr_scheduler = setup_training_components(
         model,
