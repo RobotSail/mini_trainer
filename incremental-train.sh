@@ -13,13 +13,16 @@ set -eo pipefail
 # SET VARIABLES
 # ================================================================================
 # Default values - can be overridden by command line arguments
-BASE_MODEL='meta-llama/Llama-3.1-8B-Instruct'
-EXPERIMENT_MODE='bmo'
+# BASE_MODEL='meta-llama/Llama-3.1-8B-Instruct'
+BASE_MODEL=''
+EXPERIMENT_MODE=''
 
 # Training function flags - control which functions to run
 RUN_FULL_SFT=0
 RUN_COMPLETE_DATASET=0
 RUN_MULTI_CHUNK=0
+RUN_TEST_FULL_SFT=0
+RUN_TEST_ORTHOGONAL=0
 
 # datasets - will be populated based on mode
 export FULL_DATASET=''
@@ -59,6 +62,7 @@ SEED=67
 WARMUP_STEPS=0
 MAX_TOKENS_PER_GPU='65536'
 RANK_RATIO='0.5'
+UPCAST_DTYPE='float64'
 
 
 # data processing hyperparams
@@ -67,6 +71,8 @@ STD_DATA_OUTPUT_PATH='/dev/shm/standard-ds'
 DATASET_CHUNK_1_OUTPUT_PATH='/dev/shm/chunk-1'
 DATASET_CHUNK_2_OUTPUT_PATH='/dev/shm/chunk-2'
 DATASET_CHUNK_3_OUTPUT_PATH='/dev/shm/chunk-3'
+TEST_ORTHOGONAL_OUTPUT_DIR='/mnt/7TB-a/models/test-osft'
+TEST_COMPLETE_OUTPUT_DIR='/mnt/7TB-a/models/test-compete-output-dir'
 
 
 # STANDARD-SPECIFIC HYPERPARAMS
@@ -88,12 +94,15 @@ function show_usage() {
     echo "  --mode, -m MODE      Set experiment mode (bmo or finance-bench). Default: bmo"
     echo "  --model, -b MODEL    Set base model (qwen or llama). Default: llama"
     echo "  --skip-process, -s   Skip data processing step"
+    echo "  --epochs, -e         Set the number of epochs we should train for"
     echo "  --help, -h          Show this help message"
     echo ""
     echo "Training Functions (at least one required):"
     echo "  --full-sft          Run full SFT baseline training"
     echo "  --complete-dataset   Run complete dataset training"
     echo "  --multi-chunk       Run multi-chunk incremental training"
+    echo "  --test-full-sft     Run test full SFT training (small model, 3 epochs)"
+    echo "  --test-orthogonal   Run test orthogonal subspace training (small model, 3 epochs)"
     echo ""
     echo "Available models:"
     echo "  qwen    - qwen/Qwen2.5-7B-Instruct"
@@ -104,6 +113,8 @@ function show_usage() {
     echo "  $0 -m finance-bench -b llama --multi-chunk --complete-dataset"
     echo "  $0 --model qwen --full-sft --complete-dataset --multi-chunk"
     echo "  $0 --skip-process --full-sft"
+    echo "  $0 --test-full-sft --skip-process"
+    echo "  $0 --test-orthogonal --mode bmo"
     echo ""
 }
 
@@ -152,6 +163,22 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ;;
+        --epochs|-e)
+            if [[ -n "$2" && "$2" != --* ]]; then
+                if [[ "$2" =~ ^[0-9]+$ ]]; then
+                    EPOCHS="$2"
+                    shift 2
+                else
+                    echo "Error: --epochs requires a numeric value" >&2
+                    show_usage
+                    exit 1
+                fi
+            else
+                echo "Error: --epochs requires a number" >&2
+                show_usage
+                exit 1
+            fi
+            ;;
         --full-sft)
             RUN_FULL_SFT=1
             shift
@@ -162,6 +189,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --multi-chunk)
             RUN_MULTI_CHUNK=1
+            shift
+            ;;
+        --test-full-sft)
+            RUN_TEST_FULL_SFT=1
+            shift
+            ;;
+        --test-orthogonal)
+            RUN_TEST_ORTHOGONAL=1
             shift
             ;;
         --help|-h)
@@ -177,9 +212,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Check if at least one training function is specified
-if [[ $RUN_FULL_SFT -eq 0 && $RUN_COMPLETE_DATASET -eq 0 && $RUN_MULTI_CHUNK -eq 0 ]]; then
+if [[ $RUN_FULL_SFT -eq 0 && $RUN_COMPLETE_DATASET -eq 0 && $RUN_MULTI_CHUNK -eq 0 && $RUN_TEST_FULL_SFT -eq 0 && $RUN_TEST_ORTHOGONAL -eq 0 ]]; then
     echo "Error: At least one training function must be specified" >&2
-    echo "Use --full-sft, --complete-dataset, or --multi-chunk" >&2
+    echo "Use --full-sft, --complete-dataset, --multi-chunk, --test-full-sft, or --test-orthogonal" >&2
     echo ""
     show_usage
     exit 1
@@ -204,6 +239,12 @@ function configure_experiment_mode() {
     fi
     if [[ $RUN_MULTI_CHUNK -eq 1 ]]; then
         echo "    - Multi-Chunk Training"
+    fi
+    if [[ $RUN_TEST_FULL_SFT -eq 1 ]]; then
+        echo "    - Test Full SFT Training"
+    fi
+    if [[ $RUN_TEST_ORTHOGONAL -eq 1 ]]; then
+        echo "    - Test Orthogonal Subspace Training"
     fi
     
     # Configure datasets based on mode
@@ -289,7 +330,6 @@ function process_full_dataset() {
             --model_name_or_path="${BASE_MODEL}" \
             --num_cpu_procs=24
     fi
-
 }
 
 function process_chunked_datasets() {
@@ -349,11 +389,12 @@ function complete_dataset_training() {
         --seed="${SEED}" \
         --orthogonal-subspace-learning \
         --max-steps="${STANDARD_MAX_STEPS}" \
-        --osft-rank-ratio="${RANK_RATIO}"
+        --osft-rank-ratio="${RANK_RATIO}" \
+        --osft-upcast-dtype "${UPCAST_DTYPE}"
 }
 
 
-# Version with dummy values for testing
+# Version with dummy values for testing full SFT
 function complete_dataset_training_test() {
     # process dataset full
     process_full_dataset
@@ -363,15 +404,39 @@ function complete_dataset_training_test() {
         --nnodes=1 \
         --nproc-per-node=8 "${MINI_TRAINER_SCRIPT}" \
         --data-path "${STD_DATA_OUTPUT_PATH}/data.jsonl" \
-        --output-dir "/mnt/7TB-a/models/test_mini-trainer-new-changes" \
-        --model-name-or-path "meta-llama/Llama-3.2-1B-Instruct" \
-        --num-warmup-steps 100 \
-        --max-tokens-per-gpu 2048 \
-        --batch-size 32 \
-        --learning-rate 1e-4 \
-        --seed=42 \
-        --max-epochs 3 \
+        --output-dir "${TEST_COMPLETE_OUTPUT_DIR}" \
+        --model-name-or-path "${BASE_MODEL}" \
+        --num-warmup-steps 0 \
+        --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU}" \
+        --batch-size "${BATCH_SIZE}" \
+        --learning-rate "${LEARNING_RATE}" \
+        --seed="${SEED}" \
+        --max-epochs "${EPOCHS}" \
         --save-on-epoch
+}
+
+# Version with dummy values for testing orthogonal subspace training
+function orthogonal_subspace_training_test() {
+    # process dataset full
+    process_full_dataset
+
+    # then launch training with dummy values and orthogonal subspace learning
+    CUDA_LAUNCH_BLOCKING=1 torchrun \
+        --nnodes=1 \
+        --nproc-per-node=8 "${MINI_TRAINER_SCRIPT}" \
+        --data-path "${STD_DATA_OUTPUT_PATH}/data.jsonl" \
+        --output-dir "${TEST_ORTHOGONAL_OUTPUT_DIR}" \
+        --model-name-or-path "${BASE_MODEL}" \
+        --num-warmup-steps 0 \
+        --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU}" \
+        --batch-size "${BATCH_SIZE}" \
+        --learning-rate "${LEARNING_RATE}" \
+        --seed="${SEED}" \
+        --max-epochs "${EPOCHS}" \
+        --orthogonal-subspace-learning \
+        --osft-rank-ratio="${RANK_RATIO}" \
+        --save-on-epoch \
+        --osft-upcast-dtype "${UPCAST_DTYPE}"
 }
 
 # ================================================================================
@@ -416,7 +481,9 @@ function multi_chunk_training() {
         --orthogonal-subspace-learning \
         --osft-rank-ratio="${RANK_RATIO}" \
         --max-epochs="${EPOCHS}" \
-        --save-last-checkpoint
+        --save-last-checkpoint \
+        --osft-upcast-dtype "${UPCAST_DTYPE}"
+
 
     # then get the most recent checkpoint
     local model_chunk_1=$(get_most_recent_checkpoint "${chunk_1_checkpoints}/hf_format")
@@ -436,7 +503,8 @@ function multi_chunk_training() {
         --orthogonal-subspace-learning \
         --osft-rank-ratio="${RANK_RATIO}" \
         --max-epochs="${EPOCHS}" \
-        --save-last-checkpoint
+        --save-last-checkpoint \
+        --osft-upcast-dtype "${UPCAST_DTYPE}"
 
     # then get the most recent checkpoint
     local model_chunk_2=$(get_most_recent_checkpoint "${chunk_2_checkpoints}/hf_format")
@@ -456,7 +524,8 @@ function multi_chunk_training() {
         --orthogonal-subspace-learning \
         --osft-rank-ratio="${RANK_RATIO}" \
         --max-epochs="${EPOCHS}" \
-        --save-last-checkpoint
+        --save-last-checkpoint \
+        --osft-upcast-dtype "${UPCAST_DTYPE}"
 
     # final checkpoint
     local model_chunk_3=$(get_most_recent_checkpoint "${chunk_3_checkpoints}/hf_format")
@@ -513,6 +582,18 @@ if [[ $RUN_MULTI_CHUNK -eq 1 ]]; then
     echo ""
     echo "================== Running Multi-Chunk Training ===================="
     multi_chunk_training
+fi
+
+if [[ $RUN_TEST_FULL_SFT -eq 1 ]]; then
+    echo ""
+    echo "================= Running Test Full SFT Training ==================="
+    complete_dataset_training_test
+fi
+
+if [[ $RUN_TEST_ORTHOGONAL -eq 1 ]]; then
+    echo ""
+    echo "============== Running Test Orthogonal Subspace Training ============"
+    orthogonal_subspace_training_test
 fi
 
 echo ""
