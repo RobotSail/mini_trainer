@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "torch>=2.6", "ninja"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mini_trainer"
+version = "0.1.0"
+description = "Simple training repo which is used to house reference implementations of emerging training algorithms, such as Orthogonal Subspace Fine Tuning (OSFT)."
+readme = "Readme.md"
+requires-python = ">=3.11,<3.13"
+license = {text = "MIT"}
+authors = [
+    {name = "Mini Trainer Contributors"}
+]
+keywords = ["machine learning", "training", "OSFT", "orthogonal subspace fine tuning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.6",
+    "typer",
+    "aiofiles",
+    "deprecated",
+    "numpy<2",
+    "datasets",
+    "transformers",
+    "ninja",
+    "numba",
+    "rich",
+    "pytest",
+]
+
+[project.optional-dependencies]
+cuda = [
+    "flash-attn>=2.8.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer"
+Repository = "https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer"
+Issues = "https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mini_trainer*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.md", "*.txt"]

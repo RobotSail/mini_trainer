@@ -14,7 +14,7 @@ MiniTrainer is a small form factor and extremely efficient training library for 
 
 ### 🔥 What's New (July-02-2025) - High-Performance Batch Packing
 
-- **Orthogonal Subspace Learning (OSL)** mode: allows fine-tuning in a parameter-efficient low-rank subspace while freezing parts of the core model that need to be preserved for continual learning scenarios. Controlled via `--orthogonal-subspace-learning` flag.
+- **Orthogonal Subspace Learning (OSFT)** mode: allows fine-tuning in a parameter-efficient low-rank subspace while freezing parts of the core model that need to be preserved for continual learning scenarios. Controlled via `--orthogonal-subspace-learning` flag.
 - **Numba-Optimized LPT Batch Packing**: Implemented high-performance LPT (Longest Processing Time) algorithm with JIT compilation for optimal load balancing across GPUs. Achieves 3.5x better speed than greedy while providing up to 217% better load balance, 60-89% lower variance, and 33% fewer minibatches.
 - **Comprehensive test suite**: Added extensive testing framework in `tests/` folder with realistic outlier scenarios and performance benchmarks.
 
@@ -27,10 +27,35 @@ MiniTrainer is a small form factor and extremely efficient training library for 
 
 # Installation
 
+## Using uv (Recommended)
+
 ```shell
-conda create -n minitrain python=3.12 -y; conda activate minitrain
-pip install torch
-pip install -r requirements.txt
+# Regular installation
+uv sync
+
+# Install with flash-attention support (flash-attn installed separately due to build dependencies)
+uv sync
+uv pip install .[cuda]
+
+# For editing this codebase, install with -e (editable)
+uv pip install -e .
+uv pip install -e .[cuda]
+```
+
+## Using pip
+
+```shell
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate
+
+# Regular installation
+pip install .
+pip install .[cuda]
+
+# For editing this codebase, install with -e (editable)
+pip install -e .
+pip install -e .[cuda]
 ```
 
 # Data Tokenization
