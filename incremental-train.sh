@@ -23,12 +23,14 @@ RUN_COMPLETE_DATASET=0
 RUN_MULTI_CHUNK=0
 RUN_TEST_FULL_SFT=0
 RUN_TEST_ORTHOGONAL=0
+RUN_DEBUG_SFT=0
 
 # datasets - will be populated based on mode
 export FULL_DATASET=''
 export DATASET_CHUNK_1=''
 export DATASET_CHUNK_2=''
 export DATASET_CHUNK_3=''
+export DEBUG_DATASET='/mnt/7TB-a/osilkin/mini_trainer/debug-dataset.jsonl'
 
 # BMO datasets
 export BMO_FULL_DATASET='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/bmo/train_p07.jsonl'
@@ -37,10 +39,24 @@ export BMO_DATASET_CHUNK_2='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment
 export BMO_DATASET_CHUNK_3='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/bmo/3-chunks/chunk_2.jsonl'
 
 # Finance-Bench Datasets
-export FIN_BENCH_FULL_DATASET="/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/finance-bench/training_combined_cut_50x.jsonl"
+export FIN_BENCH_FULL_DATASET='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/finance-bench/training_combined_cut_50x.jsonl'
 export FIN_BENCH_DATASET_CHUNK_1='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/finance-bench/3-chunks/chunk_0.jsonl'
 export FIN_BENCH_DATASET_CHUNK_2='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/finance-bench/3-chunks/chunk_1.jsonl'
 export FIN_BENCH_DATASET_CHUNK_3='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/finance-bench/3-chunks/chunk_2.jsonl'
+
+# Entity-Graph Knowledge 1.0
+export EG_10_BENCH_FULL_DATASET='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/entitygraph-knowledge1.0_phi4_first_24_n_5_5_percent/combined_cut_50x.jsonl'
+export EG_10_BENCH_DATASET_CHUNK_1='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/entitygraph-knowledge1.0_phi4_first_24_n_5_5_percent/3-chunks/chunk_0.jsonl'
+export EG_10_BENCH_DATASET_CHUNK_2='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/entitygraph-knowledge1.0_phi4_first_24_n_5_5_percent/3-chunks/chunk_1.jsonl'
+export EG_10_BENCH_DATASET_CHUNK_3='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/entitygraph-knowledge1.0_phi4_first_24_n_5_5_percent/3-chunks/chunk_2.jsonl'
+
+# Entity-Graph Knowledge 2.0
+export EG_20_BENCH_FULL_DATASET='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/synth_knowledge2_0-combined_cut_50x/combined_cut_50x.jsonl'
+export EG_20_BENCH_DATASET_CHUNK_1='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/synth_knowledge2_0-combined_cut_50x/3-chunks/chunk_0.jsonl'
+export EG_20_BENCH_DATASET_CHUNK_2='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/synth_knowledge2_0-combined_cut_50x/3-chunks/chunk_1.jsonl'
+export EG_20_BENCH_DATASET_CHUNK_3='/mnt/nvme1n1/experiments/os-cl-scenario-1-experiment-0/synth_knowledge2_0-combined_cut_50x/3-chunks/chunk_2.jsonl'
+
+
 
 
 # outputs - will be updated based on experiment mode
@@ -56,13 +72,14 @@ SFT_BASELINE_OUTPUT_DIR=''
 
 # hyperparams
 LEARNING_RATE='2e-5'
-EPOCHS=7
-BATCH_SIZE=128
+EPOCHS=1
+BATCH_SIZE=16
 SEED=67
 WARMUP_STEPS=0
 MAX_TOKENS_PER_GPU='65536'
 RANK_RATIO='0.5'
 UPCAST_DTYPE='float32'
+DEBUG_NUM_GPUS=8
 
 
 # data processing hyperparams
@@ -73,6 +90,7 @@ DATASET_CHUNK_2_OUTPUT_PATH='/dev/shm/chunk-2'
 DATASET_CHUNK_3_OUTPUT_PATH='/dev/shm/chunk-3'
 TEST_ORTHOGONAL_OUTPUT_DIR='/mnt/7TB-a/models/test-osft'
 TEST_COMPLETE_OUTPUT_DIR='/mnt/7TB-a/models/test-compete-output-dir'
+DEBUG_OUTPUT_DIR='/mnt/7TB-a/models/debug-sft'
 
 
 # STANDARD-SPECIFIC HYPERPARAMS
@@ -91,7 +109,7 @@ function show_usage() {
     echo "Usage: $0 [OPTIONS] [TRAINING_FLAGS]"
     echo ""
     echo "Configuration Options:"
-    echo "  --mode, -m MODE      Set experiment mode (bmo or finance-bench). Default: bmo"
+    echo "  --mode, -m MODE      Set experiment mode (bmo, finance-bench, entitygraph-knowledge1.0, or entitygraph-knowledge2.0). Default: bmo"
     echo "  --model, -b MODEL    Set base model (qwen or llama). Default: llama"
     echo "  --skip-process, -s   Skip data processing step"
     echo "  --epochs, -e         Set the number of epochs we should train for"
@@ -103,6 +121,7 @@ function show_usage() {
     echo "  --multi-chunk       Run multi-chunk incremental training"
     echo "  --test-full-sft     Run test full SFT training (small model, 3 epochs)"
     echo "  --test-orthogonal   Run test orthogonal subspace training (small model, 3 epochs)"
+    echo "  --debug-sft         Run debug SFT training (uses DEBUG_DATASET)"
     echo ""
     echo "Available models:"
     echo "  qwen    - qwen/Qwen2.5-7B-Instruct"
@@ -130,16 +149,16 @@ while [[ $# -gt 0 ]]; do
             ;;
         --mode|-m)
             if [[ -n "$2" && "$2" != --* ]]; then
-                if [[ "$2" == "bmo" || "$2" == "finance-bench" ]]; then
+                if [[ "$2" == "bmo" || "$2" == "finance-bench" || "$2" == "entitygraph-knowledge1.0" || "$2" == "entitygraph-knowledge2.0" ]]; then
                     EXPERIMENT_MODE="$2"
                     shift 2
                 else
-                    echo "Error: Invalid mode '$2'. Must be 'bmo' or 'finance-bench'" >&2
+                    echo "Error: Invalid mode '$2'. Must be 'bmo' or 'finance-bench' or 'entitygraph-knowledge1.0' or 'entitygraph-knowledge2.0'" >&2
                     show_usage
                     exit 1
                 fi
             else
-                echo "Error: --mode requires a value (bmo or finance-bench)" >&2
+                echo "Error: --mode requires a value (bmo or finance-bench or entitygraph-knowledge1.0 or entitygraph-knowledge2.0)" >&2
                 show_usage
                 exit 1
             fi
@@ -153,12 +172,12 @@ while [[ $# -gt 0 ]]; do
                     BASE_MODEL='meta-llama/Llama-3.1-8B-Instruct'
                     shift 2
                 else
-                    echo "Error: Invalid model '$2'. Must be 'qwen' or 'llama'" >&2
-                    show_usage
-                    exit 1
+                    # Accept arbitrary model name
+                    BASE_MODEL="$2"
+                    shift 2
                 fi
             else
-                echo "Error: --model requires a value (qwen or llama)" >&2
+                echo "Error: --model requires a value (qwen, llama, or any model name)" >&2
                 show_usage
                 exit 1
             fi
@@ -199,6 +218,10 @@ while [[ $# -gt 0 ]]; do
             RUN_TEST_ORTHOGONAL=1
             shift
             ;;
+        --debug-sft)
+            RUN_DEBUG_SFT=1
+            shift
+            ;;
         --help|-h)
             show_usage
             exit 0
@@ -212,13 +235,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Check if at least one training function is specified
-if [[ $RUN_FULL_SFT -eq 0 && $RUN_COMPLETE_DATASET -eq 0 && $RUN_MULTI_CHUNK -eq 0 && $RUN_TEST_FULL_SFT -eq 0 && $RUN_TEST_ORTHOGONAL -eq 0 ]]; then
+if [[ $RUN_FULL_SFT -eq 0 && $RUN_COMPLETE_DATASET -eq 0 && $RUN_MULTI_CHUNK -eq 0 && $RUN_TEST_FULL_SFT -eq 0 && $RUN_TEST_ORTHOGONAL -eq 0 && $RUN_DEBUG_SFT -eq 0 ]]; then
     echo "Error: At least one training function must be specified" >&2
-    echo "Use --full-sft, --complete-dataset, --multi-chunk, --test-full-sft, or --test-orthogonal" >&2
+    echo "Use --full-sft, --complete-dataset, --multi-chunk, --test-full-sft, --test-orthogonal, or --debug-sft" >&2
     echo ""
     show_usage
     exit 1
 fi
+
+
 
 
 # ================================================================================
@@ -246,20 +271,38 @@ function configure_experiment_mode() {
     if [[ $RUN_TEST_ORTHOGONAL -eq 1 ]]; then
         echo "    - Test Orthogonal Subspace Training"
     fi
+    if [[ $RUN_DEBUG_SFT -eq 1 ]]; then
+        echo "    - Debug SFT Training"
+    fi
     
     # Configure datasets based on mode
     if [[ "$EXPERIMENT_MODE" == "bmo" ]]; then
-        export FULL_DATASET="$BMO_FULL_DATASET"
-        export DATASET_CHUNK_1="$BMO_DATASET_CHUNK_1"
-        export DATASET_CHUNK_2="$BMO_DATASET_CHUNK_2"
-        export DATASET_CHUNK_3="$BMO_DATASET_CHUNK_3"
+        export FULL_DATASET="${BMO_FULL_DATASET}"
+        export DATASET_CHUNK_1="${BMO_DATASET_CHUNK_1}"
+        export DATASET_CHUNK_2="${BMO_DATASET_CHUNK_2}"
+        export DATASET_CHUNK_3="${BMO_DATASET_CHUNK_3}"
     elif [[ "$EXPERIMENT_MODE" == "finance-bench" ]]; then
-        export FULL_DATASET="$FIN_BENCH_FULL_DATASET"
-        export DATASET_CHUNK_1="$FIN_BENCH_DATASET_CHUNK_1"
-        export DATASET_CHUNK_2="$FIN_BENCH_DATASET_CHUNK_2"
-        export DATASET_CHUNK_3="$FIN_BENCH_DATASET_CHUNK_3"
+        export FULL_DATASET="${FIN_BENCH_FULL_DATASET}"
+        export DATASET_CHUNK_1="${FIN_BENCH_DATASET_CHUNK_1}"
+        export DATASET_CHUNK_2="${FIN_BENCH_DATASET_CHUNK_2}"
+        export DATASET_CHUNK_3="${FIN_BENCH_DATASET_CHUNK_3}"
+    elif [[ "$EXPERIMENT_MODE" == "entitygraph-knowledge1.0" ]]; then
+        export FULL_DATASET="${EG_10_BENCH_FULL_DATASET}"
+        export DATASET_CHUNK_1="${EG_10_BENCH_DATASET_CHUNK_1}"
+        export DATASET_CHUNK_2="${EG_10_BENCH_DATASET_CHUNK_2}"
+        export DATASET_CHUNK_3="${EG_10_BENCH_DATASET_CHUNK_3}"
+    elif [[ "$EXPERIMENT_MODE" == "entitygraph-knowledge2.0" ]]; then
+        export FULL_DATASET="${EG_20_BENCH_FULL_DATASET}"
+        export DATASET_CHUNK_1="${EG_20_BENCH_DATASET_CHUNK_1}"
+        export DATASET_CHUNK_2="${EG_20_BENCH_DATASET_CHUNK_2}"
+        export DATASET_CHUNK_3="${EG_20_BENCH_DATASET_CHUNK_3}"
+    elif [[ "$RUN_DEBUG_SFT" -eq 1 ]]; then
+        export FULL_DATASET="${DEBUG_DATASET}"
+        export DATASET_CHUNK_1="${DEBUG_DATASET}"
+        export DATASET_CHUNK_2="${DEBUG_DATASET}"
+        export DATASET_CHUNK_3="${DEBUG_DATASET}"
     else
-        echo "Error: Unknown experiment mode '$EXPERIMENT_MODE'" >&2
+        echo "Error: Unknown experiment mode '${EXPERIMENT_MODE}'" >&2
         exit 1
     fi
     
@@ -271,7 +314,7 @@ function configure_experiment_mode() {
     FULL_OUTPUT_DIR="${EXPERIMENT_DIR}/output/full-dataset-0"
     SFT_BASELINE_OUTPUT_DIR="${EXPERIMENT_DIR}/output/sft-baseline-0"
     
-    echo "  Experiment directory: $EXPERIMENT_DIR"
+    echo "  Experiment directory: ${EXPERIMENT_DIR}"
     echo "Configuration complete!"
     
     # Create directories
@@ -284,11 +327,11 @@ function configure_experiment_mode() {
 #  UTILITY FUNCTIONS
 # ================================================================================
 function get_most_recent_checkpoint() {
-    local directory="$1"
+    local directory="${1}"
     
     # Check if directory exists
-    if [ ! -d "$directory" ]; then
-        echo "Directory does not exist: $directory" >&2
+    if [ ! -d "${directory}" ]; then
+        echo "Directory does not exist: ${directory}" >&2
         return 1
     fi
 
@@ -297,15 +340,15 @@ function get_most_recent_checkpoint() {
     # -maxdepth 1: Only look at immediate children
     # -type d: Only look at directories
     # -printf '%T@ %p\n': Print modification timestamp and path
-    local most_recent=$(find "$directory" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+    local most_recent=$(find "${directory}" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
 
-    if [ -z "$most_recent" ]; then
-        echo "No subdirectories found in: $directory" >&2
+    if [ -z "${most_recent}" ]; then
+        echo "No subdirectories found in: ${directory}" >&2
         return 1
     fi
 
     # Convert to absolute path
-    echo "$(cd "$most_recent" && pwd)"
+    echo "$(cd "${most_recent}" && pwd)"
 }
 
 
@@ -355,6 +398,26 @@ function process_chunked_datasets() {
         "${DATA_PROCESS_PYTHON}" "${DATA_PROCESS_SCRIPT}" \
             --data_path="${DATASET_CHUNK_3}" \
             --data_output_path="${DATASET_CHUNK_3_OUTPUT_PATH}" \
+            --max_seq_len="${MAX_SEQ_LEN}" \
+            --model_name_or_path="${BASE_MODEL}" \
+            --num_cpu_procs=24
+    fi
+}
+
+function process_debug_dataset() {
+    # Process the dataset if we need to 
+    if [[ "${SKIP_PROCESS}" -eq 0 ]]; then
+        # this function processes the debug dataset
+        echo "Processing debug dataset with arguments:"
+        echo "  --data_path=${DEBUG_DATASET}"
+        echo "  --data_output_path=${STD_DATA_OUTPUT_PATH}" 
+        echo "  --max_seq_len=${MAX_SEQ_LEN}"
+        echo "  --model_name_or_path=${BASE_MODEL}"
+        echo "  --num_cpu_procs=24"
+
+        "${DATA_PROCESS_PYTHON}" "${DATA_PROCESS_SCRIPT}" \
+            --data_path="${DEBUG_DATASET}" \
+            --data_output_path="${STD_DATA_OUTPUT_PATH}" \
             --max_seq_len="${MAX_SEQ_LEN}" \
             --model_name_or_path="${BASE_MODEL}" \
             --num_cpu_procs=24
@@ -437,6 +500,27 @@ function orthogonal_subspace_training_test() {
         --osft-rank-ratio="${RANK_RATIO}" \
         --save-on-epoch \
         --osft-upcast-dtype "${UPCAST_DTYPE}"
+}
+
+# Version with dummy values for testing debug SFT
+function debug_sft_training() {
+    # process debug dataset
+    process_debug_dataset
+
+    # then launch training with dummy values
+    CUDA_LAUNCH_BLOCKING=1 torchrun \
+        --nnodes=1 \
+        --nproc-per-node="${DEBUG_NUM_GPUS}" "${MINI_TRAINER_SCRIPT}" \
+        --data-path "${STD_DATA_OUTPUT_PATH}/data.jsonl" \
+        --output-dir "${DEBUG_OUTPUT_DIR}" \
+        --model-name-or-path "${BASE_MODEL}" \
+        --num-warmup-steps 0 \
+        --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU}" \
+        --batch-size "${BATCH_SIZE}" \
+        --learning-rate "${LEARNING_RATE}" \
+        --seed="${SEED}" \
+        --max-epochs "${EPOCHS}" \
+        --save-on-epoch
 }
 
 # ================================================================================
@@ -550,7 +634,8 @@ function full_sft_baseline() {
         --learning-rate "${LEARNING_RATE}" \
         --seed="${SEED}" \
         --max-epochs="${EPOCHS}" \
-        --save-last-checkpoint
+        --save-last-checkpoint \
+        --save-on-epoch
 }
 
 
@@ -566,34 +651,40 @@ configure_experiment_mode
 echo ""
 echo "Starting training functions..."
 
-if [[ $RUN_FULL_SFT -eq 1 ]]; then
+if [[ "${RUN_FULL_SFT}" -eq 1 ]]; then
     echo ""
     echo "==================== Running Full SFT Baseline ===================="
     full_sft_baseline
 fi
 
-if [[ $RUN_COMPLETE_DATASET -eq 1 ]]; then
+if [[ "${RUN_COMPLETE_DATASET}" -eq 1 ]]; then
     echo ""
     echo "================== Running Complete Dataset Training ================="
     complete_dataset_training
 fi
 
-if [[ $RUN_MULTI_CHUNK -eq 1 ]]; then
+if [[ "${RUN_MULTI_CHUNK}" -eq 1 ]]; then
     echo ""
     echo "================== Running Multi-Chunk Training ===================="
     multi_chunk_training
 fi
 
-if [[ $RUN_TEST_FULL_SFT -eq 1 ]]; then
+if [[ "${RUN_TEST_FULL_SFT}" -eq 1 ]]; then
     echo ""
     echo "================= Running Test Full SFT Training ==================="
     complete_dataset_training_test
 fi
 
-if [[ $RUN_TEST_ORTHOGONAL -eq 1 ]]; then
+if [[ "${RUN_TEST_ORTHOGONAL}" -eq 1 ]]; then
     echo ""
     echo "============== Running Test Orthogonal Subspace Training ============"
     orthogonal_subspace_training_test
+fi
+
+if [[ "${RUN_DEBUG_SFT}" -eq 1 ]]; then
+    echo ""
+    echo "=================== Running Debug SFT Training ===================="
+    debug_sft_training
 fi
 
 echo ""
