@@ -1,16 +1,26 @@
-numpy<2
+# numpy<2
+# datasets
+# transformers
+# typer
+# liger-kernel-nightly
+# aiofiles
+# torch<2.7.0
+# rich
+# flash-attn
+# pytest
+# Deprecated
+# numba
+# typer
+# aiofiles
+# deprecated
+# numpy
+
+# this is the minimum version
+torch>=2.6
+typer  # for the CLI
+aiofiles
+numpy
 datasets
 transformers
-typer
-liger-kernel-nightly
-aiofiles
-torch<2.7.0
-rich
-flash-attn
-pytest
-Deprecated
 numba
-typer
-aiofiles
-deprecated
-numpy
+ninja

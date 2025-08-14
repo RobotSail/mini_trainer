@@ -981,7 +981,7 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
                 svd_dict = self.get_svd_dict(safe_name)
                 project_gradient_to_orthogonal_space(svd_dict, upcast_dtype, output_dtype)
 
-        def prepare_state_dict_for_save(self, state_dict, upcast_dtype: torch.dtype, output_dtype: torch.dtype = None):
+        def prepare_state_dict_for_save(self, state_dict, upcast_dtype: torch.dtype = None, output_dtype: torch.dtype = None):
             """Reconstruct dense weights into ``state_dict`` for saving."""
             upcast_dtype = self.upcast_dtype if upcast_dtype is None else upcast_dtype
             output_dtype = self.output_dtype if output_dtype is None else output_dtype
