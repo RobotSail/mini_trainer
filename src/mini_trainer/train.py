@@ -445,6 +445,9 @@ def main(
     max_tokens: Annotated[int, Option(help="Maximum number of loss-counted tokens (for token mode)")] = 0,
     checkpoint_at_epoch: Annotated[bool, Option(help="Whether to save checkpoints at the end of each epoch")] = False,
     save_final_checkpoint: Annotated[bool, Option(help="Whether to save a final checkpoint when training ends")] = False,
+    optimizer: Annotated[str, Option(help="Optimizer type: adamw, muon")] = "adamw",
+    muon_momentum: Annotated[float, Option(help="Muon momentum")] = 0.95,
+    adamw_learning_rate: Annotated[float, Option(help="AdamW learning rate for non-Muon parameters (only used when optimizer is muon)")] = 5e-6,
 ):
     
     
@@ -552,6 +555,9 @@ def main(
         lr_scheduler=lr_scheduler,
         num_training_steps=num_training_steps,
         scheduler_kwargs=scheduler_kwargs_dict,
+        optimizer=optimizer,
+        muon_momentum=muon_momentum,
+        adamw_learning_rate=adamw_learning_rate,
     )
     
     train(

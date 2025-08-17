@@ -25,7 +25,7 @@ set -eo pipefail
 PYTHON=${PYTHON:-python}
 MAX_SEQ_LEN="8196"
 BATCH_SIZE=128
-LEARNING_RATE="2e-5"
+LEARNING_RATE=''
 EPOCHS=2
 SEED=67
 NPROC_PER_NODE=8
@@ -34,6 +34,13 @@ ORTHOGONAL=0
 RANK_RATIO="0.5"
 UPCAST_DTYPE="float32"
 SKIP_PROCESS=0
+OPTIMIZER='adamw'
+MUON_MOMENTUM=0.95
+ADAMW_LEARNING_RATE="2e-5"
+MUON_LEARNING_RATE="1.25e-4"
+WANDB_PROJECT="quality-muon"
+WANDB_RUN_NAME=""
+WANDB_ENTITY=""
 
 # Resolve helper script paths relative to this file
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,24 +61,30 @@ function show_usage() {
 Usage: $0 --data-path PATH --model MODEL --output-dir DIR [OPTIONS]
 
 Required arguments:
-  --data-path PATH       Raw dataset (.jsonl) to preprocess & train on
-  --model MODEL          Base model name or local path
-  --output-dir DIR       Where to save training checkpoints / artifacts
+  --data-path PATH         Raw dataset (.jsonl) to preprocess & train on
+  --model MODEL            Base model name or local path
+  --output-dir DIR         Where to save training checkpoints / artifacts
 
 Optional arguments:
-  --epochs N             Number of epochs (default: ${EPOCHS})
-  --batch-size N         Global batch size per device (default: ${BATCH_SIZE})
-  --learning-rate LR     Learning rate (default: ${LEARNING_RATE})
-  --max-seq-len N        Max sequence length for tokenization (default: ${MAX_SEQ_LEN})
-  --max-tokens-per-gpu N Tokens per GPU (default: ${MAX_TOKENS_PER_GPU})
-  --nproc N              Number of GPUs / processes (default: ${NPROC_PER_NODE})
-  --seed N               RNG seed (default: ${SEED})
-  --orthogonal           Enable orthogonal-subspace fine-tuning
-  --rank-ratio R         OSFT rank ratio (default: ${RANK_RATIO})
-  --upcast-dtype DT      OSFT upcast dtype (default: ${UPCAST_DTYPE})
-  --skip-process         Assume dataset already tokenised; skip preprocessing
-  --python PATH          Python interpreter to use (default: "${PYTHON}")
-  --help                 Show this message
+  --epochs N               Number of epochs (default: ${EPOCHS})
+  --batch-size N           Global batch size per device (default: ${BATCH_SIZE})
+  --learning-rate LR       Learning rate (default: ${LEARNING_RATE})
+  --max-seq-len N          Max sequence length for tokenization (default: ${MAX_SEQ_LEN})
+  --max-tokens-per-gpu N   Tokens per GPU (default: ${MAX_TOKENS_PER_GPU})
+  --nproc N                Number of GPUs / processes (default: ${NPROC_PER_NODE})
+  --seed N                 RNG seed (default: ${SEED})
+  --orthogonal             Enable orthogonal-subspace fine-tuning
+  --rank-ratio R           OSFT rank ratio (default: ${RANK_RATIO})
+  --upcast-dtype DT        OSFT upcast dtype (default: ${UPCAST_DTYPE})
+  --skip-process           Assume dataset already tokenised; skip preprocessing
+  --python PATH            Python interpreter to use (default: "${PYTHON}")
+  --optimizer OPT          Optimizer to use (default: ${OPTIMIZER})
+  --muon-momentum M        Momentum for Muon optimizer (default: ${MUON_MOMENTUM})
+  --adamw-learning-rate LR Learning rate for AdamW optimizer (default: ${ADAMW_LEARNING_RATE})
+  --wandb-project PROJECT  Project name for Weights & Biases logging
+  --wandb-run-name NAME    Run name for W&B (optional)
+  --wandb-entity ENTITY    W&B entity/team name (optional)
+  --help                   Show this message
 EOF
 }
 
@@ -110,6 +123,20 @@ while [[ $# -gt 0 ]]; do
             SKIP_PROCESS=1; shift;;
         --python)
             PYTHON="$2"; shift 2;;
+        --optimizer)
+            OPTIMIZER="$2"; shift 2;;
+        --muon-momentum)
+            MUON_MOMENTUM="$2"; shift 2;;
+        --adamw-learning-rate)
+            ADAMW_LEARNING_RATE="$2"; shift 2;;
+        --muon-learning-rate)
+            MUON_LEARNING_RATE="$2"; shift 2;;
+        --wandb-project)
+            WANDB_PROJECT="$2"; shift 2;;
+        --wandb-run-name)
+            WANDB_RUN_NAME="$2"; shift 2;;
+        --wandb-entity)
+            WANDB_ENTITY="$2"; shift 2;;
         --help|-h)
             show_usage; exit 0;;
         *)
@@ -124,6 +151,19 @@ done
 if [[ -z "${DATA_PATH}" || -z "${MODEL}" || -z "${OUTPUT_DIR}" ]]; then
     echo "Error: --data-path, --model and --output-dir are required." >&2
     show_usage; exit 1
+fi
+
+# ----------------------------------------
+# Set default learning rate based on optimizer if not provided
+# ----------------------------------------
+if [[ -z "${LEARNING_RATE}" ]]; then
+    if [[ "${OPTIMIZER}" == "muon" ]]; then
+        LEARNING_RATE="${MUON_LEARNING_RATE}"
+        echo "Using Muon learning rate: ${LEARNING_RATE}"
+    else
+        LEARNING_RATE="${ADAMW_LEARNING_RATE}"
+        echo "Using AdamW learning rate: ${LEARNING_RATE}"
+    fi
 fi
 
 # ----------------------------------------
@@ -158,10 +198,21 @@ CMD=(torchrun --nnodes 1 --nproc-per-node "${NPROC_PER_NODE}" "${TRAINER_SCRIPT}
     --learning-rate "${LEARNING_RATE}" \
     --seed "${SEED}" \
     --max-epochs "${EPOCHS}" \
-    --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU}")
+    --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU}" \
+    --optimizer "${OPTIMIZER}")
+
+if [[ ${OPTIMIZER} == "muon" ]]; then
+    CMD+=(--muon-momentum "${MUON_MOMENTUM}" --adamw-learning-rate "${ADAMW_LEARNING_RATE}")
+fi
 
 if [[ ${ORTHOGONAL} -eq 1 ]]; then
     CMD+=(--orthogonal-subspace-learning --osft-rank-ratio "${RANK_RATIO}" --osft-upcast-dtype "${UPCAST_DTYPE}")
+fi
+
+if [[ -n "${WANDB_PROJECT}" ]]; then
+    CMD+=(--wandb-project "${WANDB_PROJECT}")
+    [[ -n "${WANDB_RUN_NAME}" ]] && CMD+=(--wandb-run-name "${WANDB_RUN_NAME}")
+    [[ -n "${WANDB_ENTITY}" ]] && CMD+=(--wandb-entity "${WANDB_ENTITY}")
 fi
 
 echo "\n>>> Launching training:"

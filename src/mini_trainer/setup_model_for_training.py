@@ -11,6 +11,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from mini_trainer.utils import log_rank_0, patch_target_module
 from mini_trainer.osft_utils import OSFTModel
+from muon_fsdp2 import Muon
 
 
 # New simple HF-only activation-checkpointing + FSDP2 wrapper
@@ -235,6 +236,45 @@ def setup_model(
     # torch.compile(model)
     return model
 
+# THIS IS GRANITE SPECIFIC AND NOT SCALABLE
+def is_muon_param(name: str, param):
+    # muon only accepts 2d params
+    if param.ndim != 2:
+        return False
+
+    # 1d in disguise
+    if param.ndim == 2 and any(s == param.numel() for s in param.shape):
+        return False
+
+    if isinstance(param, nn.Embedding):
+        return False
+
+    # filter out embedding layers and lm_head
+    if ('embed_tokens' in name or "lm_head" in name):
+        return False
+
+    if 'embed' in name:
+        log_rank_0(
+            f"\033[38;2;255;255;0mWarning: Parameter '{name}' contains 'embed' but is not 'embed_tokens' or 'lm_head'. Treating as Muon parameter.\033[0m",
+            to_print=True,
+        )
+    
+    return True
+
+
+
+def select_muon_params(named_params):
+    for n, p in named_params:
+        if is_muon_param(n, p):
+            yield p
+
+
+def select_adam_params(named_params):
+    for n, p in named_params:
+        if not is_muon_param(n, p):
+            yield p
+
+
 def setup_training_components(
     model: torch.nn.Module,
     learning_rate: float,
@@ -242,6 +282,9 @@ def setup_training_components(
     lr_scheduler: str,
     num_training_steps: Optional[int] = None,
     scheduler_kwargs: Optional[Dict[str, Any]] = None,
+    optimizer: str = "adamw",
+    muon_momentum: float = 0.95,
+    adamw_learning_rate: float = 5e-6,
 ) -> tuple[torch.nn.Module, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
     """
     Set up training components including model wrapping, optimizer, and learning rate scheduler.
@@ -263,13 +306,60 @@ def setup_training_components(
     log_rank_0("Using FSDP2 wrapper")
     model = wrap_fsdp2(model)
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=learning_rate,
-        betas=(0.9, 0.95),
-        weight_decay=0.0,
-    )
+    # Create optimizer based on the specified type
+    optimizer_type = optimizer
+    
+    if optimizer_type == "adamw":
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=learning_rate,
+            betas=(0.9, 0.95),
+            weight_decay=0.0,
+        )
+    elif optimizer_type == "muon":
+        muon_params = select_muon_params(model.named_parameters())
+        adam_params = select_adam_params(model.named_parameters())
+        # assert len(list(muon_params)) > 0
+        # assert len(list(adam_params)) > 0
+
+        optimizer = Muon(
+           [
+               {
+                   # send nothing here
+                   "params": muon_params,
+                   "lr": learning_rate,
+                   "use_muon": True,
+                   "momentum": muon_momentum,
+                   "weight_decay": 0.0,
+                   "ns_steps": 5,
+                   "nesterov": True,
+               },
+               {
+                   "params": adam_params,
+                   "lr": adamw_learning_rate,
+                   "use_muon": False,
+                   "betas": (0.9, 0.95),
+                   "weight_decay": 0.0,
+               },
+           ],
+           # wd=0.0,
+        #    ns_steps=5,
+           # momentum=0.9,
+        )
+        # Log parameter counts for Muon optimizer
+        muon_param_count = sum(p.numel() for p in select_muon_params(model.named_parameters()))
+        adam_param_count = sum(p.numel() for p in select_adam_params(model.named_parameters()))
+        total_param_count = muon_param_count + adam_param_count
+        
+        log_rank_0(f"Muon optimizer parameter distribution:")
+        log_rank_0(f"  Muon parameters: {muon_param_count:,} ({muon_param_count/total_param_count*100:.1f}%)")
+        log_rank_0(f"  Adam parameters: {adam_param_count:,} ({adam_param_count/total_param_count*100:.1f}%)")
+        log_rank_0(f"  Total parameters: {total_param_count:,}")
+    else:
+        raise ValueError(f"Unsupported optimizer type: {optimizer_type}")
+    
     from mini_trainer.osft_utils import optim_wrapper
+
     optimizer = optim_wrapper(optimizer, model)
     # Prepare scheduler kwargs
     if scheduler_kwargs is None:
