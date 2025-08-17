@@ -5,6 +5,7 @@ from enum import Enum
 import json
 
 from typer import Typer, Option
+import wandb
 
 from async_structured_logger import AsyncStructuredLogger
 import torch
@@ -98,11 +99,13 @@ def train(
     model_name_or_path,
     max_steps: int,
     save_last_checkpoint: bool,
-    save_on_epoch: bool
+    save_on_epoch: bool,
+    use_wandb: bool = False
 ):
     model.train()
     metric_logger = AsyncStructuredLogger(
-        output_dir + f"/training_metrics_{os.environ.get('RANK')}.jsonl"
+        output_dir + f"/training_metrics_{os.environ.get('RANK')}.jsonl",
+        use_wandb=use_wandb
     )
     world_size = int(os.environ["WORLD_SIZE"])
     is_main_process = dist.get_rank() == 0
@@ -230,6 +233,11 @@ class LogLevelEnum(str, Enum):
     CRITICAL = "CRITICAL"
 
 
+class OptimizerEnum(str, Enum):
+    ADAMW = "adamw"
+    MUON = "muon"
+
+
 @app.command()
 def main(
     model_name_or_path: str = Option(
@@ -275,6 +283,24 @@ def main(
     ),
     osft_upcast_dtype: str = Option(
         'float32', help="The data-type used when upcasting parameters during OSFT."
+    ),
+    optimizer: OptimizerEnum = Option(
+        OptimizerEnum.ADAMW, help="Optimizer to use for training"
+    ),
+    muon_momentum: float = Option(
+        0.9, help="Momentum for Muon optimizer"
+    ),
+    adamw_learning_rate: float = Option(
+        5e-6, help="When training with Muon, this is the learning rate that is used for non-muon parameters"
+    ),
+    wandb_project: str | None = Option(
+        None, help="Weights & Biases project name for logging"
+    ),
+    wandb_run_name: str | None = Option(
+        None, help="Weights & Biases run name"
+    ),
+    wandb_entity: str | None = Option(
+        None, help="Weights & Biases entity/team name"
     )
 ):
     # ensure we don't have to deal with this case 😅
@@ -298,6 +324,7 @@ def main(
             "learning_rate": learning_rate,
             "num_warmup_steps": num_warmup_steps,
             "lr_scheduler": lr_scheduler,
+            "optimizer": optimizer.value,
             "seed": seed,
             "use_liger_kernels": use_liger_kernels,
             "orthogonal_subspace_learning": orthogonal_subspace_learning,
@@ -317,6 +344,38 @@ def main(
         print(f"Training parameters saved to {params_path}")
 
     setup_logger(level=logging_level.value)
+    
+    # Initialize wandb on rank 0 only
+    if rank == 0 and wandb_project is not None:
+        wandb.init(
+            project=wandb_project,
+            name=wandb_run_name,
+            entity=wandb_entity,
+            config={
+                "model_name_or_path": model_name_or_path,
+                "data_path": data_path,
+                "batch_size": batch_size,
+                "max_tokens_per_gpu": max_tokens_per_gpu,
+                "learning_rate": learning_rate,
+                "num_warmup_steps": num_warmup_steps,
+                "lr_scheduler": lr_scheduler,
+                "optimizer": optimizer.value,
+                "seed": seed,
+                "use_liger_kernels": use_liger_kernels,
+                "orthogonal_subspace_learning": orthogonal_subspace_learning,
+                "min_samples_per_checkpoint": min_samples_per_checkpoint,
+                "osft_rank_ratio": osft_rank_ratio,
+                "osft_upcast_dtype": osft_upcast_dtype,
+                "muon_momentum": muon_momentum,
+                "adamw_learning_rate": adamw_learning_rate,
+                "max_steps": max_steps,
+                "max_epochs": max_epochs,
+                "save_on_epoch": save_on_epoch,
+                "save_last_checkpoint": save_last_checkpoint,
+                "world_size": int(os.environ.get("WORLD_SIZE", 1)),
+            }
+        )
+    
     # If Orthogonal Subspace Learning is enabled, loads a model with decomposed trainable low-rank + fixed high-rank subspace weights (see svd_utils)
     upcast_dtype = UPCAST_DTYPE_MAP[osft_upcast_dtype]
     model = setup_model(
@@ -332,6 +391,9 @@ def main(
         learning_rate=learning_rate,
         num_warmup_steps=num_warmup_steps,
         lr_scheduler=lr_scheduler,
+        optimizer=optimizer.value,
+        muon_momentum=muon_momentum,
+        adamw_learning_rate=adamw_learning_rate,
     )
     data_loader = get_data_loader(
         data_path=data_path,
@@ -351,7 +413,8 @@ def main(
         model_name_or_path,
         max_steps=max_steps,
         save_last_checkpoint=save_last_checkpoint,
-        save_on_epoch=save_on_epoch
+        save_on_epoch=save_on_epoch,
+        use_wandb=(wandb_project is not None)
     )
 
 

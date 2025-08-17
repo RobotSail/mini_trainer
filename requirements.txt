@@ -16,7 +16,7 @@
 # numpy
 
 # this is the minimum version
-torch>=2.6
+torch
 typer  # for the CLI
 aiofiles
 numpy
@@ -24,3 +24,5 @@ datasets
 transformers
 numba
 ninja
+wandb 
+muon-fsdp2
