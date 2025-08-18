@@ -43,9 +43,10 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
 
     # 4) Mixed-precision policy (bf16)
     mp_policy = MixedPrecisionPolicy(
+        # computations take place in bfloat16
         param_dtype=torch.bfloat16,
-        reduce_dtype=torch.bfloat16,
-        output_dtype=torch.bfloat16,
+        # this must be float32 to preserve precision during reduction
+        reduce_dtype=torch.float32,
     )
 
     # 4) FSDP2 wrap each block
@@ -111,7 +112,6 @@ def setup_model(
 ) -> torch.nn.Module | SVDModel:
     base_model_args = {
         "pretrained_model_name_or_path": kwargs["model_name_or_path"],
-        "torch_dtype": torch.bfloat16,
     }
     base_model_args["attn_implementation"] = "flash_attention_2"
 
