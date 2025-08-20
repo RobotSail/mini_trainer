@@ -1,10 +1,9 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 import torch.distributed as dist
 import typing as t
-from typing import Protocol
+from typing import Protocol, Union
 
 from tqdm import tqdm
 
@@ -48,7 +47,7 @@ class SVDModelProtocol(Protocol):
     def reinitialize_svd(
         self,
         decompose_existing_weights: bool,
-        assigned_params: list[tuple[str, torch.Tensor]] | None = None,
+        assigned_params: Union[list[tuple[str, torch.Tensor]], None] = None,
     ) -> None: ...
 
     def reinitialize_svd_distributed(self) -> None: ...
@@ -58,15 +57,15 @@ class SVDModelProtocol(Protocol):
     def _reconstruct_weight_by_safe_name(
         self,
         safe_name: str,
-        upcast_dtype: torch.dtype | None = None,
-        output_dtype: torch.dtype | None = None,
+        upcast_dtype: Union[torch.dtype, None] = None,
+        output_dtype: Union[torch.dtype, None] = None,
     ) -> torch.Tensor: ...
 
     def _reconstruct_weight(
         self,
         original_name: str,
-        upcast_dtype: torch.dtype | None = None,
-        output_dtype: torch.dtype | None = None,
+        upcast_dtype: Union[torch.dtype, None] = None,
+        output_dtype: Union[torch.dtype, None] = None,
     ) -> torch.Tensor: ...
 
 
@@ -116,7 +115,7 @@ def create_svd_dict(
     top_k: int,
     decompose_existing: bool = True,
     upcast_dtype: torch.dtype = torch.float32,
-    output_dtype: torch.dtype | None = None,
+    output_dtype: Union[torch.dtype, None] = None,
 ) -> SVDDecompositionDict:
     """
     Decomposes a 2D weight matrix into two components using Singular Value Decomposition (SVD):
@@ -182,7 +181,7 @@ def create_svd_dict(
 def reconstruct_weight_matrix(
     svd_dict: SVDDecompositionDict,
     upcast_dtype: torch.dtype,
-    output_dtype: torch.dtype | None = None,
+    output_dtype: Union[torch.dtype, None] = None,
 ):
     """
     Reconstructs the original weight matrix from its SVD components.
@@ -226,7 +225,7 @@ def reconstruct_weight_matrix(
 def project_gradient_to_orthogonal_space(
     svd_dict: SVDDecompositionDict,
     upcast_dtype: torch.dtype,
-    output_dtype: torch.dtype | None = None,
+    output_dtype: Union[torch.dtype, None] = None,
 ):
     """
     Projects the gradient of the low-rank parameters (U_low, V_low) to be orthogonal to the frozen high-rank subspace.
@@ -269,9 +268,11 @@ def project_gradient_to_orthogonal_space(
             end = start + local_dU.size(0)
             local_U_high = local_U_high[start:end]
         
-        # Perform projection computation in upcast_dtype
-        proj = local_U_high @ (local_U_high.transpose(0, 1) @ local_dU)
-        local_dU.sub_(proj)
+        # Perform projection computation in upcast_dtype using memory-efficient operations
+        # Memory-optimized projection: dU = dU - U_high @ (U_high.T @ dU)
+        # Use addmm_ for efficient in-place operation
+        proj_coeff = torch.mm(local_U_high.transpose(0, 1), local_dU)
+        local_dU.addmm_(local_U_high, proj_coeff, alpha=-1.0)
         
         # Cast back to output_dtype or original dtype
         target_dtype = output_dtype if output_dtype is not None else original_dU_dtype
@@ -302,9 +303,11 @@ def project_gradient_to_orthogonal_space(
             end = start + local_dV.size(1)
             local_V_high = local_V_high[:, start:end]
         
-        # Perform projection computation in upcast_dtype
-        proj = (local_dV @ local_V_high.transpose(0, 1)) @ local_V_high
-        local_dV.sub_(proj)
+        # Perform projection computation in upcast_dtype using memory-efficient operations
+        # Memory-optimized projection: dV = dV - (dV @ V_high.T) @ V_high
+        # Use addmm_ for efficient in-place operation
+        proj_coeff = torch.mm(local_dV, local_V_high.transpose(0, 1))
+        local_dV.addmm_(proj_coeff, local_V_high, alpha=-1.0)
         
         # Cast back to output_dtype or original dtype
         target_dtype = output_dtype if output_dtype is not None else original_dV_dtype
@@ -618,10 +621,10 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
         def __init__(
             self,
             config,
-            svd_config: dict[str, int] | None = None,
+            svd_config: Union[dict[str, int], None] = None,
             initialize_svd=True,
             upcast_dtype: torch.dtype = torch.float32,
-            output_dtype: torch.dtype | None = None,
+            output_dtype: Union[torch.dtype, None] = None,
             **kwargs,
         ):
             super().__init__(config, **kwargs)
@@ -646,7 +649,7 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
             cls,
             pretrained_model_name_or_path,
             *model_args,
-            svd_config: dict[str, int] | None = None,
+            svd_config: Union[dict[str, int], None] = None,
             model_name_or_class=None,
             custom_patterns=None,
             rank_ratio=0.5,
@@ -770,12 +773,8 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
 
                 def make_forward(sn, bias):
                     def forward(x):
-                        W = self._reconstruct_weight_by_safe_name(sn)
-
-                        # NOTE(osilkin): the model itself now stores variables to upcast SVD compute + output
-                        if W.dtype != x.dtype:
-                            W = W.to(x.dtype)
-                        return F.linear(x, W, bias)
+                        svd_dict = self.get_svd_dict(sn)
+                        return self._factorized_linear(x, svd_dict, bias)
 
                     return forward
 
@@ -890,13 +889,11 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
                     mod, attr = self._get_module_by_name(name)
                     bias = mod.bias if hasattr(mod, "bias") else None
 
-                    # Override linear projection with dynamic reconstruction
+                    # Override linear projection with memory-efficient factorized computation
                     def make_forward(sn, bias):
                         def forward(x):
-                            W = self._reconstruct_weight_by_safe_name(sn)
-                            if W.dtype != x.dtype:
-                                W = W.to(x.dtype)
-                            return F.linear(x, W, bias)
+                            svd_dict = self.get_svd_dict(sn)
+                            return self._factorized_linear(x, svd_dict, bias)
 
                         return forward
 
@@ -910,11 +907,100 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
             if dist.is_initialized():
                 torch.distributed.barrier()
 
+        def _factorized_linear(self, x, svd_dict, bias=None):
+            """
+            Memory-efficient factorized linear operation using SVD components.
+            
+            Computes: x @ (U_high @ S_high @ V_high + U_low @ S_low @ V_low)
+            As: (x @ V_high.T) @ (S_high @ U_high.T) + (x @ V_low.T) @ (S_low @ U_low.T)
+            
+            This avoids reconstructing the full weight matrix, using only rank-sized intermediates.
+            Handles both 2D and 3D input tensors (batch_size, seq_len, hidden_dim).
+            """
+            U_high = svd_dict["U_high"]
+            S_high = svd_dict["S_high"]
+            V_high = svd_dict["V_high"]
+            U_low = svd_dict["U_low"]
+            S_low = svd_dict["S_low"]
+            V_low = svd_dict["V_low"]
+            
+            # Ensure all tensors are on the same device and dtype as input
+            device = x.device
+            dtype = x.dtype
+            
+            # Handle both 2D and 3D input tensors
+            original_shape = x.shape
+            if x.dim() == 3:
+                # Flatten 3D input [batch, seq, hidden] -> [batch*seq, hidden] 
+                batch_size, seq_len, hidden_dim = x.shape
+                x_flat = x.view(-1, hidden_dim)
+            elif x.dim() == 2:
+                x_flat = x
+                batch_size, seq_len = None, None
+            else:
+                raise ValueError(f"Input tensor must be 2D or 3D, got {x.dim()}D")
+            
+            # Cast to appropriate dtypes for computation
+            upcast_dtype = self.upcast_dtype
+            target_dtype = dtype
+            
+            # High-rank component: x @ V_high.T @ (S_high @ U_high.T)
+            result = None
+            if U_high.numel() > 0 and S_high.numel() > 0:
+                # Cast to upcast dtype for numerical stability
+                V_high_work = V_high.to(device=device, dtype=upcast_dtype)
+                U_high_work = U_high.to(device=device, dtype=upcast_dtype)
+                S_high_work = S_high.to(device=device, dtype=upcast_dtype)
+                x_work = x_flat.to(upcast_dtype)
+                
+                # x @ V_high.T -> intermediate shape: (batch*seq, rank_high)
+                x_V = torch.mm(x_work, V_high_work.transpose(0, 1))
+                # (x @ V_high.T) @ (S_high @ U_high.T) -> final shape: (batch*seq, output_dim)
+                high_contrib = torch.mm(x_V * S_high_work.unsqueeze(0), U_high_work.transpose(0, 1))
+                result = high_contrib.to(target_dtype)
+            
+            # Low-rank component: x @ V_low.T @ (S_low @ U_low.T)
+            if U_low.numel() > 0 and S_low.numel() > 0:
+                # Cast to upcast dtype for numerical stability
+                V_low_work = V_low.to(device=device, dtype=upcast_dtype)
+                U_low_work = U_low.to(device=device, dtype=upcast_dtype)
+                S_low_work = S_low.to(device=device, dtype=upcast_dtype)
+                x_work = x_flat.to(upcast_dtype)
+                
+                # x @ V_low.T -> intermediate shape: (batch*seq, rank_low)
+                x_V = torch.mm(x_work, V_low_work.transpose(0, 1))
+                # (x @ V_low.T) @ (S_low @ U_low.T) -> final shape: (batch*seq, output_dim)
+                low_contrib = torch.mm(x_V * S_low_work.unsqueeze(0), U_low_work.transpose(0, 1))
+                low_contrib = low_contrib.to(target_dtype)
+                
+                if result is not None:
+                    result = result + low_contrib
+                else:
+                    result = low_contrib
+            
+            # Handle case where both components are empty (shouldn't happen in practice)
+            if result is None:
+                # Create zero output with correct shape
+                output_dim = U_high.size(0) if U_high.numel() > 0 else U_low.size(0)
+                result = torch.zeros(x_flat.size(0), output_dim, device=device, dtype=target_dtype)
+            
+            # Add bias if present
+            if bias is not None:
+                bias_work = bias.to(device=device, dtype=target_dtype)
+                result = result + bias_work.unsqueeze(0)
+            
+            # Restore original shape if input was 3D
+            if len(original_shape) == 3:
+                output_dim = result.size(-1)
+                result = result.view(batch_size, seq_len, output_dim)
+            
+            return result
+
         def _reconstruct_weight_by_safe_name(
             self,
             safe_name,
-            upcast_dtype: torch.dtype | None = None,
-            output_dtype: torch.dtype | None = None,
+            upcast_dtype: Union[torch.dtype, None] = None,
+            output_dtype: Union[torch.dtype, None] = None,
         ):
             """
             Reconstructs a decomposed weight matrix from saved buffers + trainable low-rank parameters
@@ -937,8 +1023,8 @@ def create_svd_model_class(base_cls) -> type[SVDModel]:
         def _reconstruct_weight(
             self,
             original_name,
-            upcast_dtype: torch.dtype | None = None,
-            output_dtype: torch.dtype | None = None,
+            upcast_dtype: Union[torch.dtype, None] = None,
+            output_dtype: Union[torch.dtype, None] = None,
         ):
             """Convenience wrapper to reconstruct using the original parameter name."""
             return self._reconstruct_weight_by_safe_name(
