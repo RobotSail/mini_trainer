@@ -2,7 +2,11 @@ name: PR Tests
 
 on:
   pull_request:
-    branches: [ main, master, develop ]
+    branches:
+      - main
+      - master
+      - develop
+      - add-tests  # dev branch for me to test out the PR
 
 jobs:
   test-py312:
