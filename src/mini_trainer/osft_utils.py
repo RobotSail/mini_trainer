@@ -221,13 +221,20 @@ def reconstruct_weight_matrix(
     return reconstructed
 
 
-def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict):
+def project_gradient_to_orthogonal_space(
+    svd_dict: SVDDecompositionDict,
+    upcast_dtype: torch.dtype = torch.float32,
+    output_dtype: torch.dtype | None = None,
+):
     """
     Projects the gradient of the low-rank parameters (U_low, V_low) to be orthogonal to the frozen high-rank subspace.
 
     This step ensures that learning new tasks does not interfere with previously learned representations by enforcing an orthogonality constraint.
 
-    TODO(osilkin): Add mixed-precision gradients here
+    Args:
+        svd_dict: Dictionary containing SVD components
+        upcast_dtype: Data type to use for computation (default: torch.float32 for numerical stability)
+        output_dtype: Data type for the output gradients (default: None, keeps original dtype)
     """
     # Skip if no gradients present (sanity check)
     if (
@@ -243,17 +250,30 @@ def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict):
     # Project U_low gradients to space orthogonal to U_high
     if svd_dict["U_low"].grad is not None:
         dU = svd_dict["U_low"].grad
+        original_dtype = dU.dtype
+
         # Support distributed tensors by operating on the local shard
         local_U_high = getattr(U_high, "to_local", lambda: U_high)()
         local_dU = getattr(dU, "to_local", lambda: dU)()
+
+        # Cast to upcast_dtype for numerical stability
+        local_U_high = local_U_high.to(upcast_dtype)
+        local_dU = local_dU.to(upcast_dtype)
+
         # Handle sharded tensors in distributed training
         if local_U_high.size(0) != local_dU.size(0):
             rank = torch.distributed.get_rank()
             start = rank * local_dU.size(0)
             end = start + local_dU.size(0)
             local_U_high = local_U_high[start:end]
+
+        # Perform projection in higher precision
         proj = local_U_high @ (local_U_high.transpose(0, 1) @ local_dU)
         local_dU.sub_(proj)
+
+        # Cast back to output dtype (or original if not specified)
+        final_dtype = output_dtype if output_dtype is not None else original_dtype
+        local_dU = local_dU.to(final_dtype)
         if hasattr(dU, "_local_tensor"):
             dU._local_tensor.copy_(local_dU)
         else:
@@ -262,15 +282,30 @@ def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict):
     # Repeat projection for V_low using V_high
     if svd_dict["V_low"].grad is not None:
         dV = svd_dict["V_low"].grad
+        original_dtype = dV.dtype
+
+        # Support distributed tensors by operating on the local shard
         local_V_high = getattr(V_high, "to_local", lambda: V_high)()
         local_dV = getattr(dV, "to_local", lambda: dV)()
+
+        # Cast to upcast_dtype for numerical stability
+        local_V_high = local_V_high.to(upcast_dtype)
+        local_dV = local_dV.to(upcast_dtype)
+
+        # Handle sharded tensors in distributed training
         if local_V_high.size(1) != local_dV.size(1):
             rank = torch.distributed.get_rank()
             start = rank * local_dV.size(1)
             end = start + local_dV.size(1)
             local_V_high = local_V_high[:, start:end]
+
+        # Perform projection in higher precision
         proj = (local_dV @ local_V_high.transpose(0, 1)) @ local_V_high
         local_dV.sub_(proj)
+
+        # Cast back to output dtype (or original if not specified)
+        final_dtype = output_dtype if output_dtype is not None else original_dtype
+        local_dV = local_dV.to(final_dtype)
         if hasattr(dV, "_local_tensor"):
             dV._local_tensor.copy_(local_dV)
         else:
@@ -930,7 +965,11 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             """
             for safe_name in self.osft_params.keys():
                 svd_dict = self.get_svd_dict(safe_name)
-                project_gradient_to_orthogonal_space(svd_dict)
+                project_gradient_to_orthogonal_space(
+                    svd_dict,
+                    upcast_dtype=self.upcast_dtype,
+                    output_dtype=None  # Keep gradients in their original dtype
+                )
 
         def prepare_state_dict_for_save(self, state_dict):
             """Reconstruct dense weights into ``state_dict`` for saving."""
