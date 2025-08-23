@@ -328,11 +328,6 @@ def train(
 
                 # delete the data we just sent to the model so that we can
                 # free up memory
-                del model_inputs['labels']
-                del model_inputs['position_ids']
-                del model_inputs['input_ids']
-                torch.cuda.empty_cache()
-
                 batch_totals.accumulate_minibatch_metrics(
                     num_loss_counted_tokens=mb_num_loss_counted_tokens,
                     num_total_tokens=mb['input_ids'].shape[1],
@@ -341,6 +336,22 @@ def train(
                     loss_backward=loss.detach().item()/world_size,
                     time_per_minibatch=time.time() - mb_start_time,
                 )
+                
+                # Delete ALL residuals from forward/backward pass
+                del output  # Delete model output (logits, hidden states, etc.)
+                del loss    # Delete loss tensor with its autograd graph
+                del mb      # Delete the minibatch data
+                del model_inputs['labels']
+                del model_inputs['position_ids'] 
+                del model_inputs['input_ids']
+                del model_inputs  # Delete the dict itself
+
+                # Clear any model-internal caches (especially for attention mechanisms)
+                if hasattr(model, 'reset_memory'):
+                    model.reset_memory()
+
+                torch.cuda.empty_cache()
+
             step += 1
             #sum the metrics from all processes
             batch_totals.reduce_batch_metrics(device)
@@ -388,8 +399,37 @@ def train(
             # sample-based saving, keep in the inner loop
             if min_samples_per_checkpoint is not None and total_samples_accumulated - last_saved_samples >= min_samples_per_checkpoint:
                 # Clear residual gradients and free GPU memory before saving
+                # optimizer.zero_grad()
+                # torch.cuda.empty_cache()
+                # torch.distributed.barrier()
+                  
+                # 1. Clear all gradients explicitly
                 optimizer.zero_grad()
+                with torch.no_grad():
+                    for param in model.parameters():
+                        param.grad = None
+    
+                # 2. Clear the autograd graph completely
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+    
+                # 3. For FSDP models, ensure all communication is complete
+                torch.distributed.barrier()
+    
+                # 4. Clear any cached activations in the model
+                if hasattr(model, '_fsdp_wrapped_module'):
+                    # FSDP specific cleanup
+                    model._fsdp_wrapped_module.zero_grad(set_to_none=True)
+    
+                # 5. Force garbage collection
+                import gc
+                gc.collect()
+    
+                # 6. Clear CUDA cache multiple times to ensure everything is freed
                 torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+    
                 torch.distributed.barrier()
                 
                 save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
@@ -416,16 +456,74 @@ def train(
         # since this shouldn't interefere with frequency-based saving
         if checkpoint_at_epoch:
             # Clear residual gradients and free GPU memory before saving
+            # optimizer.zero_grad()
+            # torch.cuda.empty_cache()
+            # torch.distributed.barrier()
+              
+            # 1. Clear all gradients explicitly
             optimizer.zero_grad()
+            with torch.no_grad():
+                for param in model.parameters():
+                    param.grad = None
+    
+            # 2. Clear the autograd graph completely
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+    
+            # 3. For FSDP models, ensure all communication is complete
+            torch.distributed.barrier()
+    
+            # 4. Clear any cached activations in the model
+            if hasattr(model, '_fsdp_wrapped_module'):
+                # FSDP specific cleanup
+                model._fsdp_wrapped_module.zero_grad(set_to_none=True)
+    
+            # 5. Force garbage collection
+            import gc
+            gc.collect()
+    
+            # 6. Clear CUDA cache multiple times to ensure everything is freed
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+    
             torch.distributed.barrier()
             
             save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
     
     if save_final_checkpoint:
         # Clear residual gradients and free GPU memory before saving
+        # optimizer.zero_grad()
+        # torch.cuda.empty_cache()
+        # torch.distributed.barrier()
+          
+        # 1. Clear all gradients explicitly
         optimizer.zero_grad()
+        with torch.no_grad():
+            for param in model.parameters():
+                param.grad = None
+    
+        # 2. Clear the autograd graph completely
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    
+        # 3. For FSDP models, ensure all communication is complete
+        torch.distributed.barrier()
+    
+        # 4. Clear any cached activations in the model
+        if hasattr(model, '_fsdp_wrapped_module'):
+            # FSDP specific cleanup
+            model._fsdp_wrapped_module.zero_grad(set_to_none=True)
+    
+        # 5. Force garbage collection
+        import gc
+        gc.collect()
+    
+        # 6. Clear CUDA cache multiple times to ensure everything is freed
         torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+    
         torch.distributed.barrier()
         
         save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
