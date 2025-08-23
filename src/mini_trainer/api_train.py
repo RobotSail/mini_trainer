@@ -6,7 +6,7 @@ import json
 import logging
 from pathlib import Path
 
-from mini_trainer.training_types import TorchrunArgs, TrainingArgs
+from mini_trainer.training_types import TorchrunArgs, TrainingArgs, TrainingMode
 
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,11 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-    
+
+    # Cast training mode into enum if string
+    if isinstance(train_args.training_mode, str):
+        train_args.training_mode = TrainingMode(train_args.training_mode)
+
     logger.info("Starting training setup...")
     
     # Ensure output directory exists

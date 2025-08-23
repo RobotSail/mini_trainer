@@ -26,6 +26,28 @@ def take_gradient_step(model, optimizer, lr_scheduler):
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
     lr_scheduler.step()
+
+    # enforce fp32
+    log_rank_0("Enforcing fp32")
+    for name, param in model.named_parameters():
+        if param.dtype != torch.float32:
+            raise ValueError(f"Parameter {name} is not fp32, but {param.dtype}")
+        if param.grad is not None and param.grad.dtype != torch.float32:
+            raise ValueError(f"Gradient of parameter {name} is not fp32, but {param.grad.dtype}")
+    
+    for name, param in model.named_buffers():
+        if param.dtype != torch.float32:
+            raise ValueError(f"Buffer {name} is not fp32, but {param.dtype}")
+    
+    for state in optimizer.state.values():
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor):
+                if v.dtype != torch.float32:
+                    raise ValueError(f"Optimizer state {k} is {v.dtype}, not torch.float32")
+                if v.grad is not None and v.grad.dtype != torch.float32:
+                    raise ValueError(f"Gradient of optimizer state {k} is {v.grad.dtype}, not torch.float32")
+    
+
     optimizer.zero_grad()
     return grad_norm
 
@@ -39,13 +61,21 @@ def save_model(fsdp_model, samples_seen, output_dir, model_name_or_path):
     rank = torch.distributed.get_rank()
     save_directory = Path(output_dir) / "hf_format" / f"samples_{samples_seen}"
     os.makedirs(save_directory, exist_ok=True)
+    
+    # Clear any lingering memory before getting state dict
+    torch.cuda.empty_cache()
+    torch.distributed.barrier()
+    
     # Get full state dict
     from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
     state_dict = get_model_state_dict(fsdp_model, options=StateDictOptions(full_state_dict=True))
     inner = getattr(fsdp_model, "module", fsdp_model)
     if hasattr(inner, "prepare_state_dict_for_save"):
         state_dict = inner.prepare_state_dict_for_save(state_dict)
+    
+    # Move to bfloat16 and clear cache to free up memory from original tensors
     state_dict = {k: v.to(torch.bfloat16) for k, v in state_dict.items()}
+    torch.cuda.empty_cache()
     
     if rank == 0:
         pattern = "model{suffix}.safetensors"
@@ -72,6 +102,10 @@ def save_model(fsdp_model, samples_seen, output_dir, model_name_or_path):
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
         tokenizer.save_pretrained(save_directory)
         log_rank_0(f"\033[1;38;2;0;255;255mSaved model at\033[0m {samples_seen} samples in {time.time() - start:.2f} seconds")
+    
+    # Clean up state dict and free memory
+    del state_dict
+    torch.cuda.empty_cache()
     torch.distributed.barrier()
 
 def reached_stop_condition(
@@ -239,7 +273,8 @@ def train(
     batch_totals = BatchMetrics()
     step = 0
     total_samples_accumulated = 0
-    total_tokens_processed = 0  # Track total loss-counted tokens for TOKEN mode
+    total_loss_tokens_seen = 0  # Track total loss-counted tokens for TOKEN mode
+    total_tokens_seen = 0
     last_saved_samples = 0
     device = next(model.parameters()).device
     epoch = 0
@@ -249,7 +284,7 @@ def train(
         training_mode=training_mode,
         current_epoch=epoch,
         current_step=step,
-        tokens_seen=total_tokens_processed,
+        tokens_seen=total_loss_tokens_seen,
         max_epochs=max_epochs,
         max_steps=max_steps,
         max_tokens=max_tokens
@@ -258,6 +293,9 @@ def train(
         data_loader.sampler.set_epoch(epoch)
         data_loader_it = iter(data_loader)
         for batch in data_loader_it:
+            # ones we backprop on
+            batch_num_loss_counted_tokens = 0
+            batch_total_tokens = 0  # ones that are just used for the initial distribution
             batch_start_time = time.time()
             batch_totals.reset_batch()
             torch.cuda.reset_peak_memory_stats()
@@ -265,7 +303,10 @@ def train(
                 mb_start_time = time.time()
                 mb_num_loss_counted_tokens = mb['num_loss_counted_tokens']
                 mb_num_samples = mb['num_samples']
+                
+                # this number will be equal across all mini/gradient-accumulated batches
                 batch_num_loss_counted_tokens = mb['batch_num_loss_counted_tokens']
+                batch_total_tokens = mb['total_tokens_in_batch']
                 
                 # be explicit about what gets sent to the device
                 model_inputs = {
@@ -283,6 +324,13 @@ def train(
                 loss = loss * world_size / batch_num_loss_counted_tokens
 
                 loss.backward()
+                dist.barrier()
+
+                # delete the data we just sent to the model so that we can
+                # free up memory
+                del model_inputs['labels']
+                del model_inputs['position_ids']
+                del model_inputs['input_ids']
                 torch.cuda.empty_cache()
 
                 batch_totals.accumulate_minibatch_metrics(
@@ -297,30 +345,38 @@ def train(
             #sum the metrics from all processes
             batch_totals.reduce_batch_metrics(device)
 
+            # compute the total tokens that were seen in the entire minibatch
+            total_loss_tokens_seen += batch_num_loss_counted_tokens # Track tokens for TOKEN mode
+            total_tokens_seen += batch_total_tokens
+            avg_tokens_per_gpu = batch_total_tokens / (world_size * (grad_accum+1))
+
             #use accumulated metrics to take a gradient step and logging
-            bm = batch_totals.totals
-            total_samples_accumulated += bm['num_samples']
-            total_tokens_processed += batch_num_loss_counted_tokens  # Track tokens for TOKEN mode
+            mb_totals = batch_totals.totals
+            total_samples_accumulated += mb_totals['num_samples']
             grad_norm = take_gradient_step(model, optimizer, lr_scheduler)
 
             if is_main_process:
                 batch_time = time.time() - batch_start_time
                 batch_metrics = {
+                        "current_epoch": epoch,
                         "step": step,
                         "lr": lr_scheduler.get_last_lr()[0],
                         "grad_norm": grad_norm.item(),
-                        "loss": bm['loss']/batch_num_loss_counted_tokens,
-                        "avg_loss_backward": bm['loss_backward']/(grad_accum+1),
-                        "num_samples": bm['num_samples'],
-                        "num_loss_counted_tokens": bm['num_loss_counted_tokens'],
+                        "loss": mb_totals['loss']/batch_num_loss_counted_tokens,
+                        "avg_loss_backward": mb_totals['loss_backward']/(grad_accum+1),
+                        "num_samples": mb_totals['num_samples'],
+                        "num_loss_counted_tokens": mb_totals['num_loss_counted_tokens'],
                         "batch_num_loss_counted_tokens": batch_num_loss_counted_tokens,
-                        "num_total_tokens": bm['num_total_tokens'],
+                        "batch_total_tokens": mb_totals['num_total_tokens'],
+                        "avg_tokens_per_gpu": avg_tokens_per_gpu,
                         "grad_accum": grad_accum+1,
-                        "avg_time_per_minibatch": bm['time_per_minibatch']/(grad_accum+1)/world_size,
+                        "avg_time_per_minibatch": mb_totals['time_per_minibatch']/(grad_accum+1)/world_size,
                         "time_per_batch": batch_time,
-                        "tokens_per_second": bm['num_total_tokens']/batch_time,
+                        "tokens_per_second": mb_totals['num_total_tokens']/batch_time,
                         "total_samples_accumulated": total_samples_accumulated, 
-                        "samples_per_second": bm['num_samples']/batch_time,
+                        "total_loss_counted_tokens_accumulated": total_loss_tokens_seen,
+                        "total_tokens_accumulated": total_tokens_seen,
+                        "samples_per_second": mb_totals['num_samples']/batch_time,
                         "peak_memory_usage_GB": float(torch.cuda.max_memory_allocated() / 1e9),
                     }
                 metric_logger.log_sync(
@@ -331,15 +387,22 @@ def train(
             
             # sample-based saving, keep in the inner loop
             if min_samples_per_checkpoint is not None and total_samples_accumulated - last_saved_samples >= min_samples_per_checkpoint:
+                # Clear residual gradients and free GPU memory before saving
+                optimizer.zero_grad()
+                torch.cuda.empty_cache()
+                torch.distributed.barrier()
+                
                 save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
                 last_saved_samples = total_samples_accumulated
+            torch.cuda.synchronize()
+            torch.distributed.barrier()
             
             # Check stopping condition after each step (for STEP and TOKEN modes)
             if reached_stop_condition(
                 training_mode=training_mode,
                 current_epoch=epoch,
                 current_step=step,
-                tokens_seen=total_tokens_processed,
+                tokens_seen=total_loss_tokens_seen,
                 max_epochs=max_epochs,
                 max_steps=max_steps,
                 max_tokens=max_tokens
@@ -352,9 +415,19 @@ def train(
         # save at the current number of samples seen. Do not record `last_saved_samples`
         # since this shouldn't interefere with frequency-based saving
         if checkpoint_at_epoch:
+            # Clear residual gradients and free GPU memory before saving
+            optimizer.zero_grad()
+            torch.cuda.empty_cache()
+            torch.distributed.barrier()
+            
             save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
     
     if save_final_checkpoint:
+        # Clear residual gradients and free GPU memory before saving
+        optimizer.zero_grad()
+        torch.cuda.empty_cache()
+        torch.distributed.barrier()
+        
         save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
 
 

@@ -8,9 +8,9 @@ build-backend = "setuptools.build_meta"
 name = "rhai-innovation-mini-trainer"
 dynamic = ["version"] 
 description = "Simple training repo which is used to house reference implementations of emerging training algorithms, such as Orthogonal Subspace Fine Tuning (OSFT)."
-readme = "Readme.md"
+readme = "README.md"
+license = {text = "Apache-2.0"}
 requires-python = ">=3.11,<3.13"
-license = {text = "MIT"}
 authors = [
     {name = "Mini Trainer Contributors"}
 ]
@@ -55,6 +55,7 @@ dev = [
     "ruff",
     "ipython", 
     "ipdb",
+    "ipykernel"
 ]
 
 [project.urls]
@@ -62,10 +63,12 @@ Homepage = "https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer"
 Repository = "https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer"
 Issues = "https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer/issues"
 
+# ✅
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["mini_trainer*"]
 
+# ✅
 [tool.setuptools.package-data]
 "*" = ["*.md", "*.txt"]
 

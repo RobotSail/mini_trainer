@@ -60,7 +60,7 @@ class TrainingArgs:
     min_samples_per_checkpoint: Optional[int] = field(default=None, metadata={"help": "If provided, this must be the number of samples to process before saving a checkpoint."})
     
     # Training mode and stopping criteria
-    training_mode: TrainingMode = field(default=TrainingMode.EPOCH, metadata={
+    training_mode: TrainingMode | str = field(default=TrainingMode.EPOCH, metadata={
         "help": (
             "The training mode to use.\n"
             "EPOCH: Train for a fixed number of epochs.\n"

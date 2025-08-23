@@ -157,7 +157,7 @@ class EpochSampler(Sampler):
         return self.len_data
 
 
-def mb_collate_fn(minibatch, batch_num_loss_counted_tokens):
+def mb_collate_fn(minibatch, batch_num_loss_counted_tokens: int, total_tokens_in_batch: int):
     """Collates a list of samples into a single packed batch for Flash Attention.
 
     This function takes a 'minibatch' (list of pre-fetched dataset samples)
@@ -221,6 +221,8 @@ def mb_collate_fn(minibatch, batch_num_loss_counted_tokens):
         "num_loss_counted_tokens": num_loss_counted_tokens,
         "num_samples": num_samples,
         "batch_num_loss_counted_tokens": batch_num_loss_counted_tokens,
+        "total_tokens_in_batch": total_tokens_in_batch,
+        "tokens_in_local_microbatch": total_len,
     }
     
 class MaxTokensPerRankCollator:
@@ -274,12 +276,13 @@ class MaxTokensPerRankCollator:
         # Use filtered batch for lengths and loss counts
         batch_lengths = [sample['len'] for sample in batch_]
         batch_num_loss_counted_tokens = sum([sample['num_loss_counted_tokens'] for sample in batch_])
+        total_tokens_in_batch = sum(batch_lengths)
         all_minibatches_indices = batch_lengths_to_minibatches_lpt(batch_lengths, self.max_tokens_per_rank, self.world_size, self.rank)
         
         all_minibatches = []
         for mb_indices in all_minibatches_indices:
             mb = [batch_[i] if i != -1 else self.dummy_sample for i in mb_indices]
-            all_minibatches.append(mb_collate_fn(mb, batch_num_loss_counted_tokens))
+            all_minibatches.append(mb_collate_fn(mb, batch_num_loss_counted_tokens, total_tokens_in_batch))
 
         return all_minibatches
     
