@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import json
 from typing import Annotated, Literal
-
+import wandb
 from typer import Typer, Option
 
 from mini_trainer.async_structured_logger import AsyncStructuredLogger
@@ -11,7 +11,7 @@ import torch
 import torch.distributed as dist
 
 from mini_trainer.batch_metrics import BatchMetrics
-from mini_trainer.sampler import get_data_loader
+from mini_trainer.sampler import get_data_loader, get_train_val_data_loaders
 from mini_trainer.setup_model_for_training import setup_model, setup_training_components
 from mini_trainer.utils import init_distributed_environment, log_rank_0, setup_logger, get_node_rank
 from mini_trainer.training_types import TrainingMode
@@ -163,6 +163,87 @@ def save_model(
     torch.distributed.barrier()
     log_rank_0(f"✅ Saved model at {samples_seen} samples in {time.time() - start:.2f} seconds")
 
+def compute_validation_loss(model, val_data_loader, device, world_size):
+    """Compute validation loss on the validation dataset.
+    
+    Args:
+        model: The model to evaluate
+        val_data_loader: Validation data loader
+        device: Device to run evaluation on
+        world_size: Number of distributed processes
+        
+    Returns:
+        dict: Dictionary containing validation metrics
+    """
+    if val_data_loader is None:
+        return {}
+    
+    log_rank_0("Computing validation loss...")
+    model.eval()
+    val_batch_totals = BatchMetrics()
+    total_val_batches = 0
+    
+    with torch.no_grad():
+        val_data_loader.sampler.set_epoch(0)  # Use epoch 0 for validation
+        val_data_loader_it = iter(val_data_loader)
+        
+        for batch in val_data_loader_it:
+            val_batch_totals.reset_batch()
+            
+            for grad_accum, mb in enumerate(batch):
+                mb_num_loss_counted_tokens = mb['num_loss_counted_tokens']
+                mb_num_samples = mb['num_samples']
+                batch_num_loss_counted_tokens = mb['batch_num_loss_counted_tokens']
+                
+                # Send inputs to device
+                model_inputs = {
+                    'input_ids': mb['input_ids'].to(device),
+                    'labels': mb['labels'].to(device),
+                    'position_ids': mb['position_ids'].to(device),
+                }
+                
+                # Forward pass
+                output = model(**model_inputs)
+                loss = output.loss.float().sum()
+                loss_metrics = loss.detach().item()
+                
+                val_batch_totals.accumulate_minibatch_metrics(
+                    num_loss_counted_tokens=mb_num_loss_counted_tokens,
+                    num_total_tokens=mb['input_ids'].shape[1],
+                    num_samples=mb_num_samples,
+                    loss=loss_metrics,
+                    loss_backward=0.0,  # No backward pass for validation
+                    time_per_minibatch=0.0,  # Not tracking time for validation
+                )
+            
+            # Reduce metrics across all processes
+            val_batch_totals.reduce_batch_metrics(device)
+            total_val_batches += 1
+    
+    # Calculate average validation metrics and synchronize across all processes
+    vbm = val_batch_totals.totals
+    if total_val_batches > 0 and vbm['num_loss_counted_tokens'] > 0:
+        avg_val_loss = vbm['loss'] / vbm['num_loss_counted_tokens']
+        
+        # Create tensor for synchronization across all processes
+        val_loss_tensor = torch.tensor([avg_val_loss], device=device, dtype=torch.float32)
+        dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
+        synchronized_val_loss = (val_loss_tensor / world_size).item()
+        
+        val_metrics = {
+            'val_loss': synchronized_val_loss,
+            'val_num_samples': vbm['num_samples'],
+            'val_num_loss_counted_tokens': vbm['num_loss_counted_tokens'],
+            'val_num_batches': total_val_batches,
+        }
+        log_rank_0(f"Validation loss: {synchronized_val_loss:.6f}")
+    else:
+        val_metrics = {}
+        log_rank_0("No validation data processed")
+    
+    model.train()  # Set back to training mode
+    return val_metrics
+
 def reached_stop_condition(
     training_mode: TrainingMode, 
     current_epoch: int, 
@@ -303,6 +384,9 @@ def train(
         max_tokens: int = 0,
         checkpoint_at_epoch: bool = False,
         save_final_checkpoint: bool = False,
+        use_wandb: bool = False,
+        val_data_loader: torch.utils.data.DataLoader | None = None,
+        validation_frequency: int = 100,
     ):
     """
     Runs the model training loop.
@@ -327,6 +411,8 @@ def train(
         max_tokens (int, optional): Maximum number of loss-counted tokens (for TOKEN mode). Defaults to 0.
         checkpoint_at_epoch (bool, optional): Whether to save checkpoints at epoch end. Defaults to False.
         save_final_checkpoint (bool, optional): Whether to save a final checkpoint at training end. Defaults to False.
+        val_data_loader (torch.utils.data.DataLoader | None, optional): Validation data loader. If provided, validation loss will be computed. Defaults to None.
+        validation_frequency (int, optional): Frequency of validation evaluation in steps. Defaults to 100.
 
     Note:
         The training_mode can be provided as either a TrainingMode enum value or a string:
@@ -339,6 +425,8 @@ def train(
         RuntimeError: If distributed training is not properly initialized.
         ValueError: If training mode requirements are not met.
     """
+    log_rank_0(f"Training model: {model_name_or_path}")
+
     # just ensure that the way we are being prompted to train is correct
     validate_training_mode(training_mode, max_epochs, max_steps, max_tokens)
 
@@ -348,6 +436,7 @@ def train(
     # control args 
     world_size = int(os.environ["WORLD_SIZE"])
     is_local_main_process = int(os.getenv("LOCAL_RANK", 0)) == 0
+    is_main_process = int(os.getenv("RANK", 0)) == 0
     metric_logger = AsyncStructuredLogger(output_dir + f"/training_metrics_{get_node_rank()}.jsonl")
 
     # initialize variables
@@ -363,6 +452,7 @@ def train(
     last_saved_samples = 0 
     device = next(model.parameters()).device
     epoch = 0
+    last_validation_loss = None  # Track the most recent validation loss
 
     # main training loop
     while not reached_stop_condition(
@@ -423,28 +513,35 @@ def train(
             total_tokens_processed += batch_num_loss_counted_tokens  # Track tokens for TOKEN mode
             grad_norm = take_gradient_step(model, optimizer, lr_scheduler)
 
-            # Log only on the main local rank
+            batch_time = time.time() - batch_start_time
+            batch_metrics = {
+                    "step": step,
+                    "lr": lr_scheduler.get_last_lr()[0],
+                    "grad_norm": grad_norm.item(),
+                    "loss": bm['loss']/batch_num_loss_counted_tokens,
+                    "avg_loss_backward": bm['loss_backward']/(grad_accum+1),
+                    "num_samples": bm['num_samples'],
+                    "num_loss_counted_tokens": bm['num_loss_counted_tokens'],
+                    "batch_num_loss_counted_tokens": batch_num_loss_counted_tokens,
+                    "num_total_tokens": bm['num_total_tokens'],
+                    "grad_accum": grad_accum+1,
+                    "avg_time_per_minibatch": bm['time_per_minibatch']/(grad_accum+1)/world_size,
+                    "time_per_batch": batch_time,
+                    "tokens_per_second": bm['num_total_tokens']/batch_time,
+                    "total_samples_accumulated": total_samples_accumulated, 
+                    "total_tokens_accumulated": total_tokens_processed,
+                    "samples_per_second": bm['num_samples']/batch_time,
+                    "peak_memory_usage_GB": float(torch.cuda.max_memory_allocated() / 1e9),
+                }
+            # Add validation metrics if it's time to validate
+            if val_data_loader is not None and step % validation_frequency == 0:
+                val_metrics = compute_validation_loss(model, val_data_loader, device, world_size)
+                if val_metrics and 'val_loss' in val_metrics:
+                    last_validation_loss = val_metrics['val_loss']
+                    print(f"Validation loss: {last_validation_loss}")
+                batch_metrics.update(val_metrics)
+
             if is_local_main_process:
-                batch_time = time.time() - batch_start_time
-                batch_metrics = {
-                        "step": step,
-                        "lr": lr_scheduler.get_last_lr()[0],
-                        "grad_norm": grad_norm.item(),
-                        "loss": bm['loss']/batch_num_loss_counted_tokens,
-                        "avg_loss_backward": bm['loss_backward']/(grad_accum+1),
-                        "num_samples": bm['num_samples'],
-                        "num_loss_counted_tokens": bm['num_loss_counted_tokens'],
-                        "batch_num_loss_counted_tokens": batch_num_loss_counted_tokens,
-                        "num_total_tokens": bm['num_total_tokens'],
-                        "grad_accum": grad_accum+1,
-                        "avg_time_per_minibatch": bm['time_per_minibatch']/(grad_accum+1)/world_size,
-                        "time_per_batch": batch_time,
-                        "tokens_per_second": bm['num_total_tokens']/batch_time,
-                        "total_samples_accumulated": total_samples_accumulated, 
-                        "total_tokens_accumulated": total_tokens_processed,
-                        "samples_per_second": bm['num_samples']/batch_time,
-                        "peak_memory_usage_GB": float(torch.cuda.max_memory_allocated() / 1e9),
-                    }
                 metric_logger.log_sync(
                     batch_metrics
                 )
@@ -465,6 +562,8 @@ def train(
                 # track this save so others (e.g. epoch, final) don't duplicate save
                 last_saved_samples = total_samples_accumulated
             
+            torch.distributed.barrier()
+
             # Check stopping condition after each step (for STEP and TOKEN modes)
             if reached_stop_condition(
                 training_mode=training_mode,
@@ -480,6 +579,8 @@ def train(
         # Increment epoch counter after completing an epoch
         epoch += 1
         
+        # save at the current number of samples seen. Do not record `last_saved_samples`
+        # since this shouldn't interefere with frequency-based saving
         if checkpoint_at_epoch:
             # should save at the end of each epoch
             if should_save_checkpoint(
@@ -493,6 +594,7 @@ def train(
             else:
                 log_rank_0(f"Skipping checkpoint save at epoch {epoch} because no new samples have been processed since the last checkpoint.")
     
+    torch.distributed.barrier()
     if save_final_checkpoint:
         # save one last time if we haven't yet
         if should_save_checkpoint(
@@ -505,6 +607,10 @@ def train(
             last_saved_samples = total_samples_accumulated
         else:
             log_rank_0(f"Skipping final checkpoint save because no new samples have been processed since the last checkpoint.")
+    
+    # Update params with final validation loss if available
+    if last_validation_loss is not None and is_main_process and use_wandb:
+        wandb.config.update({"validation_loss": last_validation_loss})
 
 
 def calculate_num_training_steps(
@@ -592,6 +698,21 @@ def main(
     checkpoint_at_epoch: Annotated[bool, Option(help="Whether to save checkpoints at the end of each epoch")] = False,
     save_final_checkpoint: Annotated[bool, Option(help="Whether to save a final checkpoint when training ends")] = False,
     save_dtype: Annotated[str | None, Option(help="Dtype to save the model in. If None, uses original model dtype. Can be 'float16', 'bfloat16', 'float32', etc.")] = None,
+    
+    # optimizer parameters
+    optimizer: Annotated[str, Option(help="Optimizer type: adamw, muon")] = "adamw",
+    # muon params
+    muon_momentum: Annotated[float, Option(help="Muon momentum")] = 0.95,
+    adamw_learning_rate: Annotated[float, Option(help="AdamW learning rate for non-Muon parameters (only used when optimizer is muon)")] = 5e-6,
+    
+    # validation parameters
+    validation_split: Annotated[float, Option(help="Fraction of data to use for validation (0.0 to 1.0)")] = 0.0,
+    validation_frequency: Annotated[int, Option(help="Frequency of validation evaluation (in steps)")] = 100,
+    
+    # wandb parameters
+    wandb_project: Annotated[str | None, Option(help="Weights & Biases project name")] = None,
+    wandb_run_name: Annotated[str | None, Option(help="Weights & Biases run name")] = None,
+    wandb_entity: Annotated[str | None, Option(help="Weights & Biases entity/team name")] = None,
 ):
     
     init_distributed_environment()
@@ -608,9 +729,19 @@ def main(
         if osft_target_patterns:
             osft_target_patterns = osft_target_patterns.replace("'", "").replace('"', "").replace(" ", "").split(",")
     
+    # Validate validation split
+    if validation_split < 0.0 or validation_split >= 1.0:
+        raise ValueError("validation_split must be between 0.0 and 1.0 (exclusive)")
+    
+    if validation_split > 0.0 and validation_frequency <= 0:
+        raise ValueError("validation_frequency must be positive when validation_split > 0")
+    
     # Convert string dtypes to torch dtypes
     osft_upcast_dtype_torch = parse_dtype(osft_upcast_dtype)
     osft_output_dtype_torch = parse_dtype(osft_output_dtype)
+    
+    # Initialize wandb if project is specified
+    use_wandb = wandb_project is not None
     
     # Log parameters only on rank 0
     local_rank = int(os.getenv("LOCAL_RANK", 0))
@@ -642,16 +773,40 @@ def main(
             "max_tokens": max_tokens,
             "checkpoint_at_epoch": checkpoint_at_epoch,
             "save_final_checkpoint": save_final_checkpoint,
-            "GLOBA_RANK": global_rank,
+            "optimizer": optimizer,
+            "muon_momentum": muon_momentum,
+            "adamw_learning_rate": adamw_learning_rate,
+            "validation_split": validation_split,
+            "validation_frequency": validation_frequency,
+            "validation_loss": None,  # Will be updated with the last validation loss
+            "LOCAL_RANK": local_rank,
+            "GLOBAL_RANK": global_rank,
             "NODE_RANK": node_rank,
-            "WORLD_SIZE": world_size
+            "WORLD_SIZE": world_size,
         }
+        
+        # Initialize wandb with the same params config
+        if use_wandb:
+            import wandb
+            wandb.init(
+                project=wandb_project,
+                name=wandb_run_name,
+                entity=wandb_entity,
+                config=params,
+                # Sync tensorboard logs if they exist
+                # sync_tensorboard=True,
+            )
+            log_rank_0(f"Initialized wandb project: {wandb_project}")
+        
         params_path = output_path / "training_params.json"
         with open(params_path, 'w') as f:
             json.dump(params, f, indent=4)
         # Pretty print parameters in a single line using JSON
         print(f"Training with parameters: {json.dumps(params, separators=(',', ':'), indent=4)}")
         print(f"Training parameters saved to {params_path}")
+
+        
+
 
     setup_logger(level="INFO")
 
@@ -665,12 +820,24 @@ def main(
     
     # grab the data loader prior to the model so we can extract the dataset length
     # and use this for calculating the number of training steps in the data loader
-    data_loader = get_data_loader(
-        data_path=data_path,
-        batch_size=batch_size,
-        max_tokens_per_gpu=max_tokens_per_gpu,
-        seed=seed,
-    )
+    if validation_split > 0.0:
+        data_loader, val_data_loader = get_train_val_data_loaders(
+            data_path=data_path,
+            batch_size=batch_size,
+            max_tokens_per_gpu=max_tokens_per_gpu,
+            seed=seed,
+            validation_split=validation_split,
+        )
+        log_rank_0(f"Created train/validation split with {validation_split:.1%} validation data")
+    else:
+        data_loader = get_data_loader(
+            data_path=data_path,
+            batch_size=batch_size,
+            max_tokens_per_gpu=max_tokens_per_gpu,
+            seed=seed,
+        )
+        val_data_loader = None
+        log_rank_0("No validation split - using all data for training")
     
     # Calculate number of training steps based on training mode
     num_training_steps = calculate_num_training_steps(
@@ -704,6 +871,9 @@ def main(
         lr_scheduler=lr_scheduler,
         num_training_steps=num_training_steps,
         scheduler_kwargs=scheduler_kwargs_dict,
+        optimizer=optimizer,
+        muon_momentum=muon_momentum,
+        adamw_learning_rate=adamw_learning_rate,
     )
     
     train(
@@ -719,7 +889,10 @@ def main(
         max_steps=max_steps,
         max_tokens=max_tokens,
         checkpoint_at_epoch=checkpoint_at_epoch,
-        save_final_checkpoint=save_final_checkpoint
+        save_final_checkpoint=save_final_checkpoint,
+        use_wandb=use_wandb,
+        val_data_loader=val_data_loader,
+        validation_frequency=validation_frequency,
     )
     
 if __name__ == "__main__":

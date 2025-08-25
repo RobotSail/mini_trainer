@@ -7,24 +7,25 @@ from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
+import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from mini_trainer.utils import log_rank_0, patch_target_module
 from mini_trainer.osft_utils import OSFTModel
-
+from muon_fsdp2 import Muon
 
 
 # New simple HF-only activation-checkpointing + FSDP2 wrapper
 # This mirrors TorchTitan: checkpoint each block, then shard each block and the full model.
 def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     # Move model to GPU and disable HuggingFace cache
-    if model.device.type != 'cuda':
+    if model.device.type != "cuda":
         # Move the model to the GPU if it's not already there
         local_rank = int(os.environ['LOCAL_RANK'])
         device = torch.device('cuda', local_rank)
         model.to(device)
 
-    if hasattr(model, 'config'):
+    if hasattr(model, "config"):
         try:
             model.config.use_cache = False
         except Exception as e:
@@ -54,11 +55,14 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     # 4) FSDP2 wrap each block
     for idx, block in enumerate(layers):
         reshard = idx < len(layers) - 1
-        fully_shard(block, mesh=mesh, mp_policy=mp_policy, reshard_after_forward=reshard)
+        fully_shard(
+            block, mesh=mesh, mp_policy=mp_policy, reshard_after_forward=reshard
+        )
 
     # 5) FSDP2 wrap full model
     fully_shard(model, mesh=mesh, mp_policy=mp_policy, reshard_after_forward=True)
     return model
+
 
 def align_model_and_tokenizer(model, tokenizer):
     """
@@ -74,17 +78,20 @@ def align_model_and_tokenizer(model, tokenizer):
 
     # Fix any discrepancy between model and tokenizer
     special_tokens = {
-        'pad': ('pad_token_id', 'Fixing model pad token id'),
-        'bos': ('bos_token_id', 'Fixing model bos token id'),
-        'eos': ('eos_token_id', 'Fixing model eos token id')
+        "pad": ("pad_token_id", "Fixing model pad token id"),
+        "bos": ("bos_token_id", "Fixing model bos token id"),
+        "eos": ("eos_token_id", "Fixing model eos token id"),
     }
 
     for token_type, (token_attr, message) in special_tokens.items():
         model_token = getattr(model.config, token_attr)
         tokenizer_token = getattr(tokenizer, token_attr)
-        
-        if (model_token is not None and tokenizer_token is not None 
-            and model_token != tokenizer_token):
+
+        if (
+            model_token is not None
+            and tokenizer_token is not None
+            and model_token != tokenizer_token
+        ):
             log_rank_0(
                 "\033[38;5;226m"
                 f"WARNING: There is a mismatch between {token_type} token id of "
@@ -206,11 +213,11 @@ def setup_model(
             hf_fixed_cross_entropy_none_reduction,
         )
         ModelClass = AutoModelForCausalLM
-    
+
     def load_standard_model():
         model = ModelClass.from_pretrained(**base_model_args)
         return align_model_and_tokenizer(model, tokenizer)
-    
+
     # Load a subclassed model that supports orthogonal subspace learning using SVD decomposition
     def load_osft_model():
         # Import utility to decompose weights and inject projected low-rank updates
@@ -236,7 +243,7 @@ def setup_model(
             initialize_osft=False,
             **osft_kwargs,
         )
-        
+
         # we need to set these as attributes because HF Transformers
         # doesn't like torch.dtype to be passed in through kwargs (aside from the `torch_dtype` kwarg)
         model.upcast_dtype = osft_upcast_dtype
@@ -282,7 +289,7 @@ def setup_model(
 
     if model.__class__.__name__ not in [
         "MistralForCausalLM",
-        "GPTDolomiteForCausalLM", 
+        "GPTDolomiteForCausalLM",
         "LlamaForCausalLM",
         "Starcoder2ForCausalLM",
         "GemmaForCausalLM",
@@ -301,6 +308,45 @@ def setup_model(
     # torch.compile(model)
     return model
 
+# THIS IS GRANITE SPECIFIC AND NOT SCALABLE
+def is_muon_param(name: str, param):
+    # muon only accepts 2d params
+    if param.ndim != 2:
+        return False
+
+    # 1d in disguise
+    if param.ndim == 2 and any(s == param.numel() for s in param.shape):
+        return False
+
+    if isinstance(param, nn.Embedding):
+        return False
+
+    # filter out embedding layers and lm_head
+    if ('embed_tokens' in name or "lm_head" in name):
+        return False
+
+    if 'embed' in name:
+        log_rank_0(
+            f"\033[38;2;255;255;0mWarning: Parameter '{name}' contains 'embed' but is not 'embed_tokens' or 'lm_head'. Treating as Muon parameter.\033[0m",
+            to_print=True,
+        )
+    
+    return True
+
+
+
+def select_muon_params(named_params):
+    for n, p in named_params:
+        if is_muon_param(n, p):
+            yield p
+
+
+def select_adam_params(named_params):
+    for n, p in named_params:
+        if not is_muon_param(n, p):
+            yield p
+
+
 def setup_training_components(
     model: torch.nn.Module,
     learning_rate: float,
@@ -308,6 +354,9 @@ def setup_training_components(
     lr_scheduler: str,
     num_training_steps: Optional[int] = None,
     scheduler_kwargs: Optional[Dict[str, Any]] = None,
+    optimizer: str = "adamw",
+    muon_momentum: float = 0.95,
+    adamw_learning_rate: float = 5e-6,
 ) -> tuple[torch.nn.Module, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
     """
     Set up training components including model wrapping, optimizer, and learning rate scheduler.
@@ -324,18 +373,71 @@ def setup_training_components(
         Tuple of (wrapped_model, optimizer, lr_scheduler)
     """
     from transformers import get_scheduler
-    
+
     # Using FSDP2 wrapper
     log_rank_0("Using FSDP2 wrapper")
     model = wrap_fsdp2(model)
+
+    # Create optimizer based on the specified type
+    optimizer_type = optimizer
     
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=learning_rate,
-        betas=(0.9, 0.95),
-        weight_decay=0.0,
-    )
+    if optimizer_type == "adamw":
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=learning_rate,
+            betas=(0.9, 0.95),
+            weight_decay=0.0,
+        )
+    elif optimizer_type == "muon":
+        muon_params = select_muon_params(model.named_parameters())
+        adam_params = select_adam_params(model.named_parameters())
+        # assert len(list(muon_params)) > 0
+        # assert len(list(adam_params)) > 0
+
+        optimizer = Muon(
+           [
+               {
+                   # send nothing here
+                   "params": muon_params,
+                   "lr": learning_rate,
+                   "use_muon": True,
+                   "momentum": muon_momentum,
+                   "weight_decay": 0.0,
+                   "ns_steps": 5,
+                   "nesterov": True,
+               },
+               {
+                   "params": adam_params,
+                   "lr": adamw_learning_rate,
+                   "use_muon": False,
+                   "betas": (0.9, 0.95),
+                   "weight_decay": 0.0,
+               },
+           ],
+           # wd=0.0,
+        #    ns_steps=5,
+           # momentum=0.9,
+        )
+        # Log parameter counts for Muon optimizer
+        muon_param_count = sum(p.numel() for p in select_muon_params(model.named_parameters()))
+        adam_param_count = sum(p.numel() for p in select_adam_params(model.named_parameters()))
+        total_param_count = muon_param_count + adam_param_count
+        
+        log_rank_0(f"Muon optimizer parameter distribution:")
+        log_rank_0(f"  Muon parameters: {muon_param_count:,} ({muon_param_count/total_param_count*100:.1f}%)")
+        for n, p in model.named_parameters():
+            if is_muon_param(n, p):
+                log_rank_0(f"    {n}: {p.numel():,}, {p.shape}")
+        log_rank_0(f"  Adam parameters: {adam_param_count:,} ({adam_param_count/total_param_count*100:.1f}%)")
+        for n, p in model.named_parameters():
+            if not is_muon_param(n, p):
+                log_rank_0(f"    {n}: {p.numel():,}, {p.shape}")
+        log_rank_0(f"  Total parameters: {total_param_count:,}")
+    else:
+        raise ValueError(f"Unsupported optimizer type: {optimizer_type}")
+    
     from mini_trainer.osft_utils import optim_wrapper
+
     optimizer = optim_wrapper(optimizer, model)
     # Prepare scheduler kwargs
     if scheduler_kwargs is None:
@@ -349,6 +451,5 @@ def setup_training_components(
         scheduler_specific_kwargs=scheduler_kwargs,
     )
     lr_scheduler.split_batches = True
-    lr_scheduler.step() #the scheduler starts at 0 and there's no learning.
+    lr_scheduler.step()  # the scheduler starts at 0 and there's no learning.
     return model, optimizer, lr_scheduler
-

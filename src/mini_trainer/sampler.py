@@ -101,8 +101,46 @@ def batch_lengths_to_minibatches(batch_lengths: list[int], max_tokens_per_rank: 
     return [m[rank] for m in minibatches_indices]
 
 class JsonlDataset(Dataset):
-    def __init__(self, path: str = "/new_data/aldo/v1_reasoning/math_simplerl_qwen_data_token_ids.jsonl"):
+    def __init__(
+        self,
+        path: str = "/new_data/aldo/v1_reasoning/math_simplerl_qwen_data_token_ids.jsonl",
+        max_seq_len: int = None,
+        indices: list[int] = None,
+    ):
         dataset = load_dataset("json", data_files=path, split="train")
+        # Ensure required fields are present in the dataset
+        assert "input_ids" in dataset.features, "Dataset must contain 'input_ids' field"
+        assert "labels" in dataset.features, "Dataset must contain 'labels' field"
+
+        # Set the length there if it's not already there
+        if "len" not in dataset.features:
+            dataset = dataset.map(lambda s: {"len": len(s["input_ids"])})
+
+        # Set the number of loss counted tokens per-sample:
+        if "num_loss_counted_tokens" not in dataset.features:
+            dataset = dataset.map(
+                lambda s: {
+                    "num_loss_counted_tokens": sum(
+                        1 for tok in s["labels"] if tok != -100
+                    )
+                }
+            )
+
+        # Filter out samples that are too long if max_seq_len is specified
+        if max_seq_len is not None:
+            original_size = len(dataset)
+            dataset = dataset.filter(lambda x: x["len"] <= max_seq_len)
+            filtered_size = len(dataset)
+            removed_count = original_size - filtered_size
+            if removed_count > 0:
+                print(
+                    f"\033[33mFiltered out {removed_count} samples (out of {original_size}) that exceed max_seq_len={max_seq_len}\033[0m"
+                )
+
+        # If indices are provided, select only those samples
+        if indices is not None:
+            dataset = dataset.select(indices)
+            
         self.dataset = dataset
 
     def __len__(self):
@@ -289,7 +327,35 @@ class MaxTokensPerRankCollator:
             all_minibatches.append(mb_collate_fn(mb, batch_num_loss_counted_tokens))
 
         return all_minibatches
+
+def create_train_val_split(dataset_size: int, validation_split: float, seed: int = 67):
+    """Create train/validation split indices.
     
+    Args:
+        dataset_size: Total number of samples in the dataset
+        validation_split: Fraction of data to use for validation (0.0 to 1.0)
+        seed: Random seed for reproducible splits
+        
+    Returns:
+        tuple: (train_indices, val_indices)
+    """
+    if validation_split <= 0.0:
+        return list(range(dataset_size)), []
+    
+    # Create shuffled indices
+    g = torch.Generator()
+    g.manual_seed(seed)
+    indices = torch.randperm(dataset_size, generator=g).tolist()
+    
+    # Calculate split point
+    val_size = int(dataset_size * validation_split)
+    train_size = dataset_size - val_size
+    
+    train_indices = indices[:train_size]
+    val_indices = indices[train_size:]
+    
+    return train_indices, val_indices
+
 def get_data_loader(
     data_path: str,
     batch_size: int,
@@ -299,13 +365,17 @@ def get_data_loader(
     world_size: int | None = None,
     dummy_sample: dict | None = None,
     num_workers: int = 0,
+    indices: list[int] | None = None,
 ):
     """Create a data loader with epoch-based sampling.
     
     The EpochSampler is used for all training modes (EPOCH, STEP, TOKEN, and INFINITE).
     For infinite training, the training loop will continue iterating over epochs indefinitely.
+    
+    Args:
+        indices: Optional list of indices to use for this data loader (for train/val split)
     """
-    dataset = JsonlDataset(data_path)
+    dataset = JsonlDataset(data_path, indices=indices)
     sampler = EpochSampler(len(dataset), seed=seed)
     
     return DataLoader(
@@ -322,6 +392,59 @@ def get_data_loader(
         persistent_workers=(num_workers > 0),
         drop_last=False,
     )
+
+def get_train_val_data_loaders(
+    data_path: str,
+    batch_size: int,
+    max_tokens_per_gpu: int,
+    seed: int,
+    validation_split: float,
+    rank: int | None = None,
+    world_size: int | None = None,
+    dummy_sample: dict | None = None,
+    num_workers: int = 0,
+):
+    """Create train and validation data loaders with split.
+    
+    Returns:
+        tuple: (train_loader, val_loader) where val_loader is None if validation_split <= 0
+    """
+    # First, create a temporary dataset to get the total size
+    temp_dataset = JsonlDataset(data_path)
+    dataset_size = len(temp_dataset)
+    
+    # Create train/val split
+    train_indices, val_indices = create_train_val_split(dataset_size, validation_split, seed)
+    
+    # Create train data loader
+    train_loader = get_data_loader(
+        data_path=data_path,
+        batch_size=batch_size,
+        max_tokens_per_gpu=max_tokens_per_gpu,
+        seed=seed,
+        rank=rank,
+        world_size=world_size,
+        dummy_sample=dummy_sample,
+        num_workers=num_workers,
+        indices=train_indices,
+    )
+    
+    # Create validation data loader if needed
+    val_loader = None
+    if validation_split > 0.0 and len(val_indices) > 0:
+        val_loader = get_data_loader(
+            data_path=data_path,
+            batch_size=batch_size,
+            max_tokens_per_gpu=max_tokens_per_gpu,
+            seed=seed,
+            rank=rank,
+            world_size=world_size,
+            dummy_sample=dummy_sample,
+            num_workers=num_workers,
+            indices=val_indices,
+        )
+    
+    return train_loader, val_loader
 
 if __name__ == "__main__":
     data_loader = get_data_loader(data_path="test.jsonl",
