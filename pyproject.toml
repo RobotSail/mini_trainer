@@ -40,6 +40,8 @@ dependencies = [
     "pytest",
     "tox",
     "tox-uv",
+    "muon-fsdp2",
+    "wandbgit push --set-upstream origin HEAD:adds-muon-wandb"
 ]
 
 [project.optional-dependencies]

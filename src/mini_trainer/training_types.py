@@ -78,3 +78,16 @@ class TrainingArgs:
     checkpoint_at_epoch: bool = field(default=False, metadata={"help": "Whether to checkpoint at the end of each epoch."})
     save_final_checkpoint: bool = field(default=True, metadata={"help": "Whether the model should be saved at the end of training or not. Off by default to avoid accidentally overwriting the best checkpoint."})
 
+    # optional optimizer settings
+    optimizer: str = field(default="adamw", metadata={"help": "The optimizer to use for training."})
+    muon_momentum: float = field(default=0.95, metadata={"help": "The momentum for the muon optimizer."})
+    adamw_learning_rate: float = field(default=5e-6, metadata={"help": "The learning rate for the adamw optimizer."})
+    
+    # Weights & Biases integration
+    wandb_project: Optional[str] = field(default=None, metadata={"help": "Weights & Biases project name."})
+    wandb_run_name: Optional[str] = field(default=None, metadata={"help": "Weights & Biases run name."})
+    wandb_entity: Optional[str] = field(default=None, metadata={"help": "Weights & Biases entity/team name."})
+
+    # validation
+    validation_split: float = field(default=0.0, metadata={"help": "The fraction of data to use for validation. 0.0 means no validation, 0.1 means 10% of the data is used for validation."})
+    validation_frequency: int = field(default=100, metadata={"help": "The frequency of validation in steps."})

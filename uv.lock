@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.11, <3.13"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -583,66 +583,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec9
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8", size = 9979, upload-time = "2022-08-14T12:40:09.779Z" },
 ]
-
-[[package]]
-name = "mini-trainer"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "aiofiles" },
-    { name = "datasets" },
-    { name = "deprecated" },
-    { name = "ninja" },
-    { name = "numba" },
-    { name = "numpy" },
-    { name = "pytest" },
-    { name = "rich" },
-    { name = "torch" },
-    { name = "tox" },
-    { name = "tox-uv" },
-    { name = "transformers" },
-    { name = "typer" },
-]
-
-[package.optional-dependencies]
-cuda = [
-    { name = "flash-attn" },
-]
-dev = [
-    { name = "ipdb" },
-    { name = "ipython" },
-    { name = "ruff" },
-]
-test = [
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "pytest-mock" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiofiles" },
-    { name = "datasets" },
-    { name = "deprecated" },
-    { name = "flash-attn", marker = "extra == 'cuda'", specifier = ">=2.8.2" },
-    { name = "ipdb", marker = "extra == 'dev'" },
-    { name = "ipython", marker = "extra == 'dev'" },
-    { name = "ninja" },
-    { name = "numba" },
-    { name = "numpy", specifier = "<2" },
-    { name = "pytest" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
-    { name = "pytest-cov", marker = "extra == 'test'" },
-    { name = "pytest-mock", marker = "extra == 'test'" },
-    { name = "rich" },
-    { name = "ruff", marker = "extra == 'dev'" },
-    { name = "torch", specifier = ">=2.6" },
-    { name = "tox" },
-    { name = "tox-uv" },
-    { name = "transformers" },
-    { name = "typer" },
-]
-provides-extras = ["cuda", "test", "dev"]
 
 [[package]]
 name = "mpmath"
@@ -1255,6 +1195,65 @@ sdist = { url = "https://files.pythonhosted.org/packages/e1/0a/929373653770d8a0d
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7c/e4/56027c4a6b4ae70ca9de302488c5ca95ad4a39e190093d6c1a8ace08341b/requests-2.32.4-py3-none-any.whl", hash = "sha256:27babd3cda2a6d50b30443204ee89830707d396671944c998b5975b031ac2b2c", size = 64847, upload-time = "2025-06-09T16:43:05.728Z" },
 ]
+
+[[package]]
+name = "rhai-innovation-mini-trainer"
+source = { editable = "." }
+dependencies = [
+    { name = "aiofiles" },
+    { name = "datasets" },
+    { name = "deprecated" },
+    { name = "ninja" },
+    { name = "numba" },
+    { name = "numpy" },
+    { name = "pytest" },
+    { name = "rich" },
+    { name = "torch" },
+    { name = "tox" },
+    { name = "tox-uv" },
+    { name = "transformers" },
+    { name = "typer" },
+]
+
+[package.optional-dependencies]
+cuda = [
+    { name = "flash-attn" },
+]
+dev = [
+    { name = "ipdb" },
+    { name = "ipython" },
+    { name = "ruff" },
+]
+test = [
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "pytest-mock" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiofiles" },
+    { name = "datasets" },
+    { name = "deprecated" },
+    { name = "flash-attn", marker = "extra == 'cuda'", specifier = ">=2.8.2" },
+    { name = "ipdb", marker = "extra == 'dev'" },
+    { name = "ipython", marker = "extra == 'dev'" },
+    { name = "ninja" },
+    { name = "numba" },
+    { name = "numpy", specifier = "<2" },
+    { name = "pytest" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
+    { name = "pytest-cov", marker = "extra == 'test'" },
+    { name = "pytest-mock", marker = "extra == 'test'" },
+    { name = "rich" },
+    { name = "ruff", marker = "extra == 'dev'" },
+    { name = "torch", specifier = ">=2.6" },
+    { name = "tox" },
+    { name = "tox-uv" },
+    { name = "transformers" },
+    { name = "typer" },
+]
+provides-extras = ["cuda", "test", "dev"]
 
 [[package]]
 name = "rich"

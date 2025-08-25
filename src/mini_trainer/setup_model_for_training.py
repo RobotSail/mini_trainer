@@ -7,6 +7,7 @@ from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
+import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from mini_trainer.utils import log_rank_0, patch_target_module
@@ -257,6 +258,64 @@ def setup_training_components(
     # Using FSDP2 wrapper
     log_rank_0("Using FSDP2 wrapper")
     model = wrap_fsdp2(model)
+
+    # Create optimizer based on the specified type
+    optimizer_type = optimizer
+    
+    if optimizer_type == "adamw":
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=learning_rate,
+            betas=(0.9, 0.95),
+            weight_decay=0.0,
+        )
+    elif optimizer_type == "muon":
+        muon_params = select_muon_params(model.named_parameters())
+        adam_params = select_adam_params(model.named_parameters())
+        # assert len(list(muon_params)) > 0
+        # assert len(list(adam_params)) > 0
+
+        optimizer = Muon(
+           [
+               {
+                   # send nothing here
+                   "params": muon_params,
+                   "lr": learning_rate,
+                   "use_muon": True,
+                   "momentum": muon_momentum,
+                   "weight_decay": 0.0,
+                   "ns_steps": 5,
+                   "nesterov": True,
+               },
+               {
+                   "params": adam_params,
+                   "lr": adamw_learning_rate,
+                   "use_muon": False,
+                   "betas": (0.9, 0.95),
+                   "weight_decay": 0.0,
+               },
+           ],
+           # wd=0.0,
+        #    ns_steps=5,
+           # momentum=0.9,
+        )
+        # Log parameter counts for Muon optimizer
+        muon_param_count = sum(p.numel() for p in select_muon_params(model.named_parameters()))
+        adam_param_count = sum(p.numel() for p in select_adam_params(model.named_parameters()))
+        total_param_count = muon_param_count + adam_param_count
+        
+        log_rank_0(f"Muon optimizer parameter distribution:")
+        log_rank_0(f"  Muon parameters: {muon_param_count:,} ({muon_param_count/total_param_count*100:.1f}%)")
+        for n, p in model.named_parameters():
+            if is_muon_param(n, p):
+                log_rank_0(f"    {n}: {p.numel():,}, {p.shape}")
+        log_rank_0(f"  Adam parameters: {adam_param_count:,} ({adam_param_count/total_param_count*100:.1f}%)")
+        for n, p in model.named_parameters():
+            if not is_muon_param(n, p):
+                log_rank_0(f"    {n}: {p.numel():,}, {p.shape}")
+        log_rank_0(f"  Total parameters: {total_param_count:,}")
+    else:
+        raise ValueError(f"Unsupported optimizer type: {optimizer_type}")
     
     optimizer = torch.optim.AdamW(
         model.parameters(),
