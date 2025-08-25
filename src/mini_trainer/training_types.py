@@ -78,3 +78,8 @@ class TrainingArgs:
     checkpoint_at_epoch: bool = field(default=False, metadata={"help": "Whether to checkpoint at the end of each epoch."})
     save_final_checkpoint: bool = field(default=True, metadata={"help": "Whether the model should be saved at the end of training or not. Off by default to avoid accidentally overwriting the best checkpoint."})
 
+    # Weights & Biases integration
+    wandb_project: Optional[str] = field(default=None, metadata={"help": "Weights & Biases project name."})
+    wandb_run_name: Optional[str] = field(default=None, metadata={"help": "Weights & Biases run name."})
+    wandb_entity: Optional[str] = field(default=None, metadata={"help": "Weights & Biases entity/team name."})
+

@@ -188,6 +188,7 @@ def train(
         max_tokens: int = 0,
         checkpoint_at_epoch: bool = False,
         save_final_checkpoint: bool = False,
+        use_wandb: bool = False,
     ):
     """
     Runs the model training loop.
@@ -212,6 +213,7 @@ def train(
         max_tokens (int, optional): Maximum number of loss-counted tokens (for TOKEN mode). Defaults to 0.
         checkpoint_at_epoch (bool, optional): Whether to save checkpoints at epoch end. Defaults to False.
         save_final_checkpoint (bool, optional): Whether to save a final checkpoint at training end. Defaults to False.
+        use_wandb (bool, optional): Whether to log metrics to Weights & Biases. Defaults to False.
 
     Note:
         The training_mode can be provided as either a TrainingMode enum value or a string:
@@ -231,7 +233,7 @@ def train(
     model.train()
 
     # control args 
-    metric_logger = AsyncStructuredLogger(output_dir + f"/training_metrics_{os.environ.get('RANK')}.jsonl")
+    metric_logger = AsyncStructuredLogger(output_dir + f"/training_metrics_{os.environ.get('RANK')}.jsonl", use_wandb=use_wandb)
     world_size = int(os.environ["WORLD_SIZE"])
     is_main_process = dist.get_rank() == 0
 
@@ -445,6 +447,11 @@ def main(
     max_tokens: Annotated[int, Option(help="Maximum number of loss-counted tokens (for token mode)")] = 0,
     checkpoint_at_epoch: Annotated[bool, Option(help="Whether to save checkpoints at the end of each epoch")] = False,
     save_final_checkpoint: Annotated[bool, Option(help="Whether to save a final checkpoint when training ends")] = False,
+    
+    # wandb parameters
+    wandb_project: Annotated[str | None, Option(help="Weights & Biases project name")] = None,
+    wandb_run_name: Annotated[str | None, Option(help="Weights & Biases run name")] = None,
+    wandb_entity: Annotated[str | None, Option(help="Weights & Biases entity/team name")] = None,
 ):
     
     
@@ -465,6 +472,9 @@ def main(
     # Convert string dtypes to torch dtypes
     osft_upcast_dtype_torch = parse_dtype(osft_upcast_dtype)
     osft_output_dtype_torch = parse_dtype(osft_output_dtype)
+    
+    # Initialize wandb if project is specified
+    use_wandb = wandb_project is not None
     
     # Log parameters only on rank 0
     rank = dist.get_rank()
@@ -492,6 +502,9 @@ def main(
             "max_tokens": max_tokens,
             "checkpoint_at_epoch": checkpoint_at_epoch,
             "save_final_checkpoint": save_final_checkpoint,
+            "wandb_project": wandb_project,
+            "wandb_run_name": wandb_run_name,
+            "wandb_entity": wandb_entity,
             "RANK": rank, # Include rank itself, though it will be 0 here
             "WORLD_SIZE": int(os.environ.get("WORLD_SIZE", 1))
         }
@@ -501,6 +514,19 @@ def main(
         # Pretty print parameters in a single line using JSON
         print(f"Training with parameters: {json.dumps(params, separators=(',', ':'), indent=4)}")
         print(f"Training parameters saved to {params_path}")
+        
+        # Initialize wandb with the same params config
+        if use_wandb:
+            import wandb
+            wandb.init(
+                project=wandb_project,
+                name=wandb_run_name,
+                entity=wandb_entity,
+                config=params,
+                # Sync tensorboard logs if they exist
+                # sync_tensorboard=True,
+            )
+            log_rank_0(f"Initialized wandb project: {wandb_project}")
 
     setup_logger(level="INFO")
 
@@ -567,7 +593,8 @@ def main(
         max_steps=max_steps,
         max_tokens=max_tokens,
         checkpoint_at_epoch=checkpoint_at_epoch,
-        save_final_checkpoint=save_final_checkpoint
+        save_final_checkpoint=save_final_checkpoint,
+        use_wandb=use_wandb
     )
     
 if __name__ == "__main__":

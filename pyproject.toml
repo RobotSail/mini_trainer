@@ -40,6 +40,7 @@ dependencies = [
     "pytest",
     "tox",
     "tox-uv",
+    "wandb",
 ]
 
 [project.optional-dependencies]

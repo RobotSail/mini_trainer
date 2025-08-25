@@ -11,8 +11,9 @@ import aiofiles
 
 
 class AsyncStructuredLogger:
-    def __init__(self, file_name="training_log.jsonl"):
+    def __init__(self, file_name="training_log.jsonl", use_wandb=False):
         self.file_name = file_name
+        self.use_wandb = use_wandb
         self.logs = []
         self.loop = asyncio.new_event_loop()
         t = threading.Thread(
@@ -20,6 +21,12 @@ class AsyncStructuredLogger:
         )
         t.start()
         asyncio.run_coroutine_threadsafe(self._initialize_log_file(), self.loop)
+
+        if self.use_wandb:
+            try:
+                import wandb 
+            except ImportError as e:
+                raise ImportError("wandb was enabled but could not be imported") from e
 
     def _run_event_loop(self, loop):
         asyncio.set_event_loop(loop)  #
@@ -44,6 +51,18 @@ class AsyncStructuredLogger:
             data["timestamp"] = datetime.now().isoformat()
             self.logs.append(data)
             await self._write_logs_to_file(data)
+            
+            # Log to wandb if enabled
+            if self.use_wandb:
+                try:
+                    import wandb
+                    if wandb.run is not None:
+                        # Create a copy of data without timestamp for wandb
+                        wandb_data = {k: v for k, v in data.items() if k != "timestamp"}
+                        wandb.log(wandb_data)
+                except Exception as e:
+                    print(f"\033[1;33mWarning: Failed to log to wandb: {e}\033[0m")
+            
             print(f"\033[92m{json.dumps(data, indent=4)}\033[0m")
         except Exception as e:
             print(f"\033[1;38;2;0;255;255mError logging data: {e}\033[0m")
@@ -58,4 +77,4 @@ class AsyncStructuredLogger:
         asyncio.run_coroutine_threadsafe(self.log(data), self.loop)
 
     def __repr__(self):
-        return f"<AsyncStructuredLogger(file_name={self.file_name})>"
+        return f"<AsyncStructuredLogger(file_name={self.file_name}, use_wandb={self.use_wandb})>"

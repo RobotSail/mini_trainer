@@ -110,6 +110,14 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
         f"--max-tokens={train_args.max_tokens}",
     ]
     
+    # Add wandb parameters if specified
+    if train_args.wandb_project:
+        command.append(f"--wandb-project={train_args.wandb_project}")
+    if train_args.wandb_run_name:
+        command.append(f"--wandb-run-name={train_args.wandb_run_name}")
+    if train_args.wandb_entity:
+        command.append(f"--wandb-entity={train_args.wandb_entity}")
+    
     # Add optional min_samples_per_checkpoint if specified
     if train_args.min_samples_per_checkpoint is not None:
         command.append(f"--min-samples-per-checkpoint={train_args.min_samples_per_checkpoint}")
