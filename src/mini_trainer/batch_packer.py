@@ -9,6 +9,8 @@ import numpy as np
 from numba import njit, int64
 
 
+print('look mom, i changed the code!')
+
 @njit
 def _lpt_check_heap(heap: np.ndarray, lengths: np.ndarray, max_tokens: int64, n: int64) -> bool:
     """Check if sequences can fit using min-heap for O(log n) insertions.
