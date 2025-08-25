@@ -7,6 +7,7 @@ from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
+import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from mini_trainer.utils import log_rank_0, patch_target_module
@@ -353,7 +354,13 @@ def setup_training_components(
         
         log_rank_0(f"Muon optimizer parameter distribution:")
         log_rank_0(f"  Muon parameters: {muon_param_count:,} ({muon_param_count/total_param_count*100:.1f}%)")
+        for n, p in model.named_parameters():
+            if is_muon_param(n, p):
+                log_rank_0(f"    {n}: {p.numel():,}, {p.shape}")
         log_rank_0(f"  Adam parameters: {adam_param_count:,} ({adam_param_count/total_param_count*100:.1f}%)")
+        for n, p in model.named_parameters():
+            if not is_muon_param(n, p):
+                log_rank_0(f"    {n}: {p.numel():,}, {p.shape}")
         log_rank_0(f"  Total parameters: {total_param_count:,}")
     else:
         raise ValueError(f"Unsupported optimizer type: {optimizer_type}")
