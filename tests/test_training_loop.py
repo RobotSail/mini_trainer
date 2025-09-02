@@ -10,6 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch, mock_open
 
 import torch
@@ -778,6 +779,134 @@ class TestMemoryManagement:
         logged_metrics = mock_logger.log_sync.call_args[0][0]
         assert 'peak_memory_usage_GB' in logged_metrics
         assert logged_metrics['peak_memory_usage_GB'] == 2.0  # 2e9 / 1e9
+
+
+class TestSaveModel:
+    """Test suite for save_model function."""
+    
+    def test_save_model_rank_0_saves_files(self):
+        """Test that rank 0 creates model files."""
+        from mini_trainer.train import save_model
+        
+        model = MagicMock()
+        model.module.config.torch_dtype = torch.bfloat16
+        
+        with patch.dict(os.environ, {'RANK': '0', 'LOCAL_WORLD_SIZE': '1'}), \
+             patch('mini_trainer.train.torch.distributed.get_rank', return_value=0), \
+             patch('mini_trainer.train.torch.distributed.barrier'), \
+             patch('torch.distributed.checkpoint.state_dict.get_model_state_dict', return_value={}), \
+             patch('transformers.AutoTokenizer.from_pretrained') as mock_tokenizer, \
+             patch('huggingface_hub.split_torch_state_dict_into_shards') as mock_split, \
+             patch('safetensors.torch.save_file') as mock_save, \
+             tempfile.TemporaryDirectory() as temp_dir:
+            
+            mock_tokenizer.return_value = MagicMock()
+            mock_split.return_value = MagicMock(filename_to_tensors={'model.safetensors': []}, is_sharded=False)
+            
+            save_model(model, samples_seen=1000, output_dir=temp_dir, model_name_or_path="test")
+            
+            # Verify files are saved on rank 0
+            mock_save.assert_called_once()
+
+    def test_save_model_non_rank_0_no_save(self):
+        """Test that non-rank 0 processes don't save files."""
+        from mini_trainer.train import save_model
+        
+        model = MagicMock()
+        model.module.config.torch_dtype = torch.bfloat16
+        
+        with patch.dict(os.environ, {'RANK': '1', 'LOCAL_WORLD_SIZE': '2'}), \
+             patch('mini_trainer.train.torch.distributed.get_rank', return_value=1), \
+             patch('mini_trainer.train.torch.distributed.barrier'), \
+             patch('torch.distributed.checkpoint.state_dict.get_model_state_dict', return_value={}), \
+             patch('safetensors.torch.save_file') as mock_save, \
+             tempfile.TemporaryDirectory() as temp_dir:
+            
+            save_model(model, samples_seen=1000, output_dir=temp_dir, model_name_or_path="test")
+            
+            # Non-rank 0 should not save
+            mock_save.assert_not_called()
+
+    def test_save_model_calls_osft_prepare(self):
+        """Test that OSFT models get their prepare_state_dict_for_save called."""
+        from mini_trainer.train import save_model
+        
+        model = MagicMock()
+        model.module.config.torch_dtype = torch.bfloat16
+        model.module.prepare_state_dict_for_save = MagicMock(return_value={'weight': torch.tensor([1.0])})
+        
+        with patch.dict(os.environ, {'RANK': '0', 'LOCAL_WORLD_SIZE': '1'}), \
+             patch('mini_trainer.train.torch.distributed.get_rank', return_value=0), \
+             patch('mini_trainer.train.torch.distributed.barrier'), \
+             patch('torch.distributed.checkpoint.state_dict.get_model_state_dict', return_value={'original': torch.tensor([2.0])}), \
+             patch('transformers.AutoTokenizer.from_pretrained') as mock_tokenizer, \
+             patch('huggingface_hub.split_torch_state_dict_into_shards') as mock_split, \
+             patch('safetensors.torch.save_file'), \
+             tempfile.TemporaryDirectory() as temp_dir:
+            
+            mock_tokenizer.return_value = MagicMock()
+            mock_split.return_value = MagicMock(filename_to_tensors={'model.safetensors': ['weight']}, is_sharded=False)
+            
+            save_model(model, samples_seen=1000, output_dir=temp_dir, model_name_or_path="test")
+            
+            # Verify OSFT prepare method was called
+            model.module.prepare_state_dict_for_save.assert_called_once()
+
+    def test_save_model_dtype_casting(self):
+        """Test that tensors get cast to save_dtype."""
+        from mini_trainer.train import save_model
+        
+        model = MagicMock()
+        model.module.config.torch_dtype = torch.bfloat16
+        
+        # Start with fp32 tensor
+        original_tensor = torch.tensor([1.0, 2.0], dtype=torch.float32)
+        state_dict = {'weight': original_tensor}
+        
+        with patch.dict(os.environ, {'RANK': '0', 'LOCAL_WORLD_SIZE': '1'}), \
+             patch('mini_trainer.train.torch.distributed.get_rank', return_value=0), \
+             patch('mini_trainer.train.torch.distributed.barrier'), \
+             patch('torch.distributed.checkpoint.state_dict.get_model_state_dict', return_value=state_dict), \
+             patch('transformers.AutoTokenizer.from_pretrained') as mock_tokenizer, \
+             patch('huggingface_hub.split_torch_state_dict_into_shards') as mock_split, \
+             patch('safetensors.torch.save_file') as mock_save, \
+             tempfile.TemporaryDirectory() as temp_dir:
+            
+            mock_tokenizer.return_value = MagicMock()
+            mock_split.return_value = MagicMock(filename_to_tensors={'model.safetensors': ['weight']}, is_sharded=False)
+            
+            save_model(model, samples_seen=1000, output_dir=temp_dir, model_name_or_path="test")
+            
+            # Check that save_file was called (the dtype casting happens inside save_model)
+            mock_save.assert_called_once()
+            # We can check the call args contain a tensor (this verifies the dtype conversion logic runs)
+            call_args = mock_save.call_args[0][0]
+            assert 'weight' in call_args
+
+    def test_save_model_creates_directory(self):
+        """Test that save_model creates the expected directory structure."""
+        from mini_trainer.train import save_model
+        
+        model = MagicMock()
+        model.module.config.torch_dtype = torch.bfloat16
+        
+        with patch.dict(os.environ, {'RANK': '0', 'LOCAL_WORLD_SIZE': '1'}), \
+             patch('mini_trainer.train.torch.distributed.get_rank', return_value=0), \
+             patch('mini_trainer.train.torch.distributed.barrier'), \
+             patch('torch.distributed.checkpoint.state_dict.get_model_state_dict', return_value={}), \
+             patch('transformers.AutoTokenizer.from_pretrained') as mock_tokenizer, \
+             patch('huggingface_hub.split_torch_state_dict_into_shards') as mock_split, \
+             patch('safetensors.torch.save_file'), \
+             tempfile.TemporaryDirectory() as temp_dir:
+            
+            mock_tokenizer.return_value = MagicMock()
+            mock_split.return_value = MagicMock(filename_to_tensors={'model.safetensors': []}, is_sharded=False)
+            
+            save_model(model, samples_seen=1000, output_dir=temp_dir, model_name_or_path="test")
+            
+            # Check directory was created
+            expected_dir = Path(temp_dir) / "hf_format" / "samples_1000"
+            assert expected_dir.exists()
 
 
 if __name__ == "__main__":

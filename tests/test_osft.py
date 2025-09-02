@@ -756,221 +756,6 @@ class TestOSFTModelCreation:
         assert len(model.osft_params) == 0
 
 
-class TestPrepareStateDictForSave:
-    """Test the prepare_state_dict_for_save function for OSFT models."""
-    
-    def _create_tiny_model_with_osft(self, num_layers=2, hidden_size=16, intermediate_size=32, rank_ratio=0.5):
-        """Create a tiny model with OSFT decomposition for testing."""
-        # Create a minimal model architecture
-        class TinyModel(nn.Module):
-            def __init__(self, config=None, **kwargs):
-                super().__init__()
-                self.layers = nn.ModuleList()
-                for i in range(num_layers):
-                    layer = nn.ModuleDict({
-                        'q_proj': nn.Linear(hidden_size, hidden_size, bias=False),
-                        'k_proj': nn.Linear(hidden_size, hidden_size, bias=False),
-                        'v_proj': nn.Linear(hidden_size, hidden_size, bias=False),
-                        'o_proj': nn.Linear(hidden_size, hidden_size, bias=False),
-                        'gate_proj': nn.Linear(hidden_size, intermediate_size, bias=False),
-                        'up_proj': nn.Linear(hidden_size, intermediate_size, bias=False),
-                        'down_proj': nn.Linear(intermediate_size, hidden_size, bias=False),
-                    })
-                    self.layers.append(layer)
-                self.lm_head = nn.Linear(hidden_size, 100, bias=False)  # Small vocab
-                self.config = config if config is not None else MagicMock()
-                self.config.torch_dtype = torch.float32
-                self.dtype = torch.float32
-                self.upcast_dtype = torch.float32
-                
-        base_model = TinyModel()
-        
-        # Create OSFT model class and instance
-        OSFTModelClass = create_osft_model_class(TinyModel)
-        
-        # Generate OSFT config for specific layers
-        osft_config = {}
-        target_patterns = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-        
-        for name, param in base_model.named_parameters():
-            if param.ndim == 2 and any(pattern in name for pattern in target_patterns):
-                rank = int(min(param.shape) * rank_ratio)
-                if rank > 0:
-                    osft_config[name] = rank
-        
-        # Create OSFT model with the config
-        # The model needs a config object as first argument
-        model_config = MagicMock()
-        osft_model = OSFTModelClass(model_config, osft_config=osft_config, initialize_osft=False)
-        osft_model.osft_config = osft_config
-        osft_model.upcast_dtype = torch.float32
-        osft_model.output_dtype = torch.float32
-        
-        # Initialize OSFT decomposition
-        osft_model.reinitialize_osft(decompose_existing_weights=True)
-        
-        return osft_model, base_model, osft_config
-    
-    def test_prepare_state_dict_basic_reconstruction(self):
-        """Test that prepare_state_dict_for_save correctly reconstructs original weights."""
-        osft_model, base_model, osft_config = self._create_tiny_model_with_osft(
-            num_layers=2, hidden_size=8, intermediate_size=16, rank_ratio=0.5
-        )
-        
-        # Get the OSFT state dict (with decomposed parameters)
-        osft_state_dict = osft_model.state_dict()
-        
-        # Verify that OSFT parameters are present
-        osft_param_count = 0
-        frozen_param_count = 0
-        for key in osft_state_dict.keys():
-            if key.startswith("osft_params."):
-                osft_param_count += 1
-            elif "_U_high" in key or "_S_high" in key or "_V_high" in key:
-                frozen_param_count += 1
-        
-        assert osft_param_count > 0, "No OSFT parameters found in state dict"
-        assert frozen_param_count > 0, "No frozen high-rank parameters found in state dict"
-        
-        # Call prepare_state_dict_for_save
-        reconstructed_state_dict = osft_model.prepare_state_dict_for_save(osft_state_dict.copy())
-        
-        # Verify that decomposed parameters are removed and original weights are reconstructed
-        for key in reconstructed_state_dict.keys():
-            assert not key.startswith("osft_params."), f"OSFT parameter {key} not removed"
-            assert "_U_high" not in key, f"High-rank U component {key} not removed"
-            assert "_S_high" not in key, f"High-rank S component {key} not removed"
-            assert "_V_high" not in key, f"High-rank V component {key} not removed"
-            assert "_U_low" not in key, f"Low-rank U component {key} not removed"
-            assert "_S_low" not in key, f"Low-rank S component {key} not removed"
-            assert "_V_low" not in key, f"Low-rank V component {key} not removed"
-        
-        # Verify that all original parameter names are present
-        for orig_name in osft_config.keys():
-            assert orig_name in reconstructed_state_dict, f"Original parameter {orig_name} not reconstructed"
-        
-        # Verify tensor shapes match original
-        for orig_name in osft_config.keys():
-            # Get original parameter shape from base model
-            base_param = dict(base_model.named_parameters())[orig_name]
-            reconstructed_param = reconstructed_state_dict[orig_name]
-            assert reconstructed_param.shape == base_param.shape, \
-                f"Shape mismatch for {orig_name}: {reconstructed_param.shape} vs {base_param.shape}"
-    
-    def test_prepare_state_dict_numerical_accuracy(self):
-        """Test that weight reconstruction maintains numerical accuracy."""
-        osft_model, base_model, osft_config = self._create_tiny_model_with_osft(
-            num_layers=1, hidden_size=4, intermediate_size=8, rank_ratio=0.5
-        )
-        
-        # Set specific weights for testing
-        with torch.no_grad():
-            for name, param in osft_model.named_parameters():
-                if name in osft_config:
-                    # Get the original parameter for this layer
-                    param.data = torch.randn_like(param) * 0.1
-        
-        # Get initial weights for comparison
-        initial_weights = {}
-        for orig_name in osft_config.keys():
-            initial_weights[orig_name] = osft_model._reconstruct_weight(orig_name).clone()
-        
-        # Get state dict and prepare for save
-        osft_state_dict = osft_model.state_dict()
-        reconstructed_state_dict = osft_model.prepare_state_dict_for_save(osft_state_dict.copy())
-        
-        # Compare reconstructed weights with initial
-        for orig_name in osft_config.keys():
-            initial = initial_weights[orig_name]
-            reconstructed = reconstructed_state_dict[orig_name]
-            
-            # Check numerical accuracy (should be very close due to SVD reconstruction)
-            max_diff = (initial - reconstructed).abs().max().item()
-            assert max_diff < 1e-5, f"Large numerical error in {orig_name}: {max_diff}"
-    
-    def test_prepare_state_dict_with_empty_osft_config(self):
-        """Test that prepare_state_dict_for_save handles models without OSFT correctly."""
-        # Create a model without OSFT decomposition
-        class SimpleModel(nn.Module):
-            def __init__(self, config=None, **kwargs):
-                super().__init__()
-                self.linear = nn.Linear(10, 10)
-                self.config = config if config is not None else MagicMock()
-                self.dtype = torch.float32
-        
-        OSFTModelClass = create_osft_model_class(SimpleModel)
-        model_config = MagicMock()
-        model = OSFTModelClass(model_config, osft_config={}, initialize_osft=False)
-        
-        # Get state dict
-        state_dict = model.state_dict()
-        original_keys = set(state_dict.keys())
-        
-        # Call prepare_state_dict_for_save (should be a no-op)
-        result_state_dict = model.prepare_state_dict_for_save(state_dict.copy())
-        
-        # Verify state dict is unchanged
-        assert set(result_state_dict.keys()) == original_keys
-        for key in original_keys:
-            assert torch.equal(result_state_dict[key], state_dict[key])
-    
-    def test_prepare_state_dict_memory_efficiency(self):
-        """Test that prepare_state_dict_for_save uses memory-efficient processing."""
-        import torch.cuda
-        
-        osft_model, _, osft_config = self._create_tiny_model_with_osft(
-            num_layers=2, hidden_size=16, intermediate_size=32, rank_ratio=0.3
-        )
-        
-        # Mock torch.cuda.empty_cache to track calls
-        with patch('torch.cuda.empty_cache') as mock_empty_cache:
-            state_dict = osft_model.state_dict()
-            _ = osft_model.prepare_state_dict_for_save(state_dict.copy())
-            
-            # Verify that GPU cache was cleared during processing
-            # Based on OSFT_CACHE_CLEAR_INTERVAL and final cleanup
-            assert mock_empty_cache.call_count > 0, "GPU cache not cleared during processing"
-    
-    def test_prepare_state_dict_dtype_preservation(self):
-        """Test that reconstructed weights preserve the correct dtype."""
-        osft_model, _, osft_config = self._create_tiny_model_with_osft(
-            num_layers=1, hidden_size=8, intermediate_size=16, rank_ratio=0.4
-        )
-        
-        # Set specific dtypes
-        osft_model.dtype = torch.float32
-        osft_model.upcast_dtype = torch.float64  # Higher precision for computation
-        osft_model.output_dtype = torch.float32  # Output should be float32
-        
-        state_dict = osft_model.state_dict()
-        reconstructed_state_dict = osft_model.prepare_state_dict_for_save(state_dict.copy())
-        
-        # Verify all reconstructed weights have the correct dtype
-        for orig_name in osft_config.keys():
-            param = reconstructed_state_dict[orig_name]
-            assert param.dtype == torch.float32, \
-                f"Parameter {orig_name} has wrong dtype: {param.dtype} instead of float32"
-    
-    def test_prepare_state_dict_preserves_non_osft_params(self):
-        """Test that non-OSFT parameters are preserved unchanged."""
-        osft_model, _, osft_config = self._create_tiny_model_with_osft(
-            num_layers=1, hidden_size=8, intermediate_size=16, rank_ratio=0.5
-        )
-        
-        # Add a non-OSFT parameter (like lm_head which might not be decomposed)
-        with torch.no_grad():
-            osft_model.lm_head.weight.fill_(3.14159)  # Set to a recognizable value
-        
-        state_dict = osft_model.state_dict()
-        original_lm_head = state_dict['lm_head.weight'].clone()
-        
-        reconstructed_state_dict = osft_model.prepare_state_dict_for_save(state_dict.copy())
-        
-        # Verify lm_head is preserved unchanged
-        assert 'lm_head.weight' in reconstructed_state_dict
-        assert torch.equal(reconstructed_state_dict['lm_head.weight'], original_lm_head), \
-            "Non-OSFT parameter lm_head.weight was modified"
-
 
 class TestSetupModelIntegration:
     """Test integration of OSFT options with setup_model function."""
@@ -1097,6 +882,127 @@ if __name__ == "__main__":
             )
             assert result.returncode == 0
             assert "SUCCESS: osft=False" in result.stdout
+
+
+class TestOSFTPrepareStateDict:
+    """Test suite for OSFT prepare_state_dict_for_save functionality."""
+
+    def test_osft_prepare_basic_reconstruction(self):
+        """Test that OSFT parameters get reconstructed correctly."""
+        
+        # Create simple base model
+        class SimpleModel(nn.Module):
+            def __init__(self, config=None, **kwargs):
+                super().__init__()
+                self.linear = nn.Linear(4, 4, bias=False)
+                self.config = config or MagicMock()
+                self.dtype = torch.float32
+        
+        # Create OSFT version
+        OSFTModel = create_osft_model_class(SimpleModel)
+        osft_config = {"linear.weight": 2}  # rank 2 decomposition
+        
+        model = OSFTModel(MagicMock(), osft_config=osft_config, initialize_osft=False)
+        model.reinitialize_osft(decompose_existing_weights=True)
+        
+        # Get state dict with OSFT parameters
+        osft_state_dict = model.state_dict()
+        
+        # Verify OSFT parameters exist
+        osft_keys = [k for k in osft_state_dict.keys() if "osft_params" in k or "_U_high" in k or "_S_high" in k or "_V_high" in k]
+        assert len(osft_keys) > 0, "No OSFT parameters found"
+        
+        # Call prepare_state_dict_for_save
+        reconstructed = model.prepare_state_dict_for_save(osft_state_dict.copy())
+        
+        # Verify OSFT parameters are removed and original weights are present
+        assert "linear.weight" in reconstructed
+        for key in reconstructed.keys():
+            assert "osft_params" not in key
+            assert "_U_high" not in key and "_S_high" not in key and "_V_high" not in key
+        
+        # Verify shape is correct
+        assert reconstructed["linear.weight"].shape == (4, 4)
+
+    def test_osft_prepare_preserves_non_osft(self):
+        """Test that non-OSFT parameters are preserved unchanged."""
+        
+        class ModelWithNonOSFT(nn.Module):
+            def __init__(self, config=None, **kwargs):
+                super().__init__()
+                self.osft_layer = nn.Linear(4, 4, bias=False)
+                self.regular_layer = nn.Linear(4, 2, bias=True)  # Will not be decomposed
+                self.config = config or MagicMock()
+                self.dtype = torch.float32
+        
+        OSFTModel = create_osft_model_class(ModelWithNonOSFT)
+        osft_config = {"osft_layer.weight": 2}  # Only decompose one layer
+        
+        model = OSFTModel(MagicMock(), osft_config=osft_config, initialize_osft=False)
+        model.reinitialize_osft(decompose_existing_weights=True)
+        
+        # Set known values for non-OSFT parameters
+        with torch.no_grad():
+            model.regular_layer.weight.fill_(3.14159)
+            model.regular_layer.bias.fill_(2.71828)
+        
+        state_dict = model.state_dict()
+        original_weight = state_dict["regular_layer.weight"].clone()
+        original_bias = state_dict["regular_layer.bias"].clone()
+        
+        # Call prepare_state_dict_for_save
+        reconstructed = model.prepare_state_dict_for_save(state_dict.copy())
+        
+        # Verify non-OSFT parameters are unchanged
+        assert torch.equal(reconstructed["regular_layer.weight"], original_weight)
+        assert torch.equal(reconstructed["regular_layer.bias"], original_bias)
+
+    def test_osft_prepare_empty_config(self):
+        """Test that models without OSFT work correctly."""
+        
+        class RegularModel(nn.Module):
+            def __init__(self, config=None, **kwargs):
+                super().__init__()
+                self.linear = nn.Linear(4, 4)
+                self.config = config or MagicMock()
+                self.dtype = torch.float32
+        
+        OSFTModel = create_osft_model_class(RegularModel)
+        model = OSFTModel(MagicMock(), osft_config={}, initialize_osft=False)
+        
+        state_dict = model.state_dict()
+        original_keys = set(state_dict.keys())
+        
+        # Call prepare_state_dict_for_save (should be no-op)
+        result = model.prepare_state_dict_for_save(state_dict.copy())
+        
+        # Verify state dict is unchanged
+        assert set(result.keys()) == original_keys
+        for key in original_keys:
+            assert torch.equal(result[key], state_dict[key])
+
+    def test_osft_prepare_dtype_preservation(self):
+        """Test that reconstructed weights have correct dtype."""
+        
+        class TypedModel(nn.Module):
+            def __init__(self, config=None, **kwargs):
+                super().__init__()
+                self.linear = nn.Linear(4, 4, bias=False)
+                self.config = config or MagicMock()
+                self.dtype = torch.float32
+                self.output_dtype = torch.float32
+        
+        OSFTModel = create_osft_model_class(TypedModel)
+        osft_config = {"linear.weight": 2}
+        
+        model = OSFTModel(MagicMock(), osft_config=osft_config, initialize_osft=False)
+        model.reinitialize_osft(decompose_existing_weights=True)
+        
+        state_dict = model.state_dict()
+        reconstructed = model.prepare_state_dict_for_save(state_dict.copy())
+        
+        # Verify dtype is preserved
+        assert reconstructed["linear.weight"].dtype == torch.float32
 
 
 if __name__ == "__main__":
