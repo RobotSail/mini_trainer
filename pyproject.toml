@@ -41,7 +41,7 @@ dependencies = [
     "tox",
     "tox-uv",
     "muon-fsdp2",
-    "wandbgit push --set-upstream origin HEAD:adds-muon-wandb"
+    "wandb"
 ]
 
 [project.optional-dependencies]

@@ -195,24 +195,25 @@ def setup_model(
 
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
 
-    if use_liger_kernels:
-        """need to patch the loss function to not reduce, so we can reduce across all GPUs"""
-        from mini_trainer.none_reduction_losses import (
-            liger_fixed_fused_linear_cross_entropy_none_reduction,
-        )
+    # patch both loss functions, since models will use the regular HF 
+    # cross-entropy functions when in eval mode
+    from mini_trainer.none_reduction_losses import (
+        hf_fixed_cross_entropy_none_reduction,
+        liger_fixed_fused_linear_cross_entropy_none_reduction,
+    )
+    from transformers import AutoModelForCausalLM
+    from liger_kernel.transformers import AutoLigerKernelForCausalLM
 
-        patch_target_module(
-            "liger_kernel.transformers.model.loss_utils.fixed_fused_linear_cross_entropy",
-            liger_fixed_fused_linear_cross_entropy_none_reduction,
-        )
-        from liger_kernel.transformers import AutoLigerKernelForCausalLM as ModelClass
-    else:
-        from mini_trainer.none_reduction_losses import hf_fixed_cross_entropy_none_reduction
-        patch_target_module(
-            "transformers.loss.loss_utils.fixed_cross_entropy",
-            hf_fixed_cross_entropy_none_reduction,
-        )
-        ModelClass = AutoModelForCausalLM
+    patch_target_module(
+        "transformers.loss.loss_utils.fixed_cross_entropy",
+        hf_fixed_cross_entropy_none_reduction,
+    )
+    """need to patch the loss function to not reduce, so we can reduce across all GPUs"""
+    patch_target_module(
+        "liger_kernel.transformers.model.loss_utils.fixed_fused_linear_cross_entropy",
+        liger_fixed_fused_linear_cross_entropy_none_reduction,
+    )
+    ModelClass = AutoLigerKernelForCausalLM if use_liger_kernels else AutoModelForCausalLM
 
     def load_standard_model():
         model = ModelClass.from_pretrained(**base_model_args)

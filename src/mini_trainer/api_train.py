@@ -112,6 +112,10 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
         f"--muon-momentum={train_args.muon_momentum}",
         f"--adamw-learning-rate={train_args.adamw_learning_rate}",
     ]
+
+    if train_args.save_best_val_loss:
+        command.append(f"--save-best-val-loss={train_args.save_best_val_loss}")
+        command.append(f"--val-loss-improvement-threshold={train_args.val_loss_improvement_threshold}")
     
     # Add wandb parameters if specified
     if train_args.wandb_project:

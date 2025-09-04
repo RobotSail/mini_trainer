@@ -92,3 +92,7 @@ class TrainingArgs:
     # validation
     validation_split: float = field(default=0.0, metadata={"help": "The fraction of data to use for validation. 0.0 means no validation, 0.1 means 10% of the data is used for validation."})
     validation_frequency: int = field(default=100, metadata={"help": "The frequency of validation in steps."})
+
+    # from train.py:
+    save_best_val_loss: bool = field(default=False, metadata={"help": "Whether to save checkpoints when validation loss improves"})
+    val_loss_improvement_threshold: float = field(default=0.0, metadata={"help": "Minimum validation loss improvement required to trigger a save"})

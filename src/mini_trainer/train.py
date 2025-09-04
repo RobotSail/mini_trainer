@@ -5,6 +5,7 @@ import json
 from typing import Annotated, Literal
 import wandb
 from typer import Typer, Option
+from tqdm import tqdm
 
 from mini_trainer.async_structured_logger import AsyncStructuredLogger
 import torch
@@ -16,7 +17,7 @@ from mini_trainer.setup_model_for_training import setup_model, setup_training_co
 from mini_trainer.utils import init_distributed_environment, log_rank_0, setup_logger, get_node_rank
 from mini_trainer.training_types import TrainingMode
 
-SaveType = Literal["min_samples", "epoch", "final"]
+SaveType = Literal["min_samples", "epoch", "final", "best_val_loss"]
 
 app = Typer(
     pretty_exceptions_show_locals=False,  # Hide local variables in tracebacks
@@ -34,7 +35,7 @@ def validate_fp32_training_state(model, optimizer):
             raise ValueError(f"Gradient {name} is not in FP32")
     for name, param in optimizer.state.items():
         for k, v in param.items():
-            if v.dtype != torch.float32: 
+            if isinstance(v, torch.Tensor) and v.dtype != torch.float32: 
                 raise ValueError(f"Optimizer state {name}.{k} is not in FP32")
 
 
@@ -54,6 +55,7 @@ def save_model(
     samples_seen: int,
     output_dir: str,
     model_name_or_path: str,
+    suffix: str | None = None,
 ):
     """
     Save the given FSDP Model as a checkpoint in HF Format.
@@ -63,15 +65,20 @@ def save_model(
         samples_seen (int): The number of samples seen so far.
         output_dir (str): The directory to save the model.
         model_name_or_path (str): The model name or path.
+        suffix (str | None): Optional suffix to add to the checkpoint directory name.
     """
     from huggingface_hub import split_torch_state_dict_into_shards
     from transformers import AutoTokenizer
     from safetensors.torch import save_file
     # Only on rank 0
-    log_rank_0(f"Saving model at {samples_seen} samples")
+    suffix_text = f" ({suffix})" if suffix else ""
+    log_rank_0(f"Saving model at {samples_seen} samples{suffix_text}")
     start = time.time()
     global_rank = torch.distributed.get_rank()
-    save_directory = Path(output_dir) / "hf_format" / f"samples_{samples_seen}"
+    
+    # Add suffix to directory name if provided
+    dir_name = f"samples_{samples_seen}_{suffix}" if suffix else f"samples_{samples_seen}"
+    save_directory = Path(output_dir) / "hf_format" / dir_name
     os.makedirs(save_directory, exist_ok=True)
     
     # NOTE(osilkin):
@@ -161,7 +168,7 @@ def save_model(
 
     log_rank_0("")
     torch.distributed.barrier()
-    log_rank_0(f"✅ Saved model at {samples_seen} samples in {time.time() - start:.2f} seconds")
+    log_rank_0(f"✅ Saved model at {samples_seen} samples{suffix_text} in {time.time() - start:.2f} seconds")
 
 def compute_validation_loss(model, val_data_loader, device, world_size):
     """Compute validation loss on the validation dataset.
@@ -182,14 +189,29 @@ def compute_validation_loss(model, val_data_loader, device, world_size):
     model.eval()
     val_batch_totals = BatchMetrics()
     total_val_batches = 0
+    total_num_tokens = 0
+    total_overall_loss = 0.0
+    local_rank = int(os.environ.get("LOCAL_RANK"))
+    is_main_process = local_rank == 0
+    
+    # Get total number of batches for progress bar
+    total_batches = len(val_data_loader)
     
     with torch.no_grad():
         val_data_loader.sampler.set_epoch(0)  # Use epoch 0 for validation
         val_data_loader_it = iter(val_data_loader)
         
+        # Create progress bar only on rank 0
+        pbar = tqdm(
+            total=total_batches,
+            desc="Validation",
+            disable=not is_main_process,
+            unit="batch"
+        )
+        
         for batch in val_data_loader_it:
             val_batch_totals.reset_batch()
-            
+
             for grad_accum, mb in enumerate(batch):
                 mb_num_loss_counted_tokens = mb['num_loss_counted_tokens']
                 mb_num_samples = mb['num_samples']
@@ -207,6 +229,9 @@ def compute_validation_loss(model, val_data_loader, device, world_size):
                 loss = output.loss.float().sum()
                 loss_metrics = loss.detach().item()
                 
+                # Clear cache after each minibatch to prevent OOM
+                torch.cuda.empty_cache()
+                
                 val_batch_totals.accumulate_minibatch_metrics(
                     num_loss_counted_tokens=mb_num_loss_counted_tokens,
                     num_total_tokens=mb['input_ids'].shape[1],
@@ -215,28 +240,40 @@ def compute_validation_loss(model, val_data_loader, device, world_size):
                     loss_backward=0.0,  # No backward pass for validation
                     time_per_minibatch=0.0,  # Not tracking time for validation
                 )
-            
+ 
             # Reduce metrics across all processes
+            torch.distributed.barrier()
             val_batch_totals.reduce_batch_metrics(device)
             total_val_batches += 1
+            total_overall_loss += val_batch_totals.totals['loss']
+
+            # ensure there was an item in the batch
+            assert len(batch) > 0, "validation batch was empty"
+            total_num_tokens += batch[0]['batch_num_loss_counted_tokens']
+            
+            # Update progress bar with current loss
+            if is_main_process:
+                current_loss = total_overall_loss / total_num_tokens if total_num_tokens > 0 else 0.0
+                pbar.set_postfix({'loss': f'{current_loss:.4f}'})
+                pbar.update(1)
+            
+            dist.barrier()
+        
+        # Close progress bar
+        if is_main_process:
+            pbar.close()
     
     # Calculate average validation metrics and synchronize across all processes
     vbm = val_batch_totals.totals
     if total_val_batches > 0 and vbm['num_loss_counted_tokens'] > 0:
-        avg_val_loss = vbm['loss'] / vbm['num_loss_counted_tokens']
-        
-        # Create tensor for synchronization across all processes
-        val_loss_tensor = torch.tensor([avg_val_loss], device=device, dtype=torch.float32)
-        dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
-        synchronized_val_loss = (val_loss_tensor / world_size).item()
-        
+        avg_val_loss = total_overall_loss / total_num_tokens
         val_metrics = {
-            'val_loss': synchronized_val_loss,
+            'val_loss': avg_val_loss,
             'val_num_samples': vbm['num_samples'],
             'val_num_loss_counted_tokens': vbm['num_loss_counted_tokens'],
             'val_num_batches': total_val_batches,
         }
-        log_rank_0(f"Validation loss: {synchronized_val_loss:.6f}")
+        log_rank_0(f"Validation loss: {avg_val_loss:.6f}")
     else:
         val_metrics = {}
         log_rank_0("No validation data processed")
@@ -343,31 +380,121 @@ def validate_training_mode(
     elif training_mode == TrainingMode.TOKEN and max_tokens <= 0:
         raise ValueError("TOKEN training mode requires max_tokens > 0")
 
-def should_save_checkpoint(
-    save_type: SaveType,
-    accumulated_samples: int,
-    last_saved_samples: int,
-    min_samples_per_checkpoint: int | None = None,
-    end_of_epoch: bool = False,
-    end_of_training: bool = False,
-) -> bool:
+class Checkpointer:
     """
-    Utility function to consolidate the logic used when deciding if 
-    a checkpoint should be saved. 
+    A stateful checkpointer that manages when to save model checkpoints.
     
-    This also prevents duplicate checkpointing from happening, which is particularly
-    imoprtant for OSFT, since checkpointing is an expensive operation.
+    This class consolidates the logic for deciding if a checkpoint should be saved
+    and prevents duplicate checkpointing, which is particularly important for OSFT
+    since checkpointing is an expensive operation.
+    
+    The checkpointer supports multiple save types:
+    - min_samples: Save every N samples
+    - epoch: Save at the end of each epoch
+    - final: Save at the end of training
+    - best_val_loss: Save when validation loss improves
     """
-    match save_type:
-        case "min_samples":
-            return min_samples_per_checkpoint is not None and accumulated_samples > last_saved_samples
-        case "epoch":
-            # have we processed any new information since the last checkpoint?
-            return end_of_epoch and accumulated_samples > last_saved_samples  
-        case "final":
-            return end_of_training and accumulated_samples > last_saved_samples
-        case _:
-            raise ValueError(f"Unknown save type: {save_type}")
+    
+    def __init__(
+        self,
+        min_samples_per_checkpoint: int | None = None,
+        save_best_val_loss: bool = False,
+        val_loss_improvement_threshold: float = 0.0,
+    ):
+        """
+        Initialize the checkpointer.
+        
+        Args:
+            min_samples_per_checkpoint: Minimum samples between frequency-based saves
+            save_best_val_loss: Whether to save on validation loss improvement
+            val_loss_improvement_threshold: Minimum improvement needed to save (default: any improvement)
+        """
+        self.min_samples_per_checkpoint = min_samples_per_checkpoint
+        self.save_best_val_loss = save_best_val_loss
+        self.val_loss_improvement_threshold = val_loss_improvement_threshold
+        
+        # State tracking
+        self.last_saved_samples = 0
+        self.last_frequency_saved_samples = 0
+        self.best_val_loss: float | None = None
+    
+    def should_save_checkpoint(
+        self,
+        save_type: SaveType,
+        accumulated_samples: int,
+        end_of_epoch: bool = False,
+        end_of_training: bool = False,
+        val_loss: float | None = None,
+    ) -> bool:
+        """
+        Determine if a checkpoint should be saved based on the save type and current state.
+        
+        Args:
+            save_type: The type of checkpoint to consider
+            accumulated_samples: Total samples processed so far
+            end_of_epoch: Whether we're at the end of an epoch
+            end_of_training: Whether training is ending
+            val_loss: Current validation loss (if available)
+            
+        Returns:
+            True if a checkpoint should be saved, False otherwise
+        """
+        match save_type:
+            case "min_samples":
+                return (self.min_samples_per_checkpoint is not None and 
+                       accumulated_samples >= self.last_frequency_saved_samples + self.min_samples_per_checkpoint)
+            
+            case "epoch":
+                # Have we processed any new information since the last checkpoint?
+                if not end_of_epoch:
+                    return False
+                return accumulated_samples > self.last_saved_samples
+            
+            case "final":
+                if not end_of_training:
+                    return False
+                return accumulated_samples > self.last_saved_samples
+            
+            case "best_val_loss":
+                if not self.save_best_val_loss or val_loss is None:
+                    return False
+                
+                # First validation loss - save it
+                if self.best_val_loss is None:
+                    return True
+                
+                # Check if validation loss improved enough
+                improvement = self.best_val_loss - val_loss
+                return improvement > self.val_loss_improvement_threshold
+            
+            case _:
+                raise ValueError(f"Unknown save type: {save_type}")
+    
+    def record_save(
+        self, 
+        save_type: SaveType, 
+        accumulated_samples: int, 
+        val_loss: float | None = None
+    ):
+        """
+        Record that a checkpoint was saved and update internal state.
+        
+        Args:
+            save_type: The type of checkpoint that was saved
+            accumulated_samples: Total samples processed when the save occurred
+            val_loss: Validation loss at time of save (if applicable)
+        """
+        # Always update the general save tracker
+        self.last_saved_samples = accumulated_samples
+        
+        # Update type-specific state
+        if save_type == "min_samples":
+            self.last_frequency_saved_samples = accumulated_samples
+        elif save_type == "best_val_loss" and val_loss is not None:
+            self.best_val_loss = val_loss
+            log_rank_0(f"New best validation loss: {val_loss:.6f}")
+
+
 
 
 def train(
@@ -384,6 +511,8 @@ def train(
         max_tokens: int = 0,
         checkpoint_at_epoch: bool = False,
         save_final_checkpoint: bool = False,
+        save_best_val_loss: bool = False,
+        val_loss_improvement_threshold: float = 0.0,
         use_wandb: bool = False,
         val_data_loader: torch.utils.data.DataLoader | None = None,
         validation_frequency: int = 100,
@@ -411,6 +540,9 @@ def train(
         max_tokens (int, optional): Maximum number of loss-counted tokens (for TOKEN mode). Defaults to 0.
         checkpoint_at_epoch (bool, optional): Whether to save checkpoints at epoch end. Defaults to False.
         save_final_checkpoint (bool, optional): Whether to save a final checkpoint at training end. Defaults to False.
+        save_best_val_loss (bool, optional): Whether to save checkpoints when validation loss improves. Defaults to False.
+        val_loss_improvement_threshold (float, optional): Minimum validation loss improvement required to trigger a save. Defaults to 0.0 (any improvement).
+        use_wandb (bool, optional): Whether to use Weights & Biases for logging. Defaults to False.
         val_data_loader (torch.utils.data.DataLoader | None, optional): Validation data loader. If provided, validation loss will be computed. Defaults to None.
         validation_frequency (int, optional): Frequency of validation evaluation in steps. Defaults to 100.
 
@@ -437,7 +569,7 @@ def train(
     world_size = int(os.environ["WORLD_SIZE"])
     is_local_main_process = int(os.getenv("LOCAL_RANK", 0)) == 0
     is_main_process = int(os.getenv("RANK", 0)) == 0
-    metric_logger = AsyncStructuredLogger(output_dir + f"/training_metrics_{get_node_rank()}.jsonl")
+    metric_logger = AsyncStructuredLogger(output_dir + f"/training_metrics_{get_node_rank()}.jsonl", use_wandb=use_wandb)
 
     # initialize variables
     batch_totals = BatchMetrics()
@@ -445,11 +577,13 @@ def train(
     total_samples_accumulated = 0
     total_tokens_processed = 0  # Track total loss-counted tokens for TOKEN mode
     
-    # we keep 2 different values to track the # of last saved samples, so that
-    # frequency-based saving can still happen, but the other methods have a way
-    # of tracking what's actually been saved
-    last_frequency_saved_samples = 0
-    last_saved_samples = 0 
+    # Initialize the checkpointer to manage saving logic
+    checkpointer = Checkpointer(
+        min_samples_per_checkpoint=min_samples_per_checkpoint,
+        save_best_val_loss=save_best_val_loss,
+        val_loss_improvement_threshold=val_loss_improvement_threshold,
+    )
+    
     device = next(model.parameters()).device
     epoch = 0
     last_validation_loss = None  # Track the most recent validation loss
@@ -484,7 +618,6 @@ def train(
                     'position_ids': mb['position_ids'].to(device),
                 }
 
-                # torch.distributed.breakpoint()
                 output = model(**model_inputs)
                 loss = output.loss.float().sum() 
                 loss_metrics = loss.detach().item()
@@ -532,6 +665,7 @@ def train(
                     "total_tokens_accumulated": total_tokens_processed,
                     "samples_per_second": bm['num_samples']/batch_time,
                     "peak_memory_usage_GB": float(torch.cuda.max_memory_allocated() / 1e9),
+                    'val_loss': last_validation_loss,
                 }
             # Add validation metrics if it's time to validate
             if val_data_loader is not None and step % validation_frequency == 0:
@@ -549,18 +683,22 @@ def train(
             torch.distributed.barrier()
             
             # sample-based saving, keep in the inner loop
-            if should_save_checkpoint(
+            if checkpointer.should_save_checkpoint(
                 save_type="min_samples",
-                accumulated_samples=total_samples_accumulated,
-                last_saved_samples=last_frequency_saved_samples,
-                min_samples_per_checkpoint=min_samples_per_checkpoint
+                accumulated_samples=total_samples_accumulated
             ):
                 save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
-                # update this value for frequency-based saving
-                last_frequency_saved_samples = total_samples_accumulated
+                checkpointer.record_save("min_samples", total_samples_accumulated)
                 
-                # track this save so others (e.g. epoch, final) don't duplicate save
-                last_saved_samples = total_samples_accumulated
+            # Check for best validation loss saving after validation runs
+            if (last_validation_loss is not None and 
+                checkpointer.should_save_checkpoint(
+                    save_type="best_val_loss",
+                    accumulated_samples=total_samples_accumulated,
+                    val_loss=last_validation_loss
+                )):
+                save_model(model, total_samples_accumulated, output_dir, model_name_or_path, suffix="best_val_loss")
+                checkpointer.record_save("best_val_loss", total_samples_accumulated, last_validation_loss)
             
             torch.distributed.barrier()
 
@@ -579,32 +717,29 @@ def train(
         # Increment epoch counter after completing an epoch
         epoch += 1
         
-        # save at the current number of samples seen. Do not record `last_saved_samples`
-        # since this shouldn't interefere with frequency-based saving
+        # save at the current number of samples seen
         if checkpoint_at_epoch:
             # should save at the end of each epoch
-            if should_save_checkpoint(
+            if checkpointer.should_save_checkpoint(
                 save_type="epoch",
                 accumulated_samples=total_samples_accumulated,
-                last_saved_samples=last_saved_samples,
                 end_of_epoch=True
             ):
                 save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
-                last_saved_samples = total_samples_accumulated
+                checkpointer.record_save("epoch", total_samples_accumulated)
             else:
                 log_rank_0(f"Skipping checkpoint save at epoch {epoch} because no new samples have been processed since the last checkpoint.")
     
     torch.distributed.barrier()
     if save_final_checkpoint:
         # save one last time if we haven't yet
-        if should_save_checkpoint(
+        if checkpointer.should_save_checkpoint(
             save_type="final",
             accumulated_samples=total_samples_accumulated,
-            last_saved_samples=last_saved_samples,
             end_of_training=True
         ):
             save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
-            last_saved_samples = total_samples_accumulated
+            checkpointer.record_save("final", total_samples_accumulated)
         else:
             log_rank_0(f"Skipping final checkpoint save because no new samples have been processed since the last checkpoint.")
     
@@ -709,6 +844,10 @@ def main(
     validation_split: Annotated[float, Option(help="Fraction of data to use for validation (0.0 to 1.0)")] = 0.0,
     validation_frequency: Annotated[int, Option(help="Frequency of validation evaluation (in steps)")] = 100,
     
+    # checkpoint parameters
+    save_best_val_loss: Annotated[bool, Option(help="Whether to save checkpoints when validation loss improves")] = False,
+    val_loss_improvement_threshold: Annotated[float, Option(help="Minimum validation loss improvement required to trigger a save")] = 0.0,
+    
     # wandb parameters
     wandb_project: Annotated[str | None, Option(help="Weights & Biases project name")] = None,
     wandb_run_name: Annotated[str | None, Option(help="Weights & Biases run name")] = None,
@@ -778,6 +917,8 @@ def main(
             "adamw_learning_rate": adamw_learning_rate,
             "validation_split": validation_split,
             "validation_frequency": validation_frequency,
+            "save_best_val_loss": save_best_val_loss,
+            "val_loss_improvement_threshold": val_loss_improvement_threshold,
             "validation_loss": None,  # Will be updated with the last validation loss
             "LOCAL_RANK": local_rank,
             "GLOBAL_RANK": global_rank,
@@ -890,6 +1031,8 @@ def main(
         max_tokens=max_tokens,
         checkpoint_at_epoch=checkpoint_at_epoch,
         save_final_checkpoint=save_final_checkpoint,
+        save_best_val_loss=save_best_val_loss,
+        val_loss_improvement_threshold=val_loss_improvement_threshold,
         use_wandb=use_wandb,
         val_data_loader=val_data_loader,
         validation_frequency=validation_frequency,
