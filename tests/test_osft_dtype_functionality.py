@@ -209,16 +209,18 @@ class TestOSFTModelDtypeIntegration:
             # Should use model's output_dtype
             assert reconstructed.dtype == torch.bfloat16
     
-    @patch('mini_trainer.osft_utils.create_osft_model_class')
+    @patch('transformers.AutoConfig')
+    @patch('mini_trainer.setup_model_for_training.create_osft_model_class')
     @patch('mini_trainer.setup_model_for_training.align_model_and_tokenizer')
     @patch('torch.distributed.is_initialized', return_value=False)
     @patch('torch.distributed.get_rank', return_value=0)
+    @patch('mini_trainer.setup_model_for_training.get_model_class_from_config')
     @patch('mini_trainer.setup_model_for_training.AutoModelForCausalLM')
     @patch('mini_trainer.setup_model_for_training.AutoTokenizer')
     @patch('mini_trainer.setup_model_for_training.AutoConfig')
     def test_setup_model_assigns_dtype_attributes(self, mock_auto_config, mock_tokenizer, mock_model_class, 
-                                                 mock_get_rank, mock_is_initialized, 
-                                                 mock_align, mock_create_osft):
+                                                 mock_get_model_class, mock_get_rank, mock_is_initialized, 
+                                                 mock_align, mock_create_osft, mock_transformers_auto_config):
         """Test that setup_model correctly assigns dtype attributes to OSFT model."""
         # Create a real object to verify attribute assignment
         class MockOSFTModel:
@@ -228,6 +230,19 @@ class TestOSFTModelDtypeIntegration:
                 self.__class__.__name__ = "LlamaForCausalLM"  # Supported model name
                 # Make reinitialize_osft a MagicMock so we can track calls
                 self.reinitialize_osft = MagicMock()
+                # Add some dummy parameters for OSFT config generation
+                self._parameters = {
+                    'model.layers.0.self_attn.q_proj.weight': torch.nn.Parameter(torch.randn(512, 512)),
+                    'model.layers.0.self_attn.v_proj.weight': torch.nn.Parameter(torch.randn(512, 512)),
+                }
+            
+            def named_parameters(self):
+                """Return dummy parameters for OSFT config generation."""
+                return self._parameters.items()
+            
+            def parameters(self):
+                """Return just the parameter values."""
+                return self._parameters.values()
             
             def to(self, device):
                 return self
@@ -235,11 +250,28 @@ class TestOSFTModelDtypeIntegration:
         # Create the mock OSFT model instance
         mock_osft_model = MockOSFTModel()
         
+        # Create a proper base model class with from_pretrained
+        class MockBaseModelClass:
+            __name__ = "LlamaForCausalLM"
+            
+            @classmethod
+            def from_pretrained(cls, *args, **kwargs):
+                # This is what super().from_pretrained() will call
+                return mock_osft_model
+        
         # Mock the temporary base model that gets created and deleted
         mock_temp_model = MagicMock()
         mock_temp_model.config = MagicMock()
-        mock_temp_model.__class__.__name__ = "LlamaForCausalLM"
+        mock_temp_model.__class__ = MockBaseModelClass
         mock_model_class.from_pretrained.return_value = mock_temp_model
+        
+        # Mock get_model_class_from_config to return the base model class
+        mock_get_model_class.return_value = MockBaseModelClass
+        
+        # Mock AutoConfig globally (used in osft_utils) to return a non-GPT-OSS config
+        mock_osft_config = MagicMock()
+        mock_osft_config.model_type = "llama"  # Not GPT-OSS
+        mock_transformers_auto_config.from_pretrained.return_value = mock_osft_config
         
         # Mock tokenizer
         mock_tokenizer_inst = MagicMock()
@@ -249,10 +281,20 @@ class TestOSFTModelDtypeIntegration:
         # Mock align_model_and_tokenizer to return the models as-is
         mock_align.side_effect = lambda model, tokenizer: model
         
-        # Mock the OSFT class creation and instantiation
-        mock_osft_class = MagicMock()
-        mock_osft_class.from_pretrained.return_value = mock_osft_model
-        mock_create_osft.return_value = mock_osft_class
+        # Mock the OSFT class creation to return a function that creates the proper class
+        def create_mock_osft_class(base_cls):
+            # Create a class that inherits from the base class
+            class MockOSFTClass(base_cls):
+                @classmethod
+                def from_pretrained(cls, *args, **kwargs):
+                    # Set the proper attributes on the model
+                    mock_osft_model.upcast_dtype = kwargs.get('upcast_dtype', torch.float32)
+                    mock_osft_model.output_dtype = kwargs.get('output_dtype', None)
+                    mock_osft_model.reinitialize_osft = MagicMock()
+                    return mock_osft_model
+            return MockOSFTClass
+            
+        mock_create_osft.side_effect = create_mock_osft_class
         
         # Call setup_model
         result = setup_model(
@@ -269,11 +311,8 @@ class TestOSFTModelDtypeIntegration:
         assert result.upcast_dtype == torch.float32
         assert result.output_dtype == torch.bfloat16
         
-        # Verify the OSFT model was created from the temporary model's class
-        mock_create_osft.assert_called_once_with(mock_temp_model.__class__)
-        
-        # Verify from_pretrained was called on the OSFT class
-        mock_osft_class.from_pretrained.assert_called_once()
+        # Verify the OSFT model was created from the base model class
+        mock_create_osft.assert_called_once_with(MockBaseModelClass)
         
         # Verify reinitialize_osft was called
         assert hasattr(result, 'reinitialize_osft')

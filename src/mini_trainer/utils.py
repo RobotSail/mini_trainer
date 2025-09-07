@@ -9,6 +9,8 @@ import torch
 from torch.distributed import is_initialized, get_rank
 import torch.distributed as dist
 from rich.logging import RichHandler
+from transformers import AutoModel, AutoModelForCausalLM, AutoConfig
+from transformers.models.auto import MODEL_MAPPING, MODEL_FOR_CAUSAL_LM_MAPPING
 
 from mini_trainer.training_types import TorchrunArgs
 
@@ -121,3 +123,17 @@ def init_distributed_environment():
     log_rank_0("✅ Torch distributed appears to be functioning correctly")
 
     torch.distributed.barrier()
+
+
+def get_model_class_from_config(model_path):
+    """Get the actual model class (not just the name) from a pretrained path."""
+    # get the model class from config
+    # TODO: make the `trust_remote_code` setting configurable somehow
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    mapping = MODEL_FOR_CAUSAL_LM_MAPPING
+
+    config_class = config.__class__
+    if config_class not in mapping:
+        raise ValueError(f"Model class {config_class} not found in mapping {mapping}")
+    return mapping[config_class]
+

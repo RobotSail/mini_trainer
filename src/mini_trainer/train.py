@@ -499,6 +499,7 @@ def train(
                 batch_time = time.time() - batch_start_time
                 batch_metrics = {
                         "step": step,
+                        "epoch": epoch,
                         "lr": lr_scheduler.get_last_lr()[0],
                         "grad_norm": grad_norm.item(),
                         "loss": bm['loss']/batch_num_loss_counted_tokens,
@@ -711,6 +712,7 @@ def main(
             "output_dir": output_dir,
             "min_samples_per_checkpoint": min_samples_per_checkpoint,
             "save_dtype": save_dtype,
+            "train_dtype": train_dtype,
             "training_mode": training_mode.value,
             "max_epochs": max_epochs,
             "max_steps": max_steps,
@@ -731,10 +733,9 @@ def main(
     setup_logger(level="INFO")
 
     # Parse scheduler kwargs from JSON string
-    import json as json_module
     try:
-        scheduler_kwargs_dict = json_module.loads(lr_scheduler_kwargs) if lr_scheduler_kwargs else {}
-    except json_module.JSONDecodeError:
+        scheduler_kwargs_dict = json.loads(lr_scheduler_kwargs) if lr_scheduler_kwargs else {}
+    except json.JSONDecodeError:
         log_rank_0(f"Warning: Invalid JSON for lr_scheduler_kwargs: {lr_scheduler_kwargs}. Using empty dict.")
         scheduler_kwargs_dict = {}
     

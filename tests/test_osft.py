@@ -761,31 +761,47 @@ class TestSetupModelIntegration:
     """Test integration of OSFT options with setup_model function."""
     
     @patch('mini_trainer.setup_model_for_training.log_rank_0')
+    @patch('transformers.AutoConfig')
+    @patch('mini_trainer.setup_model_for_training.get_model_class_from_config')
     @patch('mini_trainer.setup_model_for_training.AutoModelForCausalLM')
     @patch('mini_trainer.setup_model_for_training.AutoTokenizer')
     @patch('mini_trainer.setup_model_for_training.AutoConfig')
     @patch('mini_trainer.osft_utils.auto_generate_target_osft_config')
-    @patch('mini_trainer.osft_utils.create_osft_model_class')
-    def test_osft_params_flow_through_setup(self, mock_osft_class, mock_auto_config, mock_transformers_auto_config, mock_tokenizer_cls, mock_model_cls, mock_log):
+    @patch('mini_trainer.setup_model_for_training.create_osft_model_class')
+    def test_osft_params_flow_through_setup(self, mock_osft_class, mock_auto_config, mock_setup_auto_config, mock_tokenizer_cls, mock_model_cls, mock_get_model_class, mock_transformers_auto_config, mock_log):
         """Test that OSFT parameters flow through the setup correctly."""
         # Test that OSFT model creation gets the right parameters
         mock_auto_config.return_value = {"layer.weight": 10}
         
-        # Mock the OSFT model class
-        mock_osft_model_cls = MagicMock()
+        # Create mock OSFT instance
         mock_osft_instance = MagicMock()
         mock_osft_instance.config = MagicMock()
         mock_osft_instance.config.vocab_size = 1000
         mock_osft_instance.dtype = torch.float32
+        mock_osft_instance.reinitialize_osft = MagicMock()
+        mock_osft_instance.named_parameters = MagicMock(return_value=[])
+        mock_osft_instance.parameters = MagicMock(return_value=[])
         
-        # Setup from_pretrained to return a properly configured model
-        def from_pretrained_side_effect(*args, **kwargs):
-            # Store the kwargs for verification
-            mock_osft_model_cls.last_kwargs = kwargs
-            return mock_osft_instance
+        # Create a function that builds the OSFT class
+        def create_mock_osft_class(base_cls):
+            class MockOSFTModelCls(base_cls):
+                last_kwargs = {}  # Store kwargs for verification
+                
+                @classmethod
+                def from_pretrained(cls, *args, **kwargs):
+                    # Store the kwargs for verification
+                    cls.last_kwargs = kwargs
+                    # Set attributes on the instance
+                    mock_osft_instance.upcast_dtype = kwargs.get('upcast_dtype', torch.float32)
+                    if 'output_dtype' in kwargs and kwargs['output_dtype'] is not None:
+                        mock_osft_instance.output_dtype = kwargs['output_dtype']
+                    return mock_osft_instance
+            
+            # Store the class for later verification
+            create_mock_osft_class.osft_class = MockOSFTModelCls
+            return MockOSFTModelCls
         
-        mock_osft_model_cls.from_pretrained.side_effect = from_pretrained_side_effect
-        mock_osft_class.return_value = mock_osft_model_cls
+        mock_osft_class.side_effect = create_mock_osft_class
         
         # Mock tokenizer and base model
         mock_tokenizer = MagicMock()
@@ -793,10 +809,28 @@ class TestSetupModelIntegration:
         mock_tokenizer.pad_token_id = 0
         mock_tokenizer_cls.from_pretrained.return_value = mock_tokenizer
         
+        # Create a proper base model class
+        class MockBaseModelClass:
+            __name__ = "LlamaForCausalLM"
+            
+            @classmethod
+            def from_pretrained(cls, *args, **kwargs):
+                # This is what super().from_pretrained() will call
+                return mock_osft_instance
+        
         mock_base_model = MagicMock()
         mock_base_model.config = MagicMock()
         mock_base_model.config.vocab_size = 1000
+        mock_base_model.__class__ = MockBaseModelClass
         mock_model_cls.from_pretrained.return_value = mock_base_model
+        
+        # Mock get_model_class_from_config to return the base model class
+        mock_get_model_class.return_value = MockBaseModelClass
+        
+        # Mock AutoConfig globally (used in osft_utils) to return a non-GPT-OSS config
+        mock_osft_config = MagicMock()
+        mock_osft_config.model_type = "llama"  # Not GPT-OSS
+        mock_transformers_auto_config.from_pretrained.return_value = mock_osft_config
         
         # Call setup_model with OSFT params
         model = setup_model(
@@ -811,10 +845,12 @@ class TestSetupModelIntegration:
         mock_osft_class.assert_called_once()
         
         # Verify from_pretrained was called with the right params
-        assert 'rank_ratio' in mock_osft_model_cls.last_kwargs
-        assert mock_osft_model_cls.last_kwargs['rank_ratio'] == 0.75
-        assert 'target_patterns' in mock_osft_model_cls.last_kwargs
-        assert mock_osft_model_cls.last_kwargs['target_patterns'] == ["custom.layer1", "custom.layer2"]
+        # Get the OSFT class that was created
+        osft_cls = create_mock_osft_class.osft_class
+        assert 'rank_ratio' in osft_cls.last_kwargs
+        assert osft_cls.last_kwargs['rank_ratio'] == 0.75
+        assert 'target_patterns' in osft_cls.last_kwargs
+        assert osft_cls.last_kwargs['target_patterns'] == ["custom.layer1", "custom.layer2"]
 
 
 class TestEndToEndOSFT:

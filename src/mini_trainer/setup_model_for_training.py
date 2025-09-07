@@ -8,9 +8,9 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
 from torch.distributed.device_mesh import init_device_mesh
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
-from mini_trainer.utils import log_rank_0, patch_target_module
-from mini_trainer.osft_utils import OSFTModel, setup_osft_model
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, Mxfp4Config
+from mini_trainer.utils import get_model_class_from_config, log_rank_0, patch_target_module
+from mini_trainer.osft_utils import OSFTModel, _build_osft_kwargs, _initialize_osft_with_distribution, _set_osft_dtypes, create_osft_model_class
 from mini_trainer.gpt_oss_utils import freeze_router_params, is_gpt_oss_model
 
 
@@ -165,6 +165,93 @@ def get_model_save_dtype(save_dtype: str | torch.dtype | None, model_name_or_pat
     return save_dtype
 
 
+def setup_osft_model(
+    model_class,
+    model_name_or_path: str,
+    base_model_args: dict,
+    tokenizer,
+    is_gpt_oss: bool,
+    rank: int,
+    osft_rank_ratio=None,
+    osft_target_patterns=None,
+    osft_upcast_dtype=torch.float32,
+    osft_output_dtype=None,
+    osft_memory_efficient_init: bool = False,
+):
+    """
+    High-level function to set up an OSFT model with all necessary configuration.
+
+    This function handles both GPT-OSS and standard model paths with minimal
+    duplication.
+
+    Args:
+        model_class: The base model class to use
+        base_model_args: Arguments for model loading
+        tokenizer: Tokenizer for model alignment
+        is_gpt_oss: Whether this is a GPT-OSS model
+        rank: Current process rank
+        osft_rank_ratio: Rank ratio for OSFT decomposition
+        osft_target_patterns: Target patterns for OSFT
+        osft_upcast_dtype: Upcast dtype for OSFT computations
+        osft_output_dtype: Output dtype for OSFT results
+        osft_memory_efficient_init: Whether to use memory-efficient SVD initialization
+
+    Returns:
+        Fully configured and initialized OSFT model
+    """
+    from mini_trainer.setup_model_for_training import align_model_and_tokenizer
+
+    osft_kwargs = _build_osft_kwargs(osft_rank_ratio, osft_target_patterns)
+
+    # Determine the actual model class and config
+    actual_model_class = get_model_class_from_config(model_name_or_path)
+    config = None
+    if not is_gpt_oss:
+        # Standard models need to load a temporary model to get the actual class
+        tmp = model_class.from_pretrained(**base_model_args)
+
+        # GPT-OSS doesn't need to pull the config, but all other models do (for now, anyway)
+        config = tmp.config
+        del tmp
+        torch.cuda.empty_cache()
+
+    # Create OSFT model class and load model
+    osft_cls = create_osft_model_class(actual_model_class)
+    model_load_args = {
+        **base_model_args,
+        "initialize_osft": False,
+        "osft_memory_efficient_init": osft_memory_efficient_init,
+        **osft_kwargs,
+    }
+
+    # Add config for non-GPT-OSS models
+    if config is not None:
+        model_load_args["config"] = config
+
+    model: OSFTModel = osft_cls.from_pretrained(**model_load_args)
+    model = align_model_and_tokenizer(model, tokenizer)
+
+    # Set OSFT dtype attributes
+    _set_osft_dtypes(model, osft_upcast_dtype, osft_output_dtype)
+
+    # Handle initialization based on memory_efficient_init flag
+    device = torch.device("cuda", rank)
+
+    if osft_memory_efficient_init:
+        # Memory-efficient: Initialize OSFT on CPU, then move to GPU
+        log_rank_0("🧠 Using memory-efficient OSFT initialization (CPU → GPU)")
+        model = _initialize_osft_with_distribution(model)
+        log_rank_0("Initialized OSFT model, keeping on CPU until sharding")
+
+    else:
+        # Standard: Move to GPU first, then initialize OSFT on GPU
+        log_rank_0("⚡ Using standard OSFT initialization (GPU-native)")
+        model = model.to(device)
+        model = _initialize_osft_with_distribution(model)
+
+    return model
+
+
 def setup_model(
     model_name_or_path: str,
     osft: bool = False,
@@ -180,6 +267,7 @@ def setup_model(
 ) -> torch.nn.Module | OSFTModel:
     base_model_args = {
         "pretrained_model_name_or_path": model_name_or_path,
+        "torch_dtype": train_dtype,  # Ensure models are loaded in the training dtype
     }
     
     # Get model config to check for GPT-OSS and set appropriate configurations
@@ -189,8 +277,11 @@ def setup_model(
     # Set up quantization config for GPT-OSS models
     if is_gpt_oss:
         try:
-            from transformers import Mxfp4Config
-            base_model_args["quantization_config"] = Mxfp4Config(dequantize=True)
+            # Try to specify the target dtype for dequantization
+            quantization_config = Mxfp4Config(dequantize=True)
+            # If the config supports dtype specification, use it
+            if hasattr(quantization_config, 'torch_dtype'):
+                quantization_config.torch_dtype = train_dtype
             log_rank_0("🎯 Detected GPT-OSS model - applying dequantization for training")
         except ImportError:
             log_rank_0("⚠️ GPT-OSS model detected but Mxfp4Config not available - using default config")
@@ -240,6 +331,7 @@ def setup_model(
         effective_osft_output_dtype = osft_output_dtype if osft_output_dtype is not None else train_dtype
         return setup_osft_model(
             model_class=ModelClass,
+            model_name_or_path=model_name_or_path,
             base_model_args=base_model_args,
             tokenizer=tokenizer,
             is_gpt_oss=is_gpt_oss,
@@ -264,14 +356,16 @@ def setup_model(
         freeze_router_params(model)
     
     # Convert all trainable parameters to specified training dtype
-    if not osft:
-        log_rank_0(f"🔧 Converting trainable parameters to {train_dtype} for training")
-        converted_count = 0
-        for name, param in model.named_parameters():
-            if param.requires_grad and param.dtype != train_dtype:
-                param.data = param.data.to(train_dtype)
-                converted_count += 1
-        log_rank_0(f"✅ Converted {converted_count} trainable parameters to {train_dtype}")
+    log_rank_0(f"🔧 Converting trainable parameters to {train_dtype} for training")
+    converted_count = 0
+    for name, param in model.named_parameters():
+        if param.requires_grad and param.dtype != train_dtype:
+            param.data = param.data.to(train_dtype)
+            converted_count += 1
+    if converted_count > 0:
+        log_rank_0(f"✅ Converted {converted_count} parameters to {train_dtype}")
+    else:
+        log_rank_0(f"✅ All parameters already in {train_dtype}")
 
     # Get the base class name (strip WithOSFT suffix if present for OSFT models)
     class_name = model.__class__.__name__
