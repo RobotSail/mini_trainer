@@ -6,6 +6,7 @@ from typing import Annotated, Literal
 import wandb
 from typer import Typer, Option
 from tqdm import tqdm
+import wandb
 
 from mini_trainer.async_structured_logger import AsyncStructuredLogger
 import torch
@@ -14,7 +15,13 @@ import torch.distributed as dist
 from mini_trainer.batch_metrics import BatchMetrics
 from mini_trainer.sampler import get_data_loader, get_train_val_data_loaders
 from mini_trainer.setup_model_for_training import setup_model, setup_training_components
-from mini_trainer.utils import init_distributed_environment, log_rank_0, setup_logger, get_node_rank
+from mini_trainer.utils import (
+    init_distributed_environment,
+    log_rank_0,
+    setup_logger,
+    get_node_rank,
+    destroy_distributed_environment,
+)
 from mini_trainer.training_types import TrainingMode
 
 SaveType = Literal["min_samples", "epoch", "final", "best_val_loss"]
@@ -568,7 +575,6 @@ def train(
     # control args 
     world_size = int(os.environ["WORLD_SIZE"])
     is_local_main_process = int(os.getenv("LOCAL_RANK", 0)) == 0
-    is_main_process = int(os.getenv("RANK", 0)) == 0
     metric_logger = AsyncStructuredLogger(output_dir + f"/training_metrics_{get_node_rank()}.jsonl", use_wandb=use_wandb)
 
     # initialize variables
@@ -743,9 +749,6 @@ def train(
         else:
             log_rank_0(f"Skipping final checkpoint save because no new samples have been processed since the last checkpoint.")
     
-    # Update params with final validation loss if available
-    if last_validation_loss is not None and is_main_process and use_wandb:
-        wandb.config.update({"validation_loss": last_validation_loss})
 
 
 def calculate_num_training_steps(
@@ -871,16 +874,13 @@ def main(
     # Validate validation split
     if validation_split < 0.0 or validation_split >= 1.0:
         raise ValueError("validation_split must be between 0.0 and 1.0 (exclusive)")
-    
+
     if validation_split > 0.0 and validation_frequency <= 0:
         raise ValueError("validation_frequency must be positive when validation_split > 0")
     
     # Convert string dtypes to torch dtypes
     osft_upcast_dtype_torch = parse_dtype(osft_upcast_dtype)
     osft_output_dtype_torch = parse_dtype(osft_output_dtype)
-    
-    # Initialize wandb if project is specified
-    use_wandb = wandb_project is not None
     
     # Log parameters only on rank 0
     local_rank = int(os.getenv("LOCAL_RANK", 0))
@@ -919,7 +919,9 @@ def main(
             "validation_frequency": validation_frequency,
             "save_best_val_loss": save_best_val_loss,
             "val_loss_improvement_threshold": val_loss_improvement_threshold,
-            "validation_loss": None,  # Will be updated with the last validation loss
+            "wandb_project": wandb_project,
+            "wandb_run_name": wandb_run_name,
+            "wandb_entity": wandb_entity,
             "LOCAL_RANK": local_rank,
             "GLOBAL_RANK": global_rank,
             "NODE_RANK": node_rank,
@@ -927,15 +929,18 @@ def main(
         }
         
         # Initialize wandb with the same params config
+        use_wandb = wandb_project is not None
         if use_wandb:
-            import wandb
+            # we rely on the WANDB_API_KEY being set as our primary mechanism for
+            # authentication. So we error out here if it was requested but the user
+            # is not authenticated
+            if os.environ.get("WANDB_API_KEY") is None:
+                raise ValueError("WANDB_API_KEY is not set. Please set the WANDB_API_KEY environment variable.")
             wandb.init(
                 project=wandb_project,
                 name=wandb_run_name,
                 entity=wandb_entity,
                 config=params,
-                # Sync tensorboard logs if they exist
-                # sync_tensorboard=True,
             )
             log_rank_0(f"Initialized wandb project: {wandb_project}")
         
@@ -1037,6 +1042,9 @@ def main(
         val_data_loader=val_data_loader,
         validation_frequency=validation_frequency,
     )
+    
+    # once done, tear down distributed environment
+    destroy_distributed_environment()
     
 if __name__ == "__main__":
     app()

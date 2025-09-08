@@ -114,7 +114,7 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
     ]
 
     if train_args.save_best_val_loss:
-        command.append(f"--save-best-val-loss={train_args.save_best_val_loss}")
+        command.append(f"--save-best-val-loss")
         command.append(f"--val-loss-improvement-threshold={train_args.val_loss_improvement_threshold}")
     
     # Add wandb parameters if specified

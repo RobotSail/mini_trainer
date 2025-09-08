@@ -9,6 +9,7 @@ import torch
 from torch.distributed import is_initialized, get_rank
 import torch.distributed as dist
 from rich.logging import RichHandler
+import wandb
 
 from mini_trainer.training_types import TorchrunArgs
 
@@ -119,5 +120,11 @@ def init_distributed_environment():
     check_distributed_is_synchronized()
     check_distributed_is_evenly_configured()
     log_rank_0("✅ Torch distributed appears to be functioning correctly")
-
     torch.distributed.barrier()
+
+
+def destroy_distributed_environment():
+    # wait for checkpoints to show up, once training is complete we tear it down
+    dist.barrier()
+    log_rank_0("Training complete 😀, tearing down distributed environment")
+    dist.destroy_process_group()
