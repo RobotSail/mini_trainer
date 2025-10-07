@@ -301,9 +301,8 @@ def create_svd_dict(
     """
     device_local = weight.device
 
-    # handle casting data-types
-    if not output_dtype:
-        output_dtype = upcast_dtype
+    # Always store SVD components in the original dtype; only upcast to float32 for SVD compute
+    original_dtype = weight.dtype
 
     if weight.ndim != 2:
         raise ValueError(
@@ -317,12 +316,12 @@ def create_svd_dict(
         # To minimize numerical error, we perform the SVD decomposition
         # in high precision, before casting back to the original data-type
         # since FSDP requires homogenous data-types.
-        W = weight.to(upcast_dtype)  # Ensure numerical stability for SVD
+        W = weight.to(torch.float32)  # Ensure numerical stability for SVD
         U, S, Vt = torch.linalg.svd(W, full_matrices=False)
-        if upcast_dtype != output_dtype:
-            U = U.to(output_dtype)
-            S = S.to(output_dtype)
-            Vt = Vt.to(output_dtype)
+        # if upcast_dtype != output_dtype:
+        U = U.to(original_dtype)
+        S = S.to(original_dtype)
+        Vt = Vt.to(original_dtype)
     else:
         # Note(osilkin):
         # Here we create dummy versions of the weights initialized to 0
@@ -352,7 +351,6 @@ def create_svd_dict(
 
 def reconstruct_weight_matrix(
     svd_dict: SVDDecompositionDict,
-    upcast_dtype: torch.dtype,
     output_dtype: torch.dtype | None = None,
 ):
     """
@@ -361,19 +359,19 @@ def reconstruct_weight_matrix(
     Used for replacing linear layers during inference or forward pass to preserve the weight structure.
     The final matrix is the sum of contributions from both the high-rank (frozen) and low-rank (trainable) components.
     """
-    U_high = svd_dict["U_high"].to(upcast_dtype)
-    S_high = svd_dict["S_high"].to(upcast_dtype)
-    V_high = svd_dict["V_high"].to(upcast_dtype)
-    U_low = svd_dict["U_low"].to(upcast_dtype)
-    S_low = svd_dict["S_low"].to(upcast_dtype)
-    V_low = svd_dict["V_low"].to(upcast_dtype)
+    U_high = svd_dict["U_high"]
+    S_high = svd_dict["S_high"]
+    V_high = svd_dict["V_high"]
+    U_low = svd_dict["U_low"]
+    S_low = svd_dict["S_low"]
+    V_low = svd_dict["V_low"]
 
     # Reconstruct high-rank component (frozen during continual learning)
     if U_high.numel() > 0 and S_high.numel() > 0:
         high_part = torch.mm(U_high * S_high.unsqueeze(0), V_high)
     else:
         high_part = torch.zeros(
-            U_low.size(0), V_low.size(1), device=U_high.device, dtype=upcast_dtype
+            U_low.size(0), V_low.size(1), device=U_high.device, dtype=U_low.dtype
         )
 
     # Reconstruct low-rank component (receives task-specific updates)
@@ -384,7 +382,7 @@ def reconstruct_weight_matrix(
             U_high.size(0),
             V_high.size(1),
             device=U_low.device,
-            dtype=upcast_dtype,
+            dtype=U_high.dtype,
         )
 
     # Combine the low-rank & high-rank components
@@ -1277,7 +1275,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
         def _reconstruct_weight_by_safe_name(
             self,
             safe_name,
-            upcast_dtype: torch.dtype | None = None,
             output_dtype: torch.dtype | None = None,
         ):
             """
@@ -1304,7 +1301,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
         def _reconstruct_weight(
             self,
             original_name,
-            upcast_dtype: torch.dtype | None = None,
             output_dtype: torch.dtype | None = None,
         ):
             """Convenience wrapper to reconstruct using the original parameter name."""
@@ -1345,38 +1341,33 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             else:
                 raise ValueError(f"Input tensor must be 2D or 3D, got {x.dim()}D")
             
-            # Cast to appropriate dtypes for computation
-            upcast_dtype = self.upcast_dtype
-            target_dtype = dtype
+            # Use existing tensor dtypes/devices for computation to avoid unnecessary casts
             
             # High-rank component: x @ V_high.T @ (S_high @ U_high.T)
             result = None
             if U_high.numel() > 0 and S_high.numel() > 0:
-                # Cast to upcast dtype for numerical stability
-                V_high_work = V_high.to(device=device, dtype=upcast_dtype)
-                U_high_work = U_high.to(device=device, dtype=upcast_dtype)
-                S_high_work = S_high.to(device=device, dtype=upcast_dtype)
-                x_work = x_flat.to(upcast_dtype)
+                V_high_work = V_high
+                U_high_work = U_high
+                S_high_work = S_high
+                x_work = x_flat
                 
                 # x @ V_high.T -> intermediate shape: (batch*seq, rank_high)
                 x_V = torch.mm(x_work, V_high_work.transpose(0, 1))
                 # (x @ V_high.T) @ (S_high @ U_high.T) -> final shape: (batch*seq, output_dim)
                 high_contrib = torch.mm(x_V * S_high_work.unsqueeze(0), U_high_work.transpose(0, 1))
-                result = high_contrib.to(target_dtype)
+                result = high_contrib
             
             # Low-rank component: x @ V_low.T @ (S_low @ U_low.T)
             if U_low.numel() > 0 and S_low.numel() > 0:
-                # Cast to upcast dtype for numerical stability
-                V_low_work = V_low.to(device=device, dtype=upcast_dtype)
-                U_low_work = U_low.to(device=device, dtype=upcast_dtype)
-                S_low_work = S_low.to(device=device, dtype=upcast_dtype)
-                x_work = x_flat.to(upcast_dtype)
+                V_low_work = V_low
+                U_low_work = U_low
+                S_low_work = S_low
+                x_work = x_flat
                 
                 # x @ V_low.T -> intermediate shape: (batch*seq, rank_low)
                 x_V = torch.mm(x_work, V_low_work.transpose(0, 1))
                 # (x @ V_low.T) @ (S_low @ U_low.T) -> final shape: (batch*seq, output_dim)
                 low_contrib = torch.mm(x_V * S_low_work.unsqueeze(0), U_low_work.transpose(0, 1))
-                low_contrib = low_contrib.to(target_dtype)
                 
                 if result is not None:
                     result = result + low_contrib
@@ -1387,12 +1378,11 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             if result is None:
                 # Create zero output with correct shape
                 output_dim = U_high.size(0) if U_high.numel() > 0 else U_low.size(0)
-                result = torch.zeros(x_flat.size(0), output_dim, device=device, dtype=target_dtype)
+                result = torch.zeros(x_flat.size(0), output_dim, device=device, dtype=x.dtype)
             
             # Add bias if present
             if bias is not None:
-                bias_work = bias.to(device=device, dtype=target_dtype)
-                result = result + bias_work.unsqueeze(0)
+                result = result + bias.unsqueeze(0)
             
             # Restore original shape if input was 3D
             if len(original_shape) == 3:
@@ -1479,7 +1469,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         "V_low": V_low,
                     },
                     output_dtype=self.dtype,
-                    upcast_dtype=self.upcast_dtype,
                 )
                 state_dict[orig] = W
                 
