@@ -787,7 +787,7 @@ def train(
                     "tokens_per_second": bm['num_total_tokens']/batch_time,
                     "total_samples_accumulated": total_samples_accumulated,
                     "total_tokens_accumulated": total_tokens_processed,
-                    "samples_per_second": bm['num_samples']/batch_time,
+                    "samples_per_second": bm['num_samples']/batch_time if batch_time > 0 else 0.0,
                     "peak_memory_usage_GB": float(torch.cuda.max_memory_allocated() / 1e9),
                     'val_loss': last_validation_loss,
                 }
