@@ -83,6 +83,9 @@ class TrainingArgs:
     optimizer: str = field(default="adamw", metadata={"help": "The optimizer to use for training."})
     muon_momentum: float = field(default=0.95, metadata={"help": "The momentum for the muon optimizer."})
     adamw_learning_rate: float = field(default=5e-6, metadata={"help": "The learning rate for the adamw optimizer."})
+    adamw_beta1: float = field(default=0.9, metadata={"help": "The beta1 parameter for the AdamW optimizer."})
+    adamw_beta2: float = field(default=0.95, metadata={"help": "The beta2 parameter for the AdamW optimizer."})
+    grad_norm_clip: float = field(default=1.0, metadata={"help": "The gradient norm clip."})
     
     # Weights & Biases integration
     wandb_project: Optional[str] = field(default=None, metadata={"help": "Weights & Biases project name."})
@@ -91,6 +94,7 @@ class TrainingArgs:
 
     # validation
     validation_split: float = field(default=0.0, metadata={"help": "The fraction of data to use for validation. 0.0 means no validation, 0.1 means 10% of the data is used for validation."})
+    validation_data_path: Optional[str] = field(default=None, metadata={"help": "Path to validation data JSONL file. If provided, this will be used instead of splitting the training data."})
     validation_frequency: int = field(default=100, metadata={"help": "The frequency of validation in steps."})
 
     # from train.py:

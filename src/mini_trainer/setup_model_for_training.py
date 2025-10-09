@@ -358,6 +358,8 @@ def setup_training_components(
     optimizer: str = "adamw",
     muon_momentum: float = 0.95,
     adamw_learning_rate: float = 5e-6,
+    adamw_beta1: float = 0.9,
+    adamw_beta2: float = 0.95,
 ) -> tuple[torch.nn.Module, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
     """
     Set up training components including model wrapping, optimizer, and learning rate scheduler.
@@ -386,16 +388,24 @@ def setup_training_components(
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=learning_rate,
-            betas=(0.9, 0.95),
+            betas=(adamw_beta1, adamw_beta2),
             weight_decay=0.0,
         )
-    elif optimizer_type == "muon":
+    elif optimizer_type in ["muon", "adamuon"]:
         muon_params = select_muon_params(model.named_parameters())
         adam_params = select_adam_params(model.named_parameters())
         # assert len(list(muon_params)) > 0
         # assert len(list(adam_params)) > 0
 
-        optimizer = Muon(
+        # OptimizerClass = Muon if optimizer_type == "muon" else AdaMuon
+        OptimizerClass = Muon
+        if optimizer_type == "adamuon":  # this wont e reachable right now
+            raise ValueError("Adamuon is not supported anymore")
+            log_rank_0("Using Adamuon optimizer")
+        else:
+            log_rank_0("Using Muon optimizer")
+
+        optimizer = OptimizerClass(
            [
                {
                    # send nothing here
@@ -405,13 +415,13 @@ def setup_training_components(
                    "momentum": muon_momentum,
                    "weight_decay": 0.0,
                    "ns_steps": 5,
-                   "nesterov": True,
+                   "nesterov": True,  # adamuon does not use this one
                },
                {
                    "params": adam_params,
                    "lr": adamw_learning_rate,
                    "use_muon": False,
-                   "betas": (0.9, 0.95),
+                   "betas": (adamw_beta1, adamw_beta2),
                    "weight_decay": 0.0,
                },
            ],

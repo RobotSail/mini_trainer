@@ -111,6 +111,8 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
         f"--optimizer={train_args.optimizer}",
         f"--muon-momentum={train_args.muon_momentum}",
         f"--adamw-learning-rate={train_args.adamw_learning_rate}",
+        f"--adamw-beta1={train_args.adamw_beta1}",
+        f"--adamw-beta2={train_args.adamw_beta2}",
     ]
 
     if train_args.save_best_val_loss:
@@ -129,6 +131,8 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
     if train_args.validation_split > 0.0:
         command.append(f"--validation-split={train_args.validation_split}")
         command.append(f"--validation-frequency={train_args.validation_frequency}")
+    if train_args.validation_data_path:
+        command.append(f"--validation-data-path={train_args.validation_data_path}")
 
     # Add optional min_samples_per_checkpoint if specified
     if train_args.min_samples_per_checkpoint is not None:
