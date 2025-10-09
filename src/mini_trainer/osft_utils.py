@@ -33,6 +33,30 @@ class SVDDecompositionDict(SVDDictBase, total=False):
     rank_high: int
 
 
+class SVDModule(nn.Module):
+    """
+    A dedicated module to hold SVD low-rank trainable parameters.
+
+    This encapsulates the low-rank components (U_low, S_low, V_low) and metadata
+    in a proper PyTorch module for better predictability and type safety.
+
+    Attributes:
+        U_low: Trainable low-rank left singular vectors
+        S_low: Trainable low-rank singular values
+        V_low: Trainable low-rank right singular vectors
+        rank_high: Number of frozen high-rank components
+        safe_name: Sanitized parameter name (dots replaced with underscores)
+    """
+    def __init__(self, U_low: nn.Parameter, S_low: nn.Parameter, V_low: nn.Parameter,
+                 rank_high: int, safe_name: str):
+        super().__init__()
+        self.U_low = U_low
+        self.S_low = S_low
+        self.V_low = V_low
+        self.rank_high = rank_high
+        self.safe_name = safe_name
+
+
 class OSFTModelProtocol(Protocol):
     """
     Protocol defining the interface for models with OSFT capabilities.
@@ -1064,6 +1088,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 safe_name = name.replace(".", "_")
                 self.name_mapping[name] = safe_name
 
+                # <<<<<<< HEAD
                 # Attach OSFT params to the owning module so only block-local params materialize
                 mod, attr = self._get_module_by_name(name)
                 # High-rank (frozen) components on the module
@@ -1078,6 +1103,28 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 module_svd.rank_high = svd_dict["rank_high"]
                 module_svd.safe_name = safe_name
                 mod.add_module("osft_params", module_svd)
+                # # =======
+                # # # Register buffers and parameters
+                # # self.register_buffer(f"{safe_name}_U_high", svd_dict["U_high"])
+                # # self.register_buffer(f"{safe_name}_S_high", svd_dict["S_high"])
+                # # self.register_buffer(f"{safe_name}_V_high", svd_dict["V_high"])
+                # # # Attach OSFT params to the owning module so only block-local params materialize
+                # mod, attr = self._get_module_by_name(name)
+                # # High-rank (frozen) components on the module
+                # mod.register_parameter("osft_U_high", nn.Parameter(svd_dict["U_high"], requires_grad=False))
+                # mod.register_parameter("osft_S_high", nn.Parameter(svd_dict["S_high"], requires_grad=False))
+                # mod.register_parameter("osft_V_high", nn.Parameter(svd_dict["V_high"], requires_grad=False))
+
+                # # Create SVDModule to hold trainable low-rank components
+                # module_svd = SVDModule(
+                #     U_low=svd_dict["U_low"],
+                #     S_low=svd_dict["S_low"],
+                #     V_low=svd_dict["V_low"],
+                #     rank_high=svd_dict["rank_high"],
+                #     safe_name=safe_name
+                # )
+                # self.osft_params[safe_name] = module_svd
+                # # >>>>>>> d1ea54b (adds code to test orthogonalization)
 
                 # Replace forward to read from module-local OSFT params
                 bias = mod.bias if hasattr(mod, "bias") else None
@@ -1230,10 +1277,12 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
                     # Attach OSFT components to the owning module so only block-local params materialize
                     mod, attr = self._get_module_by_name(name)
+
                     # High-rank frozen components
                     mod.register_parameter("osft_U_high", nn.Parameter(svd_dict["U_high"], requires_grad=False))
                     mod.register_parameter("osft_S_high", nn.Parameter(svd_dict["S_high"], requires_grad=False))
                     mod.register_parameter("osft_V_high", nn.Parameter(svd_dict["V_high"], requires_grad=False))
+
                     # Trainable low-rank components
                     module_svd = nn.Module()
                     module_svd.U_low = svd_dict["U_low"]
