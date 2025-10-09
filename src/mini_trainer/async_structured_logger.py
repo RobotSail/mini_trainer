@@ -4,12 +4,14 @@
 from datetime import datetime
 import asyncio
 import json
+import sys
 import threading
 import torch.distributed as dist
 
 # Third Party
 import aiofiles
 from rich.console import Console
+from tqdm import tqdm
 
 # Local imports
 from mini_trainer import wandb_wrapper
@@ -29,6 +31,10 @@ class AsyncStructuredLogger:
 
         # Rich console for prettier output (force_terminal=True works with subprocess streaming)
         self.console = Console(force_terminal=True, force_interactive=False)
+
+        # tqdm for state tracking (lazy init to avoid early printing)
+        self.train_pbar = None
+        self.train_bar_format = None
 
         self.logs = []
         self.loop = asyncio.new_event_loop()
@@ -74,30 +80,13 @@ class AsyncStructuredLogger:
         """appends to the log instead of writing the whole log each time"""
         async with aiofiles.open(self.file_name, "a") as f:
             await f.write(json.dumps(data, indent=None) + "\n")
-
-    def _create_progress_bar(self, current: int, total: int, width: int = 40) -> str:
-        """Create a rich-style progress bar that works with subprocess streaming.
-        
-        Args:
-            current: Current step number
-            total: Total steps
-            width: Width of the progress bar in characters
-            
-        Returns:
-            String representation of progress bar with Rich markup
-        """
-        filled = int(width * current / total)
-        # Use Rich color markup for a prettier bar
-        bar = '━' * filled + '╺' if filled < width else '━' * width
-        empty = '─' * (width - filled - (1 if filled < width else 0))
-        return f"[cyan]{bar}[/cyan][dim]{empty}[/dim]"
     
     def log_sync(self, data: dict):
-        """runs the log coroutine non-blocking
+        """Runs the log coroutine non-blocking and prints metrics with tqdm-styled progress bar.
         
         Args:
-            data: Dictionary of metrics to log. Will automatically print a Rich-styled
-                  progress bar if step and steps_per_epoch are present.
+            data: Dictionary of metrics to log. Will automatically print a tqdm-formatted
+                  progress bar with ANSI colors if step and steps_per_epoch are present.
         """
         if not isinstance(data, dict):
             raise ValueError("Logged data must be a dictionary")
@@ -111,23 +100,56 @@ class AsyncStructuredLogger:
             # Print the JSON using Rich for syntax highlighting
             self.console.print_json(json.dumps(data_with_timestamp))
             
-            # Print a rich-styled progress bar after the JSON (prints as new line each time)
+            # Print tqdm-styled progress bar after JSON (prints as new line each time)
             # This works correctly with subprocess streaming
             if 'step' in data and 'steps_per_epoch' in data and 'epoch' in data:
-                current_step_in_epoch = (data['step'] - 1) % data['steps_per_epoch'] + 1
-                progress_pct = current_step_in_epoch / data['steps_per_epoch'] * 100
-                bar = self._create_progress_bar(current_step_in_epoch, data['steps_per_epoch'])
+                # Initialize tqdm on first call (lazy init to avoid early printing)
+                if self.train_pbar is None:
+                    # Simple bar format with ANSI colors - we'll add metrics manually
+                    self.train_bar_format = (
+                        '\033[1;34mEpoch {n_fmt}:\033[0m '
+                        '{bar} '
+                        '\033[33m{percentage:3.0f}%\033[0m │ '
+                        '\033[37m{n}/{total}\033[0m'
+                    )
+                    self.train_pbar = tqdm(
+                        total=data['steps_per_epoch'],
+                        bar_format=self.train_bar_format,
+                        ncols=None,
+                        leave=False,
+                        position=0,
+                        file=sys.stdout,
+                        ascii='━╺─',  # custom characters matching Rich style
+                        disable=True,  # disable auto-display, we'll manually call display()
+                    )
                 
-                # Format like tqdm with Rich markup: Epoch 1: [━━━━━━━╺────] 85% │ 164/192 │ loss: 1.36 │ lr: 2.0e-05 │ 40706 tok/s
-                progress_line = (
-                    f"[bold blue]Epoch {data['epoch'] + 1}:[/bold blue] {bar} "
-                    f"[yellow]{progress_pct:3.0f}%[/yellow] │ "
-                    f"[white]{current_step_in_epoch}/{data['steps_per_epoch']}[/white] │ "
-                    f"[green]loss:[/green] [white]{data['loss']:.4f}[/white] │ "
-                    f"[green]lr:[/green] [white]{data['lr']:.2e}[/white] │ "
-                    f"[magenta]{data['tokens_per_second']:.0f}[/magenta] [dim]tok/s[/dim]"
+                # Reset tqdm if we're in a new epoch
+                current_step_in_epoch = (data['step'] - 1) % data['steps_per_epoch'] + 1
+                if current_step_in_epoch == 1:
+                    self.train_pbar.reset(total=data['steps_per_epoch'])
+                
+                # Update tqdm position
+                self.train_pbar.n = current_step_in_epoch
+                
+                # Manually format the complete progress line with metrics using format_meter
+                bar_str = self.train_pbar.format_meter(
+                    n=current_step_in_epoch,
+                    total=data['steps_per_epoch'],
+                    elapsed=0,  # we don't track elapsed time
+                    ncols=None,
+                    bar_format=self.train_bar_format,
+                    ascii='━╺─',
                 )
-                self.console.print(progress_line)
+                
+                # Add the metrics to the bar string
+                metrics_str = (
+                    f" │ \033[32mloss:\033[0m \033[37m{data['loss']:.4f}\033[0m"
+                    f" │ \033[32mlr:\033[0m \033[37m{data['lr']:.2e}\033[0m"
+                    f" │ \033[35m{data['tokens_per_second']:.0f}\033[0m \033[2mtok/s\033[0m"
+                )
+                
+                # Print the complete line
+                print(bar_str + metrics_str, file=sys.stdout, flush=True)
 
         # Run async logging for file and wandb
         asyncio.run_coroutine_threadsafe(self.log(data), self.loop)

@@ -1,5 +1,6 @@
 import time
 import os
+import sys
 from pathlib import Path
 import json
 from typing import Annotated, Literal
@@ -7,7 +8,7 @@ from typer import Typer, Option
 
 from mini_trainer.async_structured_logger import AsyncStructuredLogger
 from mini_trainer import wandb_wrapper
-from rich.console import Console
+from tqdm import tqdm
 import torch
 import torch.distributed as dist
 from torch.distributed._tensor.api import DTensor as _DTensor  # works if DTensor is available
@@ -27,8 +28,7 @@ from mini_trainer.training_types import TrainingMode
 SaveType = Literal["min_samples", "epoch", "final", "best_val_loss"]
 
 app = Typer(
-    pretty_exceptions_show_locals=False,  # Hide local variables in tracebacks
-    pretty_exceptions_short=True   
+    pretty_exceptions_enable=False,  # disable rich exception formatting
 )
 
 def validate_training_state(model, optimizer, expected_param_dtype=torch.float32, expected_optimizer_dtype=torch.float32):
@@ -239,21 +239,18 @@ def save_model(
     log_rank_0(f"✅ Saved model at {samples_seen} samples{suffix_text} in {time.time() - start:.2f} seconds")
 
 def compute_validation_loss(model, val_data_loader, device):
-    """Compute validation loss on the validation dataset.
+    """Compute validation loss on the validation dataset with tqdm-styled progress bar.
     
     Args:
         model: The model to evaluate
         val_data_loader: Validation data loader
         device: Device to run evaluation on
-        world_size: Number of distributed processes
         
     Returns:
         dict: Dictionary containing validation metrics
     """
     if val_data_loader is None:
         return {}
-    
-    console = Console(force_terminal=True, force_interactive=False)
     
     log_rank_0("Computing validation loss...")
     model.eval()
@@ -267,12 +264,23 @@ def compute_validation_loss(model, val_data_loader, device):
     # Get total number of batches for progress bar
     total_batches = len(val_data_loader)
     
-    def _create_val_progress_bar(current: int, total: int, width: int = 40) -> str:
-        """Create a Rich-styled validation progress bar."""
-        filled = int(width * current / total)
-        bar = '━' * filled + '╺' if filled < width else '━' * width
-        empty = '─' * (width - filled - (1 if filled < width else 0))
-        return f"[cyan]{bar}[/cyan][dim]{empty}[/dim]"
+    # Create tqdm with custom format matching Rich style
+    val_bar_format = (
+        '\033[1;35mValidation:\033[0m '
+        '{bar} '
+        '\033[33m{percentage:3.0f}%\033[0m │ '
+        '\033[37m{n}/{total}\033[0m'
+    )
+    val_pbar = tqdm(
+        total=total_batches,
+        bar_format=val_bar_format,
+        ncols=None,
+        leave=False,
+        position=0,
+        file=sys.stdout,
+        ascii='━╺─',  # custom characters matching Rich style
+        disable=True,  # disable auto-display, we'll manually format
+    )
     
     with torch.no_grad():
         val_data_loader_it = iter(val_data_loader)
@@ -326,20 +334,26 @@ def compute_validation_loss(model, val_data_loader, device):
             assert len(batch) > 0, "validation batch was empty"
             total_num_tokens += batch[0]['batch_num_loss_counted_tokens']
             
-            # Print Rich-styled validation progress
+            # Print tqdm-styled validation progress
             if is_main_process:
                 current_loss = total_overall_loss / total_num_tokens if total_num_tokens > 0 else 0.0
-                progress_pct = val_batch_idx / total_batches * 100
-                bar = _create_val_progress_bar(val_batch_idx, total_batches)
+                val_pbar.n = val_batch_idx
                 
-                # Format like training with Rich markup: Validation: [━━━━━━━╺────] 85% │ 164/192 │ loss: 0.56
-                progress_line = (
-                    f"[bold magenta]Validation:[/bold magenta] {bar} "
-                    f"[yellow]{progress_pct:3.0f}%[/yellow] │ "
-                    f"[white]{val_batch_idx}/{total_batches}[/white] │ "
-                    f"[green]loss:[/green] [white]{current_loss:.4f}[/white]"
+                # Manually format the complete progress line with loss metric using format_meter
+                bar_str = val_pbar.format_meter(
+                    n=val_batch_idx,
+                    total=total_batches,
+                    elapsed=0,
+                    ncols=None,
+                    bar_format=val_bar_format,
+                    ascii='━╺─',
                 )
-                console.print(progress_line)
+                
+                # Add the loss metric
+                metrics_str = f" │ \033[32mloss:\033[0m \033[37m{current_loss:.4f}\033[0m"
+                
+                # Print the complete line
+                print(bar_str + metrics_str, file=sys.stdout, flush=True)
             
             dist.barrier()
     
