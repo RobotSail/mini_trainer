@@ -4,10 +4,10 @@ from pathlib import Path
 import json
 from typing import Annotated, Literal
 from typer import Typer, Option
-from tqdm import tqdm
 
 from mini_trainer.async_structured_logger import AsyncStructuredLogger
 from mini_trainer import wandb_wrapper
+from rich.console import Console
 import torch
 import torch.distributed as dist
 from torch.distributed._tensor.api import DTensor as _DTensor  # works if DTensor is available
@@ -253,6 +253,8 @@ def compute_validation_loss(model, val_data_loader, device):
     if val_data_loader is None:
         return {}
     
+    console = Console(force_terminal=True, force_interactive=False)
+    
     log_rank_0("Computing validation loss...")
     model.eval()
     val_batch_totals = BatchMetrics()
@@ -265,22 +267,21 @@ def compute_validation_loss(model, val_data_loader, device):
     # Get total number of batches for progress bar
     total_batches = len(val_data_loader)
     
+    def _create_val_progress_bar(current: int, total: int, width: int = 40) -> str:
+        """Create a Rich-styled validation progress bar."""
+        filled = int(width * current / total)
+        bar = '━' * filled + '╺' if filled < width else '━' * width
+        empty = '─' * (width - filled - (1 if filled < width else 0))
+        return f"[cyan]{bar}[/cyan][dim]{empty}[/dim]"
+    
     with torch.no_grad():
         val_data_loader_it = iter(val_data_loader)
-        
-        # Create progress bar only on rank 0
-        pbar = tqdm(
-            total=total_batches,
-            desc="Validation",
-            disable=not is_main_process,
-            unit="batch"
-        )
         
         # For simplicity, we pack the batches needed for computing validation
         # loss in the same way as happens in training. As a result, it will
         # be collated in the same way: Each minibatch consists of at most `batch_size`
         # samples, which are then split into (num_gpus * grad_accum) pieces. 
-        for batch in val_data_loader_it:
+        for val_batch_idx, batch in enumerate(val_data_loader_it, 1):
             val_batch_totals.reset_batch()
 
             # Loss is accumulated WRT to the global number of samples; i.e.
@@ -325,17 +326,22 @@ def compute_validation_loss(model, val_data_loader, device):
             assert len(batch) > 0, "validation batch was empty"
             total_num_tokens += batch[0]['batch_num_loss_counted_tokens']
             
-            # Update progress bar with current loss
+            # Print Rich-styled validation progress
             if is_main_process:
                 current_loss = total_overall_loss / total_num_tokens if total_num_tokens > 0 else 0.0
-                pbar.set_postfix({'loss': f'{current_loss:.4f}'})
-                pbar.update(1)
+                progress_pct = val_batch_idx / total_batches * 100
+                bar = _create_val_progress_bar(val_batch_idx, total_batches)
+                
+                # Format like training with Rich markup: Validation: [━━━━━━━╺────] 85% │ 164/192 │ loss: 0.56
+                progress_line = (
+                    f"[bold magenta]Validation:[/bold magenta] {bar} "
+                    f"[yellow]{progress_pct:3.0f}%[/yellow] │ "
+                    f"[white]{val_batch_idx}/{total_batches}[/white] │ "
+                    f"[green]loss:[/green] [white]{current_loss:.4f}[/white]"
+                )
+                console.print(progress_line)
             
             dist.barrier()
-        
-        # Close progress bar
-        if is_main_process:
-            pbar.close()
     
     # Calculate average validation metrics and synchronize across all processes
     vbm = val_batch_totals.totals
@@ -694,6 +700,7 @@ def train(
         # set the current epoch
         data_loader.sampler.set_epoch(epoch)
         data_loader_it = iter(data_loader)
+
         for batch in data_loader_it:
             batch_start_time = time.time()
             batch_totals.reset_batch()
@@ -751,6 +758,7 @@ def train(
             batch_metrics = {
                     "step": step,
                     "epoch": epoch,
+                    "steps_per_epoch": len(data_loader),
                     "lr": lr_scheduler.get_last_lr()[0],
                     "grad_norm": grad_norm.item(),
                     "loss": bm['loss']/batch_num_loss_counted_tokens,
@@ -763,7 +771,7 @@ def train(
                     "avg_time_per_minibatch": bm['time_per_minibatch']/(grad_accum+1)/world_size,
                     "time_per_batch": batch_time,
                     "tokens_per_second": bm['num_total_tokens']/batch_time,
-                    "total_samples_accumulated": total_samples_accumulated, 
+                    "total_samples_accumulated": total_samples_accumulated,
                     "total_tokens_accumulated": total_tokens_processed,
                     "samples_per_second": bm['num_samples']/batch_time,
                     "peak_memory_usage_GB": float(torch.cuda.max_memory_allocated() / 1e9),
@@ -777,13 +785,13 @@ def train(
                     print(f"Validation loss: {last_validation_loss}")
                 batch_metrics.update(val_metrics)
 
+            # Log metrics (progress info is printed by the logger)
             if is_local_main_process:
-                metric_logger.log_sync(
-                    batch_metrics
-                )
+                metric_logger.log_sync(batch_metrics)
+
 
             torch.distributed.barrier()
-            
+
             # sample-based saving, keep in the inner loop
             if checkpointer.should_save_checkpoint(
                 save_type="min_samples",
@@ -791,7 +799,7 @@ def train(
             ):
                 save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
                 checkpointer.record_save("min_samples", total_samples_accumulated)
-                
+
             # Check for best validation loss saving after validation runs
             if checkpointer.should_save_checkpoint(
                 save_type="best_val_loss",
@@ -800,7 +808,7 @@ def train(
             ):
                 save_model(model, total_samples_accumulated, output_dir, model_name_or_path, suffix="best_val_loss")
                 checkpointer.record_save("best_val_loss", total_samples_accumulated, last_validation_loss)
-            
+
             torch.distributed.barrier()
 
             # Check stopping condition after each step (for STEP and TOKEN modes)
@@ -814,7 +822,7 @@ def train(
                 max_tokens=max_tokens
             ):
                 break
-        
+
         # Increment epoch counter after completing an epoch
         epoch += 1
         
