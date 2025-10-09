@@ -295,7 +295,9 @@ class TestAsyncLoggerIntegration:
             logger = AsyncStructuredLogger(temp_path)
             
             # Try to log non-dict (should handle gracefully)
-            logger.log_sync("not a dict")  # This will fail but shouldn't crash
+            # Try to log non-dict (should fail)
+            with pytest.raises(ValueError, match="Logged data must be a dictionary"):
+                logger.log_sync("not a dict")
             
             # Log valid data
             logger.log_sync({'valid': 'data'})

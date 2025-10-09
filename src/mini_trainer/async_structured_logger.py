@@ -99,6 +99,9 @@ class AsyncStructuredLogger:
             data: Dictionary of metrics to log. Will automatically print a Rich-styled
                   progress bar if step and steps_per_epoch are present.
         """
+        if not isinstance(data, dict):
+            raise ValueError("Logged data must be a dictionary")
+
         # Print to console synchronously, but only on rank 0
         # to avoid duplicate outputs in distributed training
         should_print = not dist.is_initialized() or dist.get_rank() == 0
