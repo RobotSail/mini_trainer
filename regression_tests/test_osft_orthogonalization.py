@@ -20,11 +20,11 @@ import torch.distributed as dist
 import math
 import os
 import sys
-from pathlib import Path
 from torch.optim import AdamW
 from transformers import AutoTokenizer, get_scheduler
 from typing import Dict, List
 from dataclasses import dataclass
+import argparse
 
 # Add mini_trainer to path
 
@@ -121,15 +121,15 @@ class OrthogonalityTracker:
 
 def get_osft_params(model):
     """Extract only OSFT parameters from model."""
-    all_osft_params = list(model.osft_params.keys())
-    for n, p in model.named_parameters():
-        matched = False
-        for osft_param in all_osft_params:
-            if osft_param in n:
-                matched = True
-                break
-        if matched:
-            yield p
+    return [p for n, p in model.named_parameters() if 'osft_params' in n]  # just select only osft params for now
+    # for n, p in model.named_parameters():
+    #     matched = False
+    #     for osft_param in all_osft_params:
+    #         if osft_param in n:
+    #             matched = True
+    #             break
+    #     if matched:
+    #         yield p
 
 
 def convert_to_rad(deg: float) -> float:
