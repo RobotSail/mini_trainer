@@ -73,7 +73,7 @@ def validate_training_state(model, optimizer, expected_param_dtype=torch.float32
                 )
 
 
-def take_gradient_step(model, optimizer, lr_scheduler, expected_dtype=torch.float32, retain_grads=False):
+def take_gradient_step(model, optimizer, lr_scheduler, expected_dtype=torch.float32):
     """Scales gradients, applies clipping, and takes an optimization step."""
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
@@ -81,10 +81,7 @@ def take_gradient_step(model, optimizer, lr_scheduler, expected_dtype=torch.floa
     # keep this here in case mixed precision settings are ever broken
     # With FSDP2 mixed precision, optimizer state follows the parameter dtype
     validate_training_state(model, optimizer, expected_param_dtype=expected_dtype, expected_optimizer_dtype=expected_dtype)
-    
-    # in some scenarios, we may want to retain the gradients for post-step inspection (e.g testing)
-    if not retain_grads:
-        optimizer.zero_grad()
+    optimizer.zero_grad()
     return grad_norm
 
 

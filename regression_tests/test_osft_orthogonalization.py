@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Test script for OSFT gradient orthogonalization.
 
@@ -23,16 +22,14 @@ import os
 import sys
 from pathlib import Path
 from torch.optim import AdamW
-from transformers import AutoModelForCausalLM, AutoTokenizer, get_scheduler, PreTrainedModel
-from typing import Dict, List, Tuple
-from dataclasses import dataclass, field
+from transformers import AutoTokenizer, get_scheduler
+from typing import Dict, List
+from dataclasses import dataclass
 
 # Add mini_trainer to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from mini_trainer.setup_model_for_training import setup_model, setup_training_components, wrap_fsdp2
-from mini_trainer.osft_utils import OSFTModel, is_osft_model, cast_to_osft_model, optim_wrapper
-from mini_trainer.train import take_gradient_step
+from mini_trainer.setup_model_for_training import setup_model,  wrap_fsdp2
+from mini_trainer.osft_utils import is_osft_model, cast_to_osft_model, optim_wrapper
 
 @dataclass
 class OrthogonalityMetrics:
@@ -281,6 +278,7 @@ def check_parameter_orthogonality(model, safe_name: str, step: int, tracker: Ort
 
 
 def test_osft_orthogonalization(
+    args: argparse.Namespace,
     model_name: str = "Qwen/Qwen2.5-1.5B-Instruct",
     margin_deg: float = 1.0,
     osft_rank_ratio: float = 0.5,
@@ -312,16 +310,16 @@ def test_osft_orthogonalization(
         torch.cuda.set_device(local_rank)
 
     if rank == 0:
-        print(f"=" * 100)
-        print(f"OSFT ORTHOGONALITY TEST")
-        print(f"=" * 100)
+        print("=" * 100)
+        print("OSFT ORTHOGONALITY TEST")
+        print("=" * 100)
         print(f"Model: {model_name}")
         print(f"Steps: {num_steps}")
         print(f"Batch size per GPU: {batch_size} (Total: {batch_size * world_size})")
         print(f"Sequence length: {seq_len}")
         print(f"Margin: {margin_deg}°")
         print(f"OSFT rank ratio: {osft_rank_ratio}")
-        print(f"=" * 100)
+        print("=" * 100)
 
     # Load tokenizer
     if rank == 0:
@@ -334,7 +332,7 @@ def test_osft_orthogonalization(
 
     # Load model with OSFT enabled
     if rank == 0:
-        print(f"Loading OSFT model...")
+        print("Loading OSFT model...")
     model = setup_model(
         model_name_or_path=model_name,
         osft=True,
@@ -351,7 +349,7 @@ def test_osft_orthogonalization(
     osft_model = cast_to_osft_model(model)
 
     if rank == 0:
-        print(f"OSFT model loaded successfully")
+        print("OSFT model loaded successfully")
         print(f"OSFT tracking {len(osft_model.osft_config)} parameters")
 
     # Wrap with FSDP2 and setup optimizer
@@ -362,10 +360,10 @@ def test_osft_orthogonalization(
     optim_wrapper(optimizer, model)
 
     if rank == 0:
-        print(f"Model wrapped with FSDP2")
-        print(f"=" * 100)
-        print(f"Starting training loop...")
-        print(f"=" * 100)
+        print("Model wrapped with FSDP2")
+        print("=" * 100)
+        print("Starting training loop...")
+        print("=" * 100)
 
     # Initialize tracker
     tracker = OrthogonalityTracker(margin_deg=margin_deg)
@@ -408,8 +406,8 @@ def test_osft_orthogonalization(
             print(f"Step {step}/{num_steps} - Loss: {summed_loss.item():.4f}")
     
     if rank == 0:
-        print(f"=" * 100)
-        print(f"Training completed!")
+        print("=" * 100)
+        print("Training completed!")
         print("")
         print(tracker.get_summary())
     
@@ -469,6 +467,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     success = test_osft_orthogonalization(
+        args=args,
         model_name=args.model,
         margin_deg=args.margin_deg,
         osft_rank_ratio=args.rank_ratio,
