@@ -217,6 +217,20 @@ def check_gradient_orthogonality(model, safe_name: str, step: int, tracker: Orth
     U_low = svd_dict["U_low"]
     V_low = svd_dict["V_low"]
 
+    print(f"U_high: {type(U_high)}")
+    print(f"V_high: {type(V_high)}")
+    print(f"U_low: {type(U_low)}")
+    print(f"V_low: {type(V_low)}")
+
+    if hasattr(U_high, 'full_tensor'):
+        U_high = U_high.full_tensor()
+    if hasattr(V_high, 'full_tensor'):
+        V_high = V_high.full_tensor()
+    if hasattr(U_low, 'full_tensor'):
+        U_low = U_low.full_tensor()
+    if hasattr(V_low, 'full_tensor'):
+        V_low = V_low.full_tensor()
+
     dU_low = U_low.grad.full_tensor() if hasattr(U_low.grad, 'full_tensor') else U_low.grad
     dV_low = V_low.grad.full_tensor() if hasattr(V_low.grad, 'full_tensor') else V_low.grad
     
@@ -247,18 +261,32 @@ def check_parameter_orthogonality(model, safe_name: str, step: int, tracker: Ort
     V_high = svd_dict["V_high"]
     U_low = svd_dict["U_low"]
     V_low = svd_dict["V_low"]
+
+    print(f"U_high: {type(U_high)}")
+    print(f"V_high: {type(V_high)}")
+    print(f"U_low: {type(U_low)}")
+    print(f"V_low: {type(V_low)}")
+
+    if hasattr(U_high, 'full_tensor'):
+        U_high = U_high.full_tensor()
+    if hasattr(V_high, 'full_tensor'):
+        V_high = V_high.full_tensor()
+    if hasattr(U_low, 'full_tensor'):
+        U_low = U_low.full_tensor()
+    if hasattr(V_low, 'full_tensor'):
+        V_low = V_low.full_tensor()
     
     # Get local tensors for comparison
     U_low_local = U_low.full_tensor() if hasattr(U_low, 'full_tensor') else U_low
     V_low_local = V_low.full_tensor() if hasattr(V_low, 'full_tensor') else V_low
     
     # Check U parameter orthogonality
-    u_param_diffs = compute_angle_differences(U_high, U_low_local, top_n=1)
+    u_param_diffs = compute_angle_differences(U_high, U_low, top_n=1)
     if u_param_diffs:
         tracker.update(safe_name, 'U_param', u_param_diffs[0], step)
     
     # Check V parameter orthogonality
-    v_param_diffs = compute_angle_differences(V_high.T, V_low_local.T, top_n=1)
+    v_param_diffs = compute_angle_differences(V_high.T, V_low.T, top_n=1)
     if v_param_diffs:
         tracker.update(safe_name, 'V_param', v_param_diffs[0], step)
     
@@ -383,7 +411,7 @@ def test_osft_orthogonalization(
             check_gradient_orthogonality(model, safe_name, step, tracker)
         
         # Take gradient step (includes projection via optim_wrapper)
-        optiimage.pngzer.step()
+        optimizer.step()
         scheduler.step()
         
         # Check parameter orthogonality (after optimizer.step)
