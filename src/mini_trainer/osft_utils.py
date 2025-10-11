@@ -109,6 +109,14 @@ MODEL_CONFIGS = {
             "mlp.up_proj",
         ]
     },
+    "gpt2": {
+        "patterns": [
+            "attn.c_proj",
+            "attn.c_attn",
+            "mlp.c_fc",
+            "mlp.c_proj",
+        ]
+    },
     "mistral": {
         "patterns": [
             "self_attn.q_proj",
@@ -234,6 +242,7 @@ MODEL_NAME_MAPPINGS = {
     "phi-3": "phi3",
     "mistral": "mistral",
     "granite": "granite",
+    "gpt2": "gpt2",
     # Easy to add more mappings
     # "phi": "phi", 
 }

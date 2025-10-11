@@ -222,6 +222,11 @@ def check_gradient_orthogonality(model, safe_name: str, step: int, tracker: Orth
     print(f"U_low: {type(U_low)}")
     print(f"V_low: {type(V_low)}")
 
+    # we need to pull the gradients out before casting these variables to full_tensor,
+    # since `.full_tensor` doesn't return a tensor with the .grad attribute populated
+    dU_low = U_low.grad.full_tensor() if hasattr(U_low.grad, 'full_tensor') else U_low.grad
+    dV_low = V_low.grad.full_tensor() if hasattr(V_low.grad, 'full_tensor') else V_low.grad
+
     if hasattr(U_high, 'full_tensor'):
         U_high = U_high.full_tensor()
     if hasattr(V_high, 'full_tensor'):
@@ -231,8 +236,6 @@ def check_gradient_orthogonality(model, safe_name: str, step: int, tracker: Orth
     if hasattr(V_low, 'full_tensor'):
         V_low = V_low.full_tensor()
 
-    dU_low = U_low.grad.full_tensor() if hasattr(U_low.grad, 'full_tensor') else U_low.grad
-    dV_low = V_low.grad.full_tensor() if hasattr(V_low.grad, 'full_tensor') else V_low.grad
     
     # Check U gradient orthogonality
     u_grad_diffs = compute_angle_differences(U_high, dU_low, top_n=1)
@@ -275,10 +278,6 @@ def check_parameter_orthogonality(model, safe_name: str, step: int, tracker: Ort
         U_low = U_low.full_tensor()
     if hasattr(V_low, 'full_tensor'):
         V_low = V_low.full_tensor()
-    
-    # Get local tensors for comparison
-    U_low_local = U_low.full_tensor() if hasattr(U_low, 'full_tensor') else U_low
-    V_low_local = V_low.full_tensor() if hasattr(V_low, 'full_tensor') else V_low
     
     # Check U parameter orthogonality
     u_param_diffs = compute_angle_differences(U_high, U_low, top_n=1)
