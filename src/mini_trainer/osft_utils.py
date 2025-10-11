@@ -33,30 +33,6 @@ class SVDDecompositionDict(SVDDictBase, total=False):
     rank_high: int
 
 
-class SVDModule(nn.Module):
-    """
-    A dedicated module to hold SVD low-rank trainable parameters.
-
-    This encapsulates the low-rank components (U_low, S_low, V_low) and metadata
-    in a proper PyTorch module for better predictability and type safety.
-
-    Attributes:
-        U_low: Trainable low-rank left singular vectors
-        S_low: Trainable low-rank singular values
-        V_low: Trainable low-rank right singular vectors
-        rank_high: Number of frozen high-rank components
-        safe_name: Sanitized parameter name (dots replaced with underscores)
-    """
-    def __init__(self, U_low: nn.Parameter, S_low: nn.Parameter, V_low: nn.Parameter,
-                 rank_high: int, safe_name: str):
-        super().__init__()
-        self.U_low = U_low
-        self.S_low = S_low
-        self.V_low = V_low
-        self.rank_high = rank_high
-        self.safe_name = safe_name
-
-
 class OSFTModelProtocol(Protocol):
     """
     Protocol defining the interface for models with OSFT capabilities.

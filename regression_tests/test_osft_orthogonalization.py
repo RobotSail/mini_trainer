@@ -122,14 +122,6 @@ class OrthogonalityTracker:
 def get_osft_params(model):
     """Extract only OSFT parameters from model."""
     return [p for n, p in model.named_parameters() if 'osft_params' in n]  # just select only osft params for now
-    # for n, p in model.named_parameters():
-    #     matched = False
-    #     for osft_param in all_osft_params:
-    #         if osft_param in n:
-    #             matched = True
-    #             break
-    #     if matched:
-    #         yield p
 
 
 def convert_to_rad(deg: float) -> float:
@@ -391,7 +383,7 @@ def test_osft_orthogonalization(
             check_gradient_orthogonality(model, safe_name, step, tracker)
         
         # Take gradient step (includes projection via optim_wrapper)
-        optimizer.step()
+        optiimage.pngzer.step()
         scheduler.step()
         
         # Check parameter orthogonality (after optimizer.step)

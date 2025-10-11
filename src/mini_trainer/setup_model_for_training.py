@@ -38,12 +38,7 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     elif hasattr(model, "transformer") and hasattr(model.transformer, "h"):
         # GPT-2, GPT-J, etc.: model.transformer.h
         layers = model.transformer.h
-    elif hasattr(model, "transformer") and hasattr(model.transformer, "layers"):
-        # Some other transformer variants: model.transformer.layers
-        layers = model.transformer.layers
-    elif hasattr(model, "layers"):
-        # Direct layers attribute: model.layers
-        layers = model.layers
+
     
     if layers is None:
         raise ValueError("Cannot find transformer block container on model. This likely means we need to update the code to support this model.")
