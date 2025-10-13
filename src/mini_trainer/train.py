@@ -46,9 +46,9 @@ def validate_fp32_training_state(model, optimizer):
                 raise ValueError(f"Optimizer state {name}.{k} is not in FP32")
 
 
-def take_gradient_step(model, optimizer, lr_scheduler):
+def take_gradient_step(model, optimizer, lr_scheduler, grad_norm_clip: float = 1.0):
     """Scales gradients, applies clipping, and takes an optimization step."""
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # ignore gradnorm clipping
     optimizer.step()
     lr_scheduler.step()
     # keep this here in case mixed precision settings are ever broken
@@ -523,6 +523,7 @@ def train(
         use_wandb: bool = False,
         val_data_loader: torch.utils.data.DataLoader | None = None,
         validation_frequency: int = 100,
+        grad_norm_clip: float = 1.0,
     ):
     """
     Runs the model training loop.
@@ -650,7 +651,7 @@ def train(
             bm = batch_totals.totals
             total_samples_accumulated += bm['num_samples']
             total_tokens_processed += batch_num_loss_counted_tokens  # Track tokens for TOKEN mode
-            grad_norm = take_gradient_step(model, optimizer, lr_scheduler)
+            grad_norm = take_gradient_step(model, optimizer, lr_scheduler, grad_norm_clip)
 
             batch_time = time.time() - batch_start_time
             batch_metrics = {
@@ -836,15 +837,18 @@ def main(
     checkpoint_at_epoch: Annotated[bool, Option(help="Whether to save checkpoints at the end of each epoch")] = False,
     save_final_checkpoint: Annotated[bool, Option(help="Whether to save a final checkpoint when training ends")] = False,
     save_dtype: Annotated[str | None, Option(help="Dtype to save the model in. If None, uses original model dtype. Can be 'float16', 'bfloat16', 'float32', etc.")] = None,
-    
+    grad_norm_clip: Annotated[float, Option(help="Gradient norm clip")] = 1.0,
     # optimizer parameters
     optimizer: Annotated[str, Option(help="Optimizer type: adamw, muon")] = "adamw",
     # muon params
     muon_momentum: Annotated[float, Option(help="Muon momentum")] = 0.95,
     adamw_learning_rate: Annotated[float, Option(help="AdamW learning rate for non-Muon parameters (only used when optimizer is muon)")] = 5e-6,
+    adamw_beta1: Annotated[float, Option(help="Beta1 parameter for AdamW optimizer")] = 0.9,
+    adamw_beta2: Annotated[float, Option(help="Beta2 parameter for AdamW optimizer")] = 0.95,
     
     # validation parameters
     validation_split: Annotated[float, Option(help="Fraction of data to use for validation (0.0 to 1.0)")] = 0.0,
+    validation_data_path: Annotated[str | None, Option(help="Path to validation data JSONL file. If provided, this will be used instead of splitting the training data")] = None,
     validation_frequency: Annotated[int, Option(help="Frequency of validation evaluation (in steps)")] = 100,
     
     # checkpoint parameters
@@ -887,63 +891,67 @@ def main(
     node_rank = get_node_rank()
     world_size = torch.distributed.get_world_size()
     global_rank = torch.distributed.get_rank()
-    if local_rank == 0:
-        params = {
-            "model_name_or_path": model_name_or_path,
-            "data_path": data_path,
-            "batch_size": batch_size,
-            "max_tokens_per_gpu": max_tokens_per_gpu,
-            "learning_rate": learning_rate,
-            "num_warmup_steps": num_warmup_steps,
-            "lr_scheduler": lr_scheduler,
-            "seed": seed,
-            "use_liger_kernels": use_liger_kernels,
-            "osft": osft,
-            "osft_unfreeze_rank_ratio": osft_unfreeze_rank_ratio,
-            "osft_target_patterns": osft_target_patterns,
-            "osft_upcast_dtype": osft_upcast_dtype,
-            "osft_output_dtype": osft_output_dtype,
-            "output_dir": output_dir,
-            "min_samples_per_checkpoint": min_samples_per_checkpoint,
-            "save_dtype": save_dtype,
-            "training_mode": training_mode.value,
-            "max_epochs": max_epochs,
-            "max_steps": max_steps,
-            "max_tokens": max_tokens,
-            "checkpoint_at_epoch": checkpoint_at_epoch,
-            "save_final_checkpoint": save_final_checkpoint,
-            "optimizer": optimizer,
-            "muon_momentum": muon_momentum,
-            "adamw_learning_rate": adamw_learning_rate,
-            "validation_split": validation_split,
-            "validation_frequency": validation_frequency,
-            "save_best_val_loss": save_best_val_loss,
-            "val_loss_improvement_threshold": val_loss_improvement_threshold,
-            "wandb_project": wandb_project,
-            "wandb_run_name": wandb_run_name,
-            "wandb_entity": wandb_entity,
-            "LOCAL_RANK": local_rank,
-            "GLOBAL_RANK": global_rank,
-            "NODE_RANK": node_rank,
-            "WORLD_SIZE": world_size,
-        }
+    params = {
+        "model_name_or_path": model_name_or_path,
+        "data_path": data_path,
+        "batch_size": batch_size,
+        "max_tokens_per_gpu": max_tokens_per_gpu,
+        "learning_rate": learning_rate,
+        "num_warmup_steps": num_warmup_steps,
+        "lr_scheduler": lr_scheduler,
+        "seed": seed,
+        "use_liger_kernels": use_liger_kernels,
+        "osft": osft,
+        "osft_unfreeze_rank_ratio": osft_unfreeze_rank_ratio,
+        "osft_target_patterns": osft_target_patterns,
+        "osft_upcast_dtype": osft_upcast_dtype,
+        "osft_output_dtype": osft_output_dtype,
+        "output_dir": output_dir,
+        "min_samples_per_checkpoint": min_samples_per_checkpoint,
+        "save_dtype": save_dtype,
+        "grad_norm_clip": grad_norm_clip,
+        "training_mode": training_mode.value,
+        "max_epochs": max_epochs,
+        "max_steps": max_steps,
+        "max_tokens": max_tokens,
+        "checkpoint_at_epoch": checkpoint_at_epoch,
+        "save_final_checkpoint": save_final_checkpoint,
+        "optimizer": optimizer,
+        "muon_momentum": muon_momentum,
+        "adamw_learning_rate": adamw_learning_rate,
+        "adamw_beta1": adamw_beta1,
+        "adamw_beta2": adamw_beta2,
+        "validation_split": validation_split,
+        "validation_frequency": validation_frequency,
+        "save_best_val_loss": save_best_val_loss,
+        "val_loss_improvement_threshold": val_loss_improvement_threshold,
+        "wandb_project": wandb_project,
+        "wandb_run_name": wandb_run_name,
+        "wandb_entity": wandb_entity,
+        "LOCAL_RANK": local_rank,
+        "GLOBAL_RANK": global_rank,
+        "NODE_RANK": node_rank,
+        "WORLD_SIZE": world_size,
+    }
         
-        # Initialize wandb with the same params config
-        use_wandb = wandb_project is not None
-        if use_wandb:
-            # we rely on the WANDB_API_KEY being set as our primary mechanism for
-            # authentication. So we error out here if it was requested but the user
-            # is not authenticated
-            if os.environ.get("WANDB_API_KEY") is None:
-                raise ValueError("WANDB_API_KEY is not set. Please set the WANDB_API_KEY environment variable.")
+    # Initialize wandb with the same params config
+    use_wandb = wandb_project is not None
+    if use_wandb:
+        # we rely on the WANDB_API_KEY being set as our primary mechanism for
+        # authentication. So we error out here if it was requested but the user
+        # is not authenticated
+        if os.environ.get("WANDB_API_KEY") is None:
+            raise ValueError("WANDB_API_KEY is not set. Please set the WANDB_API_KEY environment variable.")
+        if local_rank == 0:
             wandb.init(
                 project=wandb_project,
                 name=wandb_run_name,
                 entity=wandb_entity,
                 config=params,
             )
-            log_rank_0(f"Initialized wandb project: {wandb_project}")
+        log_rank_0(f"Initialized wandb project: {wandb_project}")
         
+    if local_rank == 0:
         params_path = output_path / "training_params.json"
         with open(params_path, 'w') as f:
             json.dump(params, f, indent=4)
@@ -966,7 +974,28 @@ def main(
     
     # grab the data loader prior to the model so we can extract the dataset length
     # and use this for calculating the number of training steps in the data loader
-    if validation_split > 0.0:
+    
+    # Validate that both validation_split and validation_data_path are not provided
+    if validation_split > 0.0 and validation_data_path is not None:
+        raise ValueError("Cannot specify both validation_split and validation_data_path. Choose one method for validation.")
+    
+    if validation_data_path is not None:
+        # Use separate validation dataset
+        data_loader = get_data_loader(
+            data_path=data_path,
+            batch_size=batch_size,
+            max_tokens_per_gpu=max_tokens_per_gpu,
+            seed=seed,
+        )
+        val_data_loader = get_data_loader(
+            data_path=validation_data_path,
+            batch_size=batch_size,
+            max_tokens_per_gpu=max_tokens_per_gpu,
+            seed=seed,
+        )
+        log_rank_0(f"Using separate validation dataset from: {validation_data_path}")
+    elif validation_split > 0.0:
+        # Use train/val split
         data_loader, val_data_loader = get_train_val_data_loaders(
             data_path=data_path,
             batch_size=batch_size,
@@ -976,6 +1005,7 @@ def main(
         )
         log_rank_0(f"Created train/validation split with {validation_split:.1%} validation data")
     else:
+        # No validation
         data_loader = get_data_loader(
             data_path=data_path,
             batch_size=batch_size,
@@ -1020,6 +1050,8 @@ def main(
         optimizer=optimizer,
         muon_momentum=muon_momentum,
         adamw_learning_rate=adamw_learning_rate,
+        adamw_beta1=adamw_beta1,
+        adamw_beta2=adamw_beta2,
     )
     
     train(
@@ -1041,6 +1073,7 @@ def main(
         use_wandb=use_wandb,
         val_data_loader=val_data_loader,
         validation_frequency=validation_frequency,
+        grad_norm_clip=grad_norm_clip,
     )
     
     # once done, tear down distributed environment
