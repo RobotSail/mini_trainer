@@ -5,8 +5,6 @@ import numpy as np
 import torch.distributed as dist
 import typing as t
 from typing import Protocol
-from torch.distributed._tensor.api import DTensor
-from torch.distributed._tensor import distribute_tensor, Shard, Replicate
 
 from tqdm import tqdm
 
@@ -423,43 +421,48 @@ def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict):
     U_high = svd_dict["U_high"]
     V_high = svd_dict["V_high"]
 
-    # # Step 1: gather all tensors from FSDP2 shards to full tensors
-    # full_U_high = U_high.full_tensor() if isinstance(U_high, DTensor) else U_high
-    # full_V_high = V_high.full_tensor() if isinstance(V_high, DTensor) else V_high
+    # Project U_low gradients to space orthogonal to U_high
+    if svd_dict["U_low"].grad is not None:
+        dU = svd_dict["U_low"].grad
+        # Support distributed tensors by operating on the local shard
+        local_U_high = getattr(U_high, "to_local", lambda: U_high)()
+        local_dU = getattr(dU, "to_local", lambda: dU)()
 
-    dU_low = svd_dict["U_low"].grad
-    dV_low = svd_dict["V_low"].grad
-    if dU_low is None:
-        raise ValueError("tried to project gradients when no gradient exists on dU_low")
+        # Perform projection computation using memory-efficient operations
+        # Memory-optimized projection: dU = dU - U_high @ (U_high.T @ dU)
+        # Use addmm_ for efficient in-place operation
+        # Compute local contribution to (U_high^T @ dU); all-reduce to get global projection
+        proj_coeff = torch.mm(local_U_high.transpose(0, 1), local_dU)
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            dist.all_reduce(proj_coeff, op=dist.ReduceOp.SUM)
+        # Apply projection using only local rows of U_high
+        local_dU.addmm_(local_U_high, proj_coeff, alpha=-1.0)
+        
+        if hasattr(dU, "_local_tensor"):
+            dU._local_tensor.copy_(local_dU)
+        else:
+            dU.copy_(local_dU)
 
-    if dV_low is None:
-        raise ValueError("tried to project gradients when no gradient exists on dV_low")
+    # Repeat projection for V_low using V_high
+    if svd_dict["V_low"].grad is not None:
+        dV = svd_dict["V_low"].grad
+        local_V_high = getattr(V_high, "to_local", lambda: V_high)()
+        local_dV = getattr(dV, "to_local", lambda: dV)()
 
+        # Compute Gram matrix G = V_high^T @ V_high for global projection across row-sharded V_high
+        # Assumes column dimension is consistent across ranks (row sharding over singular vectors)
+        G_local = torch.mm(local_V_high.transpose(0, 1), local_V_high)
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            dist.all_reduce(G_local, op=dist.ReduceOp.SUM)
+        
+        # Apply projection: dV = dV - dV @ G (use local shard of dV)
+        update = torch.mm(local_dV, G_local)
+        local_dV.add_(update, alpha=-1.0)
 
-
-    # first, we compute the projection coefficient for U_H and distribute
-    N, H = U_high.shape
-    _, L = dU_low.shape
-    
-    # this creates the projection coefficient matrix, after calling replicate here
-    # this should all-reduce and sum up all of the components across processes
-    # 
-    # U_high and dU_low are both sharded row-wise, so the multiplication here should result in 
-    # a (H, N/d) x (N/d, L) multiplication.
-    Uh_proj_coefficients: DTensor = torch.matmul(U_high.T, dU_low)
-    Uh_proj_coefficients.redistribute(placements=[Replicate()])
-
-    # here we calculate the projection on each device and subtract away from dU_low
-    # Since U_high is row-wise, but basis vectors span column space, this is the perfect
-    # shape which allows us to multiply by the components we care about
-    dU_low.sub_(torch.matmul(U_high, Uh_proj_coefficients))
-
-    # now we do the same with V 
-    Vh_proj_coefficients = torch.matmul(V_high.T, V_high)
-    Vh_proj_coefficients.redistribute(placements=[Replicate()])
-
-    # now this should in theory have the expected quantity
-    dV_low.sub_(torch.matmul(dV_low, Vh_proj_coefficients))
+        if hasattr(dV, "_local_tensor"):
+            dV._local_tensor.copy_(local_dV)
+        else:
+            dV.copy_(local_dV)
 
 
 def get_osft_target_parameters(model, osft_config):

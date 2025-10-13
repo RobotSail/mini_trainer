@@ -199,17 +199,17 @@ def compute_angle_differences(A: torch.Tensor, B: torch.Tensor = None, top_n: in
         return []
 
 
-def check_gradient_orthogonality(model, safe_name: str, step: int, tracker: OrthogonalityTracker):
+def check_gradient_orthogonality(model, module, step: int, tracker: OrthogonalityTracker):
     """
     Check if gradients of U_low and V_low are orthogonal to U_high and V_high.
 
     Args:
         model: OSFT model
-        safe_name: Parameter name
+        module: Module with OSFT parameters attached
         step: Current training step
         tracker: OrthogonalityTracker to update
     """
-    svd_dict = model.get_svd_dict(safe_name)
+    svd_dict = model.get_svd_dict_for_module(module)
     if svd_dict["U_low"].grad is None or svd_dict["V_low"].grad is None:
         return
     
@@ -217,7 +217,9 @@ def check_gradient_orthogonality(model, safe_name: str, step: int, tracker: Orth
     V_high = svd_dict["V_high"]
     U_low = svd_dict["U_low"]
     V_low = svd_dict["V_low"]
-
+    
+    # get the safe_name for tracking
+    safe_name = module.osft_params.safe_name
 
     # we need to pull the gradients out before casting these variables to full_tensor,
     # since `.full_tensor` doesn't return a tensor with the .grad attribute populated
@@ -245,22 +247,25 @@ def check_gradient_orthogonality(model, safe_name: str, step: int, tracker: Orth
         tracker.update(safe_name, 'V_grad', v_grad_diffs[0], step)
 
 
-def check_parameter_orthogonality(model, safe_name: str, step: int, tracker: OrthogonalityTracker):
+def check_parameter_orthogonality(model, module, step: int, tracker: OrthogonalityTracker):
     """
     Check if post-update U_low and V_low are orthogonal to U_high and V_high.
 
     Args:
         model: OSFT model
-        safe_name: Parameter name
+        module: Module with OSFT parameters attached
         step: Current training step
         tracker: OrthogonalityTracker to update
     """
-    svd_dict = model.get_svd_dict(safe_name)
+    svd_dict = model.get_svd_dict_for_module(module)
     
     U_high = svd_dict["U_high"]
     V_high = svd_dict["V_high"]
     U_low = svd_dict["U_low"]
     V_low = svd_dict["V_low"]
+    
+    # get the safe_name for tracking
+    safe_name = module.osft_params.safe_name
 
     if hasattr(U_high, 'full_tensor'):
         U_high = U_high.full_tensor()
@@ -398,17 +403,21 @@ def test_osft_orthogonalization(
         summed_loss.backward()
         
         
+        
         # Take gradient step (includes projection via optim_wrapper)
         optimizer.step()
         scheduler.step()
-        
         # Check gradient orthogonality (before optimizer.step)
-        for safe_name in model.osft_params.keys():
-            check_gradient_orthogonality(model, safe_name, step, tracker)
+        for module in model.modules():
+            if hasattr(module, "osft_params") and \
+               hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high") and hasattr(module, "osft_V_high"):
+                check_gradient_orthogonality(model, module, step, tracker)
     
         # Check parameter orthogonality (after optimizer.step)
-        for safe_name in model.osft_params.keys():
-            check_parameter_orthogonality(model, safe_name, step, tracker)
+        for module in model.modules():
+            if hasattr(module, "osft_params") and \
+               hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high") and hasattr(module, "osft_V_high"):
+                check_parameter_orthogonality(model, module, step, tracker)
         
         # Clear gradients
         optimizer.zero_grad()
