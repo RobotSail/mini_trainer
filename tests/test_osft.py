@@ -1093,6 +1093,7 @@ class TestOSFTOrthogonality:
         """Test that gradients maintain orthogonality in a simple model."""
 
         model, _ = self._create_simple_osft_model(hidden_size=16, rank_ratio=0.5)
+        model.train()
         tracker = OrthogonalityTracker(margin_deg=1.0)
 
         # Create input and target
@@ -1155,6 +1156,7 @@ class TestOSFTOrthogonality:
         model.osft_config = osft_config
         model.osft_unfreeze_rank_ratio = 0.5
         model.reinitialize_osft(decompose_existing_weights=True)
+        model.train()
 
         tracker = OrthogonalityTracker(margin_deg=1.0)
 
@@ -1182,10 +1184,12 @@ class TestOSFTOrthogonality:
         """Test that parameters remain orthogonal after optimizer step."""
 
         model, _ = self._create_simple_osft_model(hidden_size=16, rank_ratio=0.5)
+        model.train()
         tracker = OrthogonalityTracker(margin_deg=1.0)
 
         # Get OSFT parameters only
         osft_params = [p for n, p in model.named_parameters() if 'osft_params' in n]
+        assert len(osft_params) > 0
         optimizer = torch.optim.AdamW(osft_params, lr=1e-4)
 
         # Wrap optimizer to enable gradient projection
@@ -1221,9 +1225,11 @@ class TestOSFTOrthogonality:
     def test_orthogonality_maintained_over_training(self):
         """Test that orthogonality is maintained over multiple training steps."""
         model, _ = self._create_simple_osft_model(hidden_size=16, rank_ratio=0.5)
+        model.train()
         tracker = OrthogonalityTracker(margin_deg=1.0)
 
         osft_params = [p for n, p in model.named_parameters() if 'osft_params' in n]
+        assert len(osft_params) > 0
         optimizer = torch.optim.AdamW(osft_params, lr=1e-4)
         optim_wrapper(optimizer, model)
 
@@ -1272,6 +1278,7 @@ class TestOSFTOrthogonality:
             tracker = OrthogonalityTracker(margin_deg=1.0)
 
             osft_params = [p for n, p in model.named_parameters() if 'osft_params' in n]
+            assert len(osft_params) > 0
             optimizer = torch.optim.AdamW(osft_params, lr=1e-4)
             optim_wrapper(optimizer, model)
 
