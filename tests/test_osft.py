@@ -25,9 +25,16 @@ from mini_trainer.osft_utils import (
     is_osft_param,
     create_osft_model_class,
     MODEL_CONFIGS,
-    _get_model_patterns_from_name
+    _get_model_patterns_from_name,
+    optim_wrapper,
 )
 from mini_trainer.setup_model_for_training import setup_model
+from tests.test_utils.orthogonality import (
+    OrthogonalityTracker,
+    check_gradient_orthogonality,
+    check_parameter_orthogonality,
+    compute_angle_differences
+)
 
 
 class TestOSFTAPIValidation:
@@ -1039,6 +1046,311 @@ class TestOSFTPrepareStateDict:
         
         # Verify dtype is preserved
         assert reconstructed["linear.weight"].dtype == torch.float32
+
+
+class TestOSFTOrthogonality:
+    """Test OSFT orthogonality constraints during training."""
+
+    def _create_simple_osft_model(self, hidden_size=16, rank_ratio=0.5):
+        """Create a simple model with OSFT for testing orthogonality."""
+
+        class SimpleModel(nn.Module):
+            def __init__(self, config, **kwargs):
+                super().__init__()
+                self.config = config
+                self.linear = nn.Linear(hidden_size, hidden_size, bias=False)
+                self.dtype = torch.float32
+
+                # Initialize with reasonable values
+                nn.init.normal_(self.linear.weight, mean=0.0, std=0.02)
+
+        # Create OSFT version
+        OSFTModelClass = create_osft_model_class(SimpleModel)
+
+        config = MagicMock()
+        config.vocab_size = 1000
+        osft_config = {"linear.weight": int(hidden_size * rank_ratio)}
+
+        model = OSFTModelClass(
+            config=config,
+            osft_config={},
+            initialize_osft=False,
+            upcast_dtype=torch.float32,
+            output_dtype=torch.float32
+        )
+
+        # Store original weight before OSFT conversion
+        original_weight = model.linear.weight.data.clone()
+
+        # Set OSFT config and initialize
+        model.osft_config = osft_config
+        model.osft_unfreeze_rank_ratio = rank_ratio
+        model.reinitialize_osft(decompose_existing_weights=True)
+
+        return model, original_weight
+
+    def test_gradient_orthogonality_simple_model(self):
+        """Test that gradients maintain orthogonality in a simple model."""
+
+        model, _ = self._create_simple_osft_model(hidden_size=16, rank_ratio=0.5)
+        tracker = OrthogonalityTracker(margin_deg=1.0)
+
+        # Create input and target
+        input_data = torch.randn(4, 16)
+        target = torch.randn(4, 16)
+
+        # Forward pass
+        output = model.linear(input_data)
+        loss = torch.nn.functional.mse_loss(output, target)
+
+        # Backward pass
+        loss.backward()
+
+        # Project gradients to maintain orthogonality
+        model.project_gradients()
+
+        # Check gradient orthogonality
+        for module in model.modules():
+            if hasattr(module, "osft_params") and \
+               hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high") and hasattr(module, "osft_V_high"):
+                check_gradient_orthogonality(model, module, step=1, tracker=tracker)
+
+        # Verify orthogonality is maintained
+        assert tracker.is_successful(), f"Gradient orthogonality violated:\n{tracker.get_summary()}"
+
+    def test_gradient_orthogonality_multi_layer(self):
+        """Test gradient orthogonality with multiple OSFT layers."""
+
+        class MultiLayerModel(nn.Module):
+            def __init__(self, config, **kwargs):
+                super().__init__()
+                self.config = config
+                self.layer1 = nn.Linear(16, 16, bias=False)
+                self.layer2 = nn.Linear(16, 16, bias=False)
+                self.layer3 = nn.Linear(16, 16, bias=False)
+                self.dtype = torch.float32
+
+                # Initialize weights
+                for layer in [self.layer1, self.layer2, self.layer3]:
+                    nn.init.normal_(layer.weight, mean=0.0, std=0.02)
+
+        OSFTModelClass = create_osft_model_class(MultiLayerModel)
+
+        config = MagicMock()
+        config.vocab_size = 1000
+        osft_config = {
+            "layer1.weight": 8,
+            "layer2.weight": 8,
+            "layer3.weight": 8,
+        }
+
+        model = OSFTModelClass(
+            config=config,
+            osft_config={},
+            initialize_osft=False,
+            upcast_dtype=torch.float32,
+            output_dtype=torch.float32
+        )
+
+        model.osft_config = osft_config
+        model.osft_unfreeze_rank_ratio = 0.5
+        model.reinitialize_osft(decompose_existing_weights=True)
+
+        tracker = OrthogonalityTracker(margin_deg=1.0)
+
+        # Forward and backward pass
+        input_data = torch.randn(4, 16)
+        x = model.layer1(input_data)
+        x = model.layer2(x)
+        x = model.layer3(x)
+        target = torch.randn(4, 16)
+        loss = torch.nn.functional.mse_loss(x, target)
+        loss.backward()
+
+        # Project gradients
+        model.project_gradients()
+
+        # Check gradient orthogonality for all layers
+        for module in model.modules():
+            if hasattr(module, "osft_params") and \
+               hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high") and hasattr(module, "osft_V_high"):
+                check_gradient_orthogonality(model, module, step=1, tracker=tracker)
+
+        assert tracker.is_successful(), f"Multi-layer gradient orthogonality violated:\n{tracker.get_summary()}"
+
+    def test_parameter_orthogonality_after_optimizer_step(self):
+        """Test that parameters remain orthogonal after optimizer step."""
+
+        model, _ = self._create_simple_osft_model(hidden_size=16, rank_ratio=0.5)
+        tracker = OrthogonalityTracker(margin_deg=1.0)
+
+        # Get OSFT parameters only
+        osft_params = [p for n, p in model.named_parameters() if 'osft_params' in n]
+        optimizer = torch.optim.AdamW(osft_params, lr=1e-4)
+
+        # Wrap optimizer to enable gradient projection
+        optim_wrapper(optimizer, model)
+
+        # Training step
+        input_data = torch.randn(4, 16)
+        target = torch.randn(4, 16)
+        output = model.linear(input_data)
+        loss = torch.nn.functional.mse_loss(output, target)
+        loss.backward()
+
+        # Project gradients
+        model.project_gradients()
+
+        # Check gradient orthogonality before optimizer step
+        for module in model.modules():
+            if hasattr(module, "osft_params") and \
+               hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high") and hasattr(module, "osft_V_high"):
+                check_gradient_orthogonality(model, module, step=1, tracker=tracker)
+
+        # Optimizer step
+        optimizer.step()
+
+        # Check parameter orthogonality after optimizer step
+        for module in model.modules():
+            if hasattr(module, "osft_params") and \
+               hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high") and hasattr(module, "osft_V_high"):
+                check_parameter_orthogonality(model, module, step=1, tracker=tracker)
+
+        assert tracker.is_successful(), f"Parameter orthogonality violated after optimizer step:\n{tracker.get_summary()}"
+
+    def test_orthogonality_maintained_over_training(self):
+        """Test that orthogonality is maintained over multiple training steps."""
+        model, _ = self._create_simple_osft_model(hidden_size=16, rank_ratio=0.5)
+        tracker = OrthogonalityTracker(margin_deg=1.0)
+
+        osft_params = [p for n, p in model.named_parameters() if 'osft_params' in n]
+        optimizer = torch.optim.AdamW(osft_params, lr=1e-4)
+        optim_wrapper(optimizer, model)
+
+        num_steps = 20
+        for step in range(1, num_steps + 1):
+            # Generate random data
+            input_data = torch.randn(4, 16)
+            target = torch.randn(4, 16)
+
+            # Forward pass
+            output = model.linear(input_data)
+            loss = torch.nn.functional.mse_loss(output, target)
+
+            # Backward pass
+            loss.backward()
+
+            # Project gradients
+            model.project_gradients()
+
+            # Check gradient orthogonality
+            for module in model.modules():
+                if hasattr(module, "osft_params") and \
+                   hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high") and hasattr(module, "osft_V_high"):
+                    check_gradient_orthogonality(model, module, step, tracker)
+
+            # Optimizer step
+            optimizer.step()
+
+            # Check parameter orthogonality
+            for module in model.modules():
+                if hasattr(module, "osft_params") and \
+                   hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high") and hasattr(module, "osft_V_high"):
+                    check_parameter_orthogonality(model, module, step, tracker)
+
+            optimizer.zero_grad()
+
+        assert tracker.is_successful(), f"Orthogonality violated during training:\n{tracker.get_summary()}"
+
+    def test_orthogonality_with_different_rank_ratios(self):
+        """Test orthogonality with different rank ratios."""
+
+        rank_ratios = [0.1, 0.5, 0.9]
+
+        for rank_ratio in rank_ratios:
+            model, _ = self._create_simple_osft_model(hidden_size=16, rank_ratio=rank_ratio)
+            tracker = OrthogonalityTracker(margin_deg=1.0)
+
+            osft_params = [p for n, p in model.named_parameters() if 'osft_params' in n]
+            optimizer = torch.optim.AdamW(osft_params, lr=1e-4)
+            optim_wrapper(optimizer, model)
+
+            # Single training step
+            input_data = torch.randn(4, 16)
+            target = torch.randn(4, 16)
+            output = model.linear(input_data)
+            loss = torch.nn.functional.mse_loss(output, target)
+            loss.backward()
+
+            # Project gradients
+            model.project_gradients()
+
+            for module in model.modules():
+                if hasattr(module, "osft_params") and \
+                   hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high") and hasattr(module, "osft_V_high"):
+                    check_gradient_orthogonality(model, module, step=1, tracker=tracker)
+
+            optimizer.step()
+
+            for module in model.modules():
+                if hasattr(module, "osft_params") and \
+                   hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high") and hasattr(module, "osft_V_high"):
+                    check_parameter_orthogonality(model, module, step=1, tracker=tracker)
+
+            assert tracker.is_successful(), f"Rank ratio {rank_ratio} failed orthogonality:\n{tracker.get_summary()}"
+
+    def test_compute_angle_differences_utility(self):
+        """Test the compute_angle_differences utility function."""
+        # Test with perfectly orthogonal matrices
+        # Create orthonormal columns using standard basis vectors
+        torch.manual_seed(42)
+        A = torch.tensor([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]], dtype=torch.float32)
+        B = torch.tensor([[0.0, 0.0], [0.0, 0.0], [1.0, 1.0]], dtype=torch.float32)
+        B = B / B.norm(dim=0, keepdim=True)  # Normalize columns
+
+        angles = compute_angle_differences(A, B, top_n=1)
+        assert len(angles) > 0
+        # A[:, 0] = [1, 0, 0] and B[:, 0] = [0, 0, 1] are orthogonal (90 deg)
+        # So the deviation from orthogonality should be near 0
+        assert angles[0] < 1.0, f"Expected small angle difference for orthogonal vectors, got {angles[0]}"
+
+        # Test with non-orthogonal matrices
+        C = torch.randn(10, 5)
+        D = torch.randn(10, 3)
+
+        angles = compute_angle_differences(C, D, top_n=3)
+        assert len(angles) > 0
+        # Random matrices likely won't be orthogonal, so we just check we get results
+        assert len(angles) <= 3
+
+        # Test with same matrix (self-orthogonality check)
+        # Random matrices typically aren't self-orthogonal
+        E = torch.randn(10, 5)
+        angles = compute_angle_differences(E, None, top_n=3)
+        assert len(angles) > 0
+
+    def test_orthogonality_tracker(self):
+        """Test the OrthogonalityTracker class."""
+        tracker = OrthogonalityTracker(margin_deg=1.0)
+
+        # Add some measurements
+        tracker.update("param1", "U_grad", 0.5, step=1)
+        tracker.update("param1", "V_grad", 0.3, step=1)
+        tracker.update("param2", "U_grad", 1.5, step=2)  # Violation
+
+        assert tracker.total_checks == 3
+        assert tracker.failed_checks == 1
+        assert not tracker.is_successful()
+
+        # Check top violations
+        violations = tracker.get_top_violations(n=3)
+        assert len(violations) == 3
+        assert violations[0]['max_angle_diff'] == 1.5
+
+        # Test summary
+        summary = tracker.get_summary()
+        assert "FAILED" in summary
+        assert "param2" in summary
 
 
 if __name__ == "__main__":

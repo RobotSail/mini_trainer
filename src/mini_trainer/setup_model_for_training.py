@@ -30,17 +30,12 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
             )
             pass
     # 1) Find the HF transformer block container (GPT2: transformer.h, Llama: model.layers)
-    # Try to find transformer layers in common HF model architectures
-    layers = None
     if hasattr(model, "model") and hasattr(model.model, "layers"):
-        # Llama, Qwen, Mistral, etc.: model.model.layers
         layers = model.model.layers
     elif hasattr(model, "transformer") and hasattr(model.transformer, "h"):
         # GPT-2, GPT-J, etc.: model.transformer.h
         layers = model.transformer.h
-
-    
-    if layers is None:
+    else:
         raise ValueError("Cannot find transformer block container on model. This likely means we need to update the code to support this model.")
 
     # 2) Activation checkpoint each block

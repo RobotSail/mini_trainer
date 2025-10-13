@@ -166,10 +166,18 @@ class TestWrapFSDP2:
     
     @patch.dict(os.environ, {'LOCAL_RANK': '0'})
     @patch('mini_trainer.setup_model_for_training.dist.get_rank', return_value=0)
-    def test_wrap_fsdp2_no_layers_found(self, mock_rank, mock_model):
-        """Test error handling when transformer layers not found."""
-        mock_model.model = None  # No model attribute
-        
+    @patch('mini_trainer.setup_model_for_training.dist.get_world_size', return_value=2)
+    def test_wrap_fsdp2_no_layers_found(self, mock_world_size, mock_rank, mock_model):
+        """
+        This test basically verifies that when wrap_fsdp2 cannot find an eligible set of transformer blocks.
+        If FSDP2 succeeds in finding a transformer block, you will get errors about torch.distributed
+        not being initialized.
+        """
+        # these are the attributes `wrap_fsdp2` checks for when searching for transformer blocks
+        # we disable them so it can't find it
+        mock_model.model = None  
+        mock_model.transformer = None 
+
         with pytest.raises(ValueError, match="Cannot find transformer block container"):
             wrap_fsdp2(mock_model)
 
