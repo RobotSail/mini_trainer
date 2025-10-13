@@ -5,6 +5,8 @@ import numpy as np
 import torch.distributed as dist
 import typing as t
 from typing import Protocol
+from torch.distributed._tensor.api import DTensor
+from torch.distributed._tensor import distribute_tensor, Shard, Replicate
 
 from tqdm import tqdm
 
@@ -421,51 +423,43 @@ def project_gradient_to_orthogonal_space(svd_dict: SVDDecompositionDict):
     U_high = svd_dict["U_high"]
     V_high = svd_dict["V_high"]
 
-    # Project U_low gradients to space orthogonal to U_high
-    if svd_dict["U_low"].grad is not None:
-        dU = svd_dict["U_low"].grad
-        # Support distributed tensors by operating on the local shard
-        local_U_high = getattr(U_high, "to_local", lambda: U_high)()
-        local_dU = getattr(dU, "to_local", lambda: dU)()
-        # Handle sharded tensors in distributed training
-        if local_U_high.size(0) != local_dU.size(0):
-            global_rank = torch.distributed.get_rank()
-            start = global_rank * local_dU.size(0)
-            end = start + local_dU.size(0)
-            local_U_high = local_U_high[start:end]
-        
-        # Perform projection computation using memory-efficient operations
-        # Memory-optimized projection: dU = dU - U_high @ (U_high.T @ dU)
-        # Use addmm_ for efficient in-place operation
-        proj_coeff = torch.mm(local_U_high.transpose(0, 1), local_dU)
-        local_dU.addmm_(local_U_high, proj_coeff, alpha=-1.0)
-        
-        if hasattr(dU, "_local_tensor"):
-            dU._local_tensor.copy_(local_dU)
-        else:
-            dU.copy_(local_dU)
+    # # Step 1: gather all tensors from FSDP2 shards to full tensors
+    # full_U_high = U_high.full_tensor() if isinstance(U_high, DTensor) else U_high
+    # full_V_high = V_high.full_tensor() if isinstance(V_high, DTensor) else V_high
 
-    # Repeat projection for V_low using V_high
-    if svd_dict["V_low"].grad is not None:
-        dV = svd_dict["V_low"].grad
-        local_V_high = getattr(V_high, "to_local", lambda: V_high)()
-        local_dV = getattr(dV, "to_local", lambda: dV)()
-        if local_V_high.size(1) != local_dV.size(1):
-            global_rank = torch.distributed.get_rank()
-            start = global_rank * local_dV.size(1)
-            end = start + local_dV.size(1)
-            local_V_high = local_V_high[:, start:end]
-        
-        # Perform projection computation using memory-efficient operations
-        # Memory-optimized projection: dV = dV - (dV @ V_high.T) @ V_high
-        # Use addmm_ for efficient in-place operation
-        proj_coeff = torch.mm(local_dV, local_V_high.transpose(0, 1))
-        local_dV.addmm_(proj_coeff, local_V_high, alpha=-1.0)
-        
-        if hasattr(dV, "_local_tensor"):
-            dV._local_tensor.copy_(local_dV)
-        else:
-            dV.copy_(local_dV)
+    dU_low = svd_dict["U_low"].grad
+    dV_low = svd_dict["V_low"].grad
+    if dU_low is None:
+        raise ValueError("tried to project gradients when no gradient exists on dU_low")
+
+    if dV_low is None:
+        raise ValueError("tried to project gradients when no gradient exists on dV_low")
+
+
+
+    # first, we compute the projection coefficient for U_H and distribute
+    N, H = U_high.shape
+    _, L = dU_low.shape
+    
+    # this creates the projection coefficient matrix, after calling replicate here
+    # this should all-reduce and sum up all of the components across processes
+    # 
+    # U_high and dU_low are both sharded row-wise, so the multiplication here should result in 
+    # a (H, N/d) x (N/d, L) multiplication.
+    Uh_proj_coefficients: DTensor = torch.matmul(U_high.T, dU_low)
+    Uh_proj_coefficients.redistribute(placements=[Replicate()])
+
+    # here we calculate the projection on each device and subtract away from dU_low
+    # Since U_high is row-wise, but basis vectors span column space, this is the perfect
+    # shape which allows us to multiply by the components we care about
+    dU_low.sub_(torch.matmul(U_high, Uh_proj_coefficients))
+
+    # now we do the same with V 
+    Vh_proj_coefficients = torch.matmul(V_high.T, V_high)
+    Vh_proj_coefficients.redistribute(placements=[Replicate()])
+
+    # now this should in theory have the expected quantity
+    dV_low.sub_(torch.matmul(dV_low, Vh_proj_coefficients))
 
 
 def get_osft_target_parameters(model, osft_config):
@@ -552,37 +546,30 @@ def broadcast_svd_results(model, assignments, world_size):
     # Broadcast each parameter from its computing rank
     for name in param_to_rank:
         src_rank = param_to_rank[name]
-        safe_name = name.replace(".", "_")
+        # Locate the owning module for this parameter
+        owner_mod, _ = model._get_module_by_name(name)
+        if owner_mod is None:
+            raise AttributeError(f"OSFT broadcast: could not find module for {name}")
 
-        # Broadcast buffer components (high-rank frozen components)
-        buffer_components = [
-            f"{safe_name}_U_high",
-            f"{safe_name}_S_high",
-            f"{safe_name}_V_high",
-        ]
-
-        # In this loop, all of the processes broadcast their
-        # respective SVD components that they generated.
-        for component_name in buffer_components:
-            if hasattr(model, component_name):
-                tensor = getattr(model, component_name)
+        # Broadcast high-rank components (on module)
+        for tensor_name in ("osft_U_high", "osft_S_high", "osft_V_high"):
+            if hasattr(owner_mod, tensor_name):
+                tensor = getattr(owner_mod, tensor_name)
                 _broadcast_tensor_device_aware(tensor, src_rank)
             else:
-                raise AttributeError(f"Warning: Buffer {component_name} not found in model")
+                raise AttributeError(f"OSFT broadcast: {tensor_name} not found on module for {name}")
 
         # wait for all processes to synchronize
         dist.barrier()
 
-        # Broadcast trainable components (low-rank parameters)
-        if safe_name in model.osft_params:
-            svd_module = model.osft_params[safe_name]
-
-            # Broadcast U_low, S_low, V_low using device-aware broadcasting
+        # Broadcast trainable low-rank components (on module.osft_params)
+        if hasattr(owner_mod, "osft_params"):
+            svd_module = owner_mod.osft_params
             _broadcast_tensor_device_aware(svd_module.U_low, src_rank)
             _broadcast_tensor_device_aware(svd_module.S_low, src_rank)
             _broadcast_tensor_device_aware(svd_module.V_low, src_rank)
         else:
-            raise AttributeError(f"Warning: OSFT module {safe_name} not found in model.osft_params")
+            raise AttributeError(f"OSFT broadcast: osft_params not found on module for {name}")
 
     # wait for all processes to synchronize
     dist.barrier()
@@ -1087,31 +1074,37 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 safe_name = name.replace(".", "_")
                 self.name_mapping[name] = safe_name
 
-                # Register buffers and parameters
-                self.register_buffer(f"{safe_name}_U_high", svd_dict["U_high"])
-                self.register_buffer(f"{safe_name}_S_high", svd_dict["S_high"])
-                self.register_buffer(f"{safe_name}_V_high", svd_dict["V_high"])
-
+                # Attach OSFT params to the owning module so only block-local params materialize
+                mod, attr = self._get_module_by_name(name)
+                # High-rank (frozen) components on the module
+                mod.register_parameter("osft_U_high", nn.Parameter(svd_dict["U_high"], requires_grad=False))
+                mod.register_parameter("osft_S_high", nn.Parameter(svd_dict["S_high"], requires_grad=False))
+                mod.register_parameter("osft_V_high", nn.Parameter(svd_dict["V_high"], requires_grad=False))
+                # Low-rank (trainable) components on the module as a child
                 module_svd = nn.Module()
                 module_svd.U_low = svd_dict["U_low"]
                 module_svd.S_low = svd_dict["S_low"]
                 module_svd.V_low = svd_dict["V_low"]
                 module_svd.rank_high = svd_dict["rank_high"]
                 module_svd.safe_name = safe_name
-                self.osft_params[safe_name] = module_svd
+                mod.add_module("osft_params", module_svd)
 
-                # Replace forward method
-                mod, attr = self._get_module_by_name(name)
+                # Replace forward to read from module-local OSFT params
                 bias = mod.bias if hasattr(mod, "bias") else None
-
-                def make_forward(sn, bias):
+                def make_forward(owner_mod, bias):
                     def forward(x):
-                        svd_dict = self.get_svd_dict(sn)
+                        svd_dict = {
+                            "U_high": owner_mod.osft_U_high,
+                            "S_high": owner_mod.osft_S_high,
+                            "V_high": owner_mod.osft_V_high,
+                            "U_low": owner_mod.osft_params.U_low,
+                            "S_low": owner_mod.osft_params.S_low,
+                            "V_low": owner_mod.osft_params.V_low,
+                            "rank_high": owner_mod.osft_params.rank_high,
+                        }
                         return self._factorized_linear(x, svd_dict, bias)
-
                     return forward
-
-                mod.forward = make_forward(safe_name, bias)
+                mod.forward = make_forward(mod, bias)
                 param.requires_grad = False
                 mod._parameters.pop(attr, None)
 
@@ -1242,36 +1235,42 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                             upcast_dtype=self.upcast_dtype,
                             output_dtype=self.output_dtype,
                         )
-                    safe_name = name.replace(
-                        ".", "_"
-                    )  # Required for buffer/module naming in PyTorch
+                    safe_name = name.replace(".", "_")
                     self.name_mapping[name] = safe_name
 
-                    # Freeze top-k singular directions (U/S/V_high)
-                    self.register_buffer(f"{safe_name}_U_high", svd_dict["U_high"])
-                    self.register_buffer(f"{safe_name}_S_high", svd_dict["S_high"])
-                    self.register_buffer(f"{safe_name}_V_high", svd_dict["V_high"])
-
-                    # Wrapper to hold trainable components
+                    # Attach OSFT components to the owning module so only block-local params materialize
+                    mod, attr = self._get_module_by_name(name)
+                    # High-rank frozen components
+                    mod.register_parameter("osft_U_high", nn.Parameter(svd_dict["U_high"], requires_grad=False))
+                    mod.register_parameter("osft_S_high", nn.Parameter(svd_dict["S_high"], requires_grad=False))
+                    mod.register_parameter("osft_V_high", nn.Parameter(svd_dict["V_high"], requires_grad=False))
+                    # Trainable low-rank components
                     module_svd = nn.Module()
                     module_svd.U_low = svd_dict["U_low"]
                     module_svd.S_low = svd_dict["S_low"]
                     module_svd.V_low = svd_dict["V_low"]
                     module_svd.rank_high = svd_dict["rank_high"]
                     module_svd.safe_name = safe_name
-                    self.osft_params[safe_name] = module_svd
+                    mod.add_module("osft_params", module_svd)
 
-                    mod, attr = self._get_module_by_name(name)
                     bias = mod.bias if hasattr(mod, "bias") else None
 
-                    # Override linear projection with dynamic reconstruction
-                    def make_forward(sn, bias):
+                    # Override linear projection to use module-local OSFT params
+                    def make_forward(owner_mod, bias):
                         def forward(x):
-                            svd_dict = self.get_svd_dict(sn)
+                            svd_dict = {
+                                "U_high": owner_mod.osft_U_high,
+                                "S_high": owner_mod.osft_S_high,
+                                "V_high": owner_mod.osft_V_high,
+                                "U_low": owner_mod.osft_params.U_low,
+                                "S_low": owner_mod.osft_params.S_low,
+                                "V_low": owner_mod.osft_params.V_low,
+                                "rank_high": owner_mod.osft_params.rank_high,
+                            }
                             return self._factorized_linear(x, svd_dict, bias)
                         return forward
 
-                    mod.forward = make_forward(safe_name, bias)
+                    mod.forward = make_forward(mod, bias)
                     param.requires_grad = False
                     # Remove original parameter so it doesn't get updated
                     mod._parameters.pop(attr, None)
@@ -1297,13 +1296,16 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             output_dtype = (
                 output_dtype if output_dtype is not None else self.output_dtype
             )
-
-            svd_dict = self.get_svd_dict(safe_name)
-            return reconstruct_weight_matrix(
-                svd_dict,
-                upcast_dtype=upcast_dtype,
-                output_dtype=output_dtype,
-            )
+            original = None
+            for k, v in self.name_mapping.items():
+                if v == safe_name:
+                    original = k
+                    break
+            if original is None:
+                raise ValueError(f"Could not find original name for safe name {safe_name}")
+            mod, _ = self._get_module_by_name(original)
+            svd_dict = self.get_svd_dict_for_module(mod)
+            return reconstruct_weight_matrix(svd_dict, upcast_dtype=upcast_dtype, output_dtype=output_dtype)
 
         def _reconstruct_weight(
             self,
@@ -1312,11 +1314,9 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             output_dtype: torch.dtype | None = None,
         ):
             """Convenience wrapper to reconstruct using the original parameter name."""
-            return self._reconstruct_weight_by_safe_name(
-                self.name_mapping[original_name],
-                upcast_dtype=upcast_dtype,
-                output_dtype=output_dtype,
-            )
+            mod, _ = self._get_module_by_name(original_name)
+            svd_dict = self.get_svd_dict_for_module(mod)
+            return reconstruct_weight_matrix(svd_dict, upcast_dtype=upcast_dtype, output_dtype=output_dtype)
 
         def _factorized_linear(self, x, svd_dict, bias=None):
             """
@@ -1407,20 +1407,19 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             
             return result
 
-        def get_svd_dict(self, safe_name: str) -> SVDDecompositionDict:
-            if safe_name not in self.osft_params:
-                raise ValueError(f'{safe_name} doesnt exist in the OSFT parameters')
-
-            module_svd = self.osft_params[safe_name]
-
-            # we infer rank_high since it's just the number of high singular values
-            S_high = getattr(self, f"{safe_name}_S_high") 
-            rank_high = S_high.shape[0]  
-
+        def get_svd_dict_for_module(self, module) -> SVDDecompositionDict:
+            if not hasattr(module, "osft_params"):
+                raise ValueError("Module does not have OSFT parameters attached")
+            # Ensure module-local high-rank components exist (skip non-attached holders)
+            if not (hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high") and hasattr(module, "osft_V_high")):
+                raise ValueError("Module is missing OSFT high-rank tensors (U/S/V_high)")
+            module_svd = module.osft_params
+            S_high = module.osft_S_high
+            rank_high = S_high.shape[0]
             svd_dict: SVDDecompositionDict = {
-                "U_high": getattr(self, f"{safe_name}_U_high"),
+                "U_high": module.osft_U_high,
                 "S_high": S_high,
-                "V_high": getattr(self, f"{safe_name}_V_high"),
+                "V_high": module.osft_V_high,
                 "U_low": module_svd.U_low,
                 "S_low": module_svd.S_low,
                 "V_low": module_svd.V_low,
@@ -1435,9 +1434,17 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
             This method should be called after backpropagation and before optimizer step.
             """
-            for safe_name in self.osft_params.keys():
-                svd_dict = self.get_svd_dict(safe_name)
-                project_gradient_to_orthogonal_space(svd_dict)
+            for module in self.modules():
+                # Only process real OSFT-attached linear modules, not the top-level container
+                if hasattr(module, "osft_params") and \
+                   hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high") and hasattr(module, "osft_V_high"):
+                    try:
+                        svd_dict = self.get_svd_dict_for_module(module)
+                    except ValueError:
+                        raise ValueError(
+                            f"error in projecting gradients for module: {module}"
+                        )
+                    project_gradient_to_orthogonal_space(svd_dict)
 
         def prepare_state_dict_for_save(self, state_dict):
             """Reconstruct dense weights into ``state_dict`` for saving with memory optimization."""
@@ -1455,13 +1462,19 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     disable=main_local_rank != 0,
                 )
             ):
-                # Extract SVD components
-                U_high = state_dict.pop(f"{safe}_U_high")
-                S_high = state_dict.pop(f"{safe}_S_high")
-                V_high = state_dict.pop(f"{safe}_V_high")
-                U_low = state_dict.pop(f"osft_params.{safe}.U_low")
-                S_low = state_dict.pop(f"osft_params.{safe}.S_low")
-                V_low = state_dict.pop(f"osft_params.{safe}.V_low")
+                # Extract module path by removing parameter suffix (e.g., ".weight") from the original parameter name
+                # This is needed to construct the OSFT component keys in the state_dict
+                # Example: "model.layers.0.self_attn.q_proj.weight" → "model.layers.0.self_attn.q_proj"
+                # which allows us to access "model.layers.0.self_attn.q_proj.osft_U_high", etc.
+                module_path = orig.rsplit('.', 1)[0]
+
+                # Extract SVD components from CPU state_dict (avoid touching FSDP sharded params)
+                U_high = state_dict.pop(f"{module_path}.osft_U_high")
+                S_high = state_dict.pop(f"{module_path}.osft_S_high")
+                V_high = state_dict.pop(f"{module_path}.osft_V_high")
+                U_low = state_dict.pop(f"{module_path}.osft_params.U_low")
+                S_low = state_dict.pop(f"{module_path}.osft_params.S_low")
+                V_low = state_dict.pop(f"{module_path}.osft_params.V_low")
                 W = reconstruct_weight_matrix(
                     {
                         "U_high": U_high,
@@ -1476,9 +1489,8 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 )
                 state_dict[orig] = W
                 
-                # Explicitly delete intermediate tensors to free memory
-                del U_high, S_high, V_high, U_low, S_low, V_low
-                
+                # OSFT entries were removed above via pop()
+
                 # Clear GPU cache every few parameters to prevent accumulation
                 if (i + 1) % OSFT_CACHE_CLEAR_INTERVAL == 0:
                     torch.cuda.empty_cache()

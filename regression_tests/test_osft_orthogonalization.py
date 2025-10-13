@@ -55,6 +55,8 @@ class OrthogonalityTracker:
         
         if max_angle_diff > self.margin_deg:
             self.failed_checks += 1
+            print(f"⚠️  ORTHOGONALITY VIOLATION: {param_name} ({check_type}) - "
+                  f"Angle difference: {max_angle_diff:.4f}° (limit: {self.margin_deg}°) at step {step}")
         
         key = f"{param_name}:{check_type}"
         
@@ -70,7 +72,6 @@ class OrthogonalityTracker:
             if max_angle_diff > self.metrics[key]['max_angle_diff']:
                 self.metrics[key]['max_angle_diff'] = max_angle_diff
                 self.metrics[key]['step'] = step
-    
     def get_top_violations(self, n: int = 5) -> List[Dict]:
         """Get top N worst violations."""
         sorted_metrics = sorted(
@@ -217,10 +218,6 @@ def check_gradient_orthogonality(model, safe_name: str, step: int, tracker: Orth
     U_low = svd_dict["U_low"]
     V_low = svd_dict["V_low"]
 
-    print(f"U_high: {type(U_high)}")
-    print(f"V_high: {type(V_high)}")
-    print(f"U_low: {type(U_low)}")
-    print(f"V_low: {type(V_low)}")
 
     # we need to pull the gradients out before casting these variables to full_tensor,
     # since `.full_tensor` doesn't return a tensor with the .grad attribute populated
@@ -264,11 +261,6 @@ def check_parameter_orthogonality(model, safe_name: str, step: int, tracker: Ort
     V_high = svd_dict["V_high"]
     U_low = svd_dict["U_low"]
     V_low = svd_dict["V_low"]
-
-    print(f"U_high: {type(U_high)}")
-    print(f"V_high: {type(V_high)}")
-    print(f"U_low: {type(U_low)}")
-    print(f"V_low: {type(V_low)}")
 
     if hasattr(U_high, 'full_tensor'):
         U_high = U_high.full_tensor()
@@ -405,14 +397,15 @@ def test_osft_orthogonalization(
         # Backward pass
         summed_loss.backward()
         
-        # Check gradient orthogonality (before optimizer.step)
-        for safe_name in model.osft_params.keys():
-            check_gradient_orthogonality(model, safe_name, step, tracker)
         
         # Take gradient step (includes projection via optim_wrapper)
         optimizer.step()
         scheduler.step()
         
+        # Check gradient orthogonality (before optimizer.step)
+        for safe_name in model.osft_params.keys():
+            check_gradient_orthogonality(model, safe_name, step, tracker)
+    
         # Check parameter orthogonality (after optimizer.step)
         for safe_name in model.osft_params.keys():
             check_parameter_orthogonality(model, safe_name, step, tracker)
