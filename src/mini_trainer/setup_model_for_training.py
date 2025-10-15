@@ -136,7 +136,7 @@ def get_model_save_dtype(save_dtype: str | torch.dtype | None, model_name_or_pat
     # FSDP2 requires us to load the model in FP32 to begin with for the
     # correct mixed-precision settings. So to circumvent this, we load the 
     # original model's config separately 
-    original_config = AutoConfig.from_pretrained(model_name_or_path)
+    original_config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
     original_dtype = getattr(original_config, "torch_dtype", None)
     
     # HF models return a torch.dtype from this field, but docs mark it as an optional string
@@ -181,6 +181,7 @@ def setup_model(
 ) -> torch.nn.Module | OSFTModel:
     base_model_args = {
         "pretrained_model_name_or_path": model_name_or_path,
+        "trust_remote_code": True,
     }
     # Check if flash_attn is available, otherwise use eager
     # in practice we will need flash attention when running this repo
@@ -193,7 +194,7 @@ def setup_model(
         else:
             raise e
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
 
     # patch both loss functions, since models will use the regular HF 
     # cross-entropy functions when in eval mode
@@ -347,6 +348,15 @@ def select_adam_params(named_params):
         if not is_muon_param(n, p):
             yield p
 
+def moonlight_trainable_named_params(named_params: list[tuple[str, torch.Tensor]]) -> list[tuple[str, torch.Tensor]]:
+    """
+    We want to select everything aside from the e_score_correction_bias, since we update this manually.
+    """
+    for n, p in named_params:
+        if "e_score_correction_bias" not in n:
+            yield n, p
+
+
 
 def setup_training_components(
     model: torch.nn.Module,
@@ -360,6 +370,7 @@ def setup_training_components(
     adamw_learning_rate: float = 5e-6,
     adamw_beta1: float = 0.9,
     adamw_beta2: float = 0.95,
+    is_moonlight_model: bool = False,
 ) -> tuple[torch.nn.Module, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
     """
     Set up training components including model wrapping, optimizer, and learning rate scheduler.
@@ -385,15 +396,24 @@ def setup_training_components(
     optimizer_type = optimizer
     
     if optimizer_type == "adamw":
+        if is_moonlight_model:
+            params = iter(p for _, p in moonlight_trainable_named_params(model.named_parameters()))
+        else:
+            params = model.parameters()
         optimizer = torch.optim.AdamW(
-            model.parameters(),
+            params,
             lr=learning_rate,
             betas=(adamw_beta1, adamw_beta2),
             weight_decay=0.0,
         )
     elif optimizer_type in ["muon", "adamuon"]:
-        muon_params = select_muon_params(model.named_parameters())
-        adam_params = select_adam_params(model.named_parameters())
+        if is_moonlight_model:
+            muon_params = select_muon_params(moonlight_trainable_named_params(model.named_parameters()))
+            adam_params = select_adam_params(moonlight_trainable_named_params(model.named_parameters()))
+        else:
+            muon_params = select_muon_params(model.named_parameters())
+            adam_params = select_adam_params(model.named_parameters())
+
         # assert len(list(muon_params)) > 0
         # assert len(list(adam_params)) > 0
 

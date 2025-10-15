@@ -167,7 +167,7 @@ def save_model(
                 json.dump(index, f, indent=2, sort_keys=True)
         # Save config and tokenizer
         inner.config.to_json_file(os.path.join(save_directory, "config.json"))
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
         tokenizer.save_pretrained(save_directory)
 
     if get_node_rank() != 0:
@@ -504,6 +504,46 @@ class Checkpointer:
 
 
 
+def update_auxfree_biases(model: torch.nn.Module, update_rate: float, device: torch.device):
+    """
+    Update auxfree biases for all MoE layers in the model.
+    
+    This function:
+    1. Finds all DeepseekV3MoE layers in the model
+    2. Synchronizes expert counts across distributed processes
+    3. Updates biases using the Moonlight auxfree formula
+    4. Resets expert count accumulators
+    
+    Args:
+        model: The model containing MoE layers
+        update_rate: Learning rate for bias updates
+        device: Device for distributed operations
+    """
+    # get the inner model if wrapped in FSDP
+    inner_model = getattr(model, "module", model)
+    
+    # find all MoE layers
+    moe_layers = []
+    for module in inner_model.modules():
+        if module.__class__.__name__ == "DeepseekV3MoE":
+            moe_layers.append(module)
+    
+    if len(moe_layers) == 0:
+        return
+    
+    # synchronize expert counts across all processes
+    for moe_layer in moe_layers:
+        # reduce expert counts across all GPUs
+        dist.all_reduce(moe_layer.expert_counts, op=dist.ReduceOp.SUM)
+        dist.all_reduce(moe_layer.total_tokens, op=dist.ReduceOp.SUM)
+        
+        # update biases on each layer
+        moe_layer.update_aux_bias(update_rate)
+        
+        # reset counts for next accumulation period
+        moe_layer.reset_expert_counts()
+
+
 def train(
         model: torch.nn.Module, 
         optimizer: torch.optim.Optimizer, 
@@ -524,6 +564,8 @@ def train(
         val_data_loader: torch.utils.data.DataLoader | None = None,
         validation_frequency: int = 100,
         grad_norm_clip: float = 1.0,
+        auxfree_update_rate: float = 0.0,
+        auxfree_update_frequency: int = 1,
     ):
     """
     Runs the model training loop.
@@ -553,6 +595,9 @@ def train(
         use_wandb (bool, optional): Whether to use Weights & Biases for logging. Defaults to False.
         val_data_loader (torch.utils.data.DataLoader | None, optional): Validation data loader. If provided, validation loss will be computed. Defaults to None.
         validation_frequency (int, optional): Frequency of validation evaluation in steps. Defaults to 100.
+        grad_norm_clip (float, optional): Gradient norm clipping value. Defaults to 1.0.
+        auxfree_update_rate (float, optional): Learning rate for auxfree bias updates. Set to 0 to disable. Defaults to 0.0.
+        auxfree_update_frequency (int, optional): Update auxfree biases every N steps. Defaults to 1.
 
     Note:
         The training_mode can be provided as either a TrainingMode enum value or a string:
@@ -859,6 +904,13 @@ def main(
     wandb_project: Annotated[str | None, Option(help="Weights & Biases project name")] = None,
     wandb_run_name: Annotated[str | None, Option(help="Weights & Biases run name")] = None,
     wandb_entity: Annotated[str | None, Option(help="Weights & Biases entity/team name")] = None,
+
+    # for MoE training
+    is_moonlight_model: Annotated[bool, Option(help="Whether the model is a Moonlight MoE model")] = False,
+    
+    # auxfree bias update parameters
+    auxfree_update_rate: Annotated[float, Option(help="Learning rate for auxfree bias updates (0 to disable)")] = 0.0,
+    auxfree_update_frequency: Annotated[int, Option(help="Update auxfree biases every N steps")] = 1,
 ):
     
     init_distributed_environment()
@@ -932,6 +984,9 @@ def main(
         "GLOBAL_RANK": global_rank,
         "NODE_RANK": node_rank,
         "WORLD_SIZE": world_size,
+        "is_moonlight_model": is_moonlight_model,
+        "auxfree_update_rate": auxfree_update_rate,
+        "auxfree_update_frequency": auxfree_update_frequency,
     }
         
     # Initialize wandb with the same params config
@@ -1074,6 +1129,8 @@ def main(
         val_data_loader=val_data_loader,
         validation_frequency=validation_frequency,
         grad_norm_clip=grad_norm_clip,
+        auxfree_update_rate=auxfree_update_rate,
+        auxfree_update_frequency=auxfree_update_frequency,
     )
     
     # once done, tear down distributed environment
