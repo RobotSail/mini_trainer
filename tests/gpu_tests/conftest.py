@@ -1,7 +1,6 @@
 """Pytest configuration for GPU tests."""
 import pytest
 import torch
-import os
 import sys
 from pathlib import Path
 

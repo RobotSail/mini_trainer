@@ -24,12 +24,7 @@ Key Features:
   same number of minibatches.
 """
 from deprecated import deprecated
-from itertools import chain
-import json
 import os
-import pytest
-import tempfile
-from unittest.mock import patch
 
 import torch
 from torch.utils.data import Sampler, Dataset, DataLoader, SequentialSampler
