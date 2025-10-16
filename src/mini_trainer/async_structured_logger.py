@@ -105,9 +105,8 @@ class AsyncStructuredLogger:
             if 'step' in data and 'steps_per_epoch' in data and 'epoch' in data:
                 # Initialize tqdm on first call (lazy init to avoid early printing)
                 if self.train_pbar is None:
-                    # Simple bar format with ANSI colors - we'll add metrics manually
+                    # Simple bar format with ANSI colors - we'll add epoch and metrics manually
                     self.train_bar_format = (
-                        '\033[1;34mEpoch {n_fmt}:\033[0m '
                         '{bar} '
                         '\033[33m{percentage:3.0f}%\033[0m │ '
                         '\033[37m{n}/{total}\033[0m'
@@ -122,15 +121,15 @@ class AsyncStructuredLogger:
                         ascii='━╺─',  # custom characters matching Rich style
                         disable=True,  # disable auto-display, we'll manually call display()
                     )
-                
+
                 # Reset tqdm if we're in a new epoch
                 current_step_in_epoch = (data['step'] - 1) % data['steps_per_epoch'] + 1
                 if current_step_in_epoch == 1:
                     self.train_pbar.reset(total=data['steps_per_epoch'])
-                
+
                 # Update tqdm position
                 self.train_pbar.n = current_step_in_epoch
-                
+
                 # Manually format the complete progress line with metrics using format_meter
                 bar_str = self.train_pbar.format_meter(
                     n=current_step_in_epoch,
@@ -140,6 +139,10 @@ class AsyncStructuredLogger:
                     bar_format=self.train_bar_format,
                     ascii='━╺─',
                 )
+
+                # Prepend the epoch number (1-indexed)
+                epoch_prefix = f'\033[1;34mEpoch {data["epoch"] + 1}:\033[0m '
+                bar_str = epoch_prefix + bar_str
                 
                 # Add the metrics to the bar string
                 metrics_str = (
