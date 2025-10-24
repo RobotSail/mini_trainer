@@ -15,7 +15,7 @@ from torch.distributed._tensor.api import DTensor as _DTensor  # works if DTenso
 
 from mini_trainer.batch_metrics import BatchMetrics
 from mini_trainer.sampler import get_data_loader
-from mini_trainer.setup_model_for_training import setup_model, setup_training_components
+from mini_trainer.setup_model_for_training import setup_model, setup_training_components, setup_optimizer_and_scheduler, wrap_fsdp2
 from mini_trainer.utils import (
     init_distributed_environment,
     log_rank_0,
@@ -862,6 +862,122 @@ def train(
     
 
 
+def multi_phase_train(
+    model: torch.nn.Module,
+    data_loaders: list,
+    val_data_loaders: list | None,
+    output_dir: str,
+    model_name_or_path: str,
+    learning_rate: float,
+    num_warmup_steps: int,
+    lr_scheduler: str,
+    scheduler_kwargs: dict,
+    # All other training parameters
+    min_samples_per_checkpoint: int | None = None,
+    training_mode: TrainingMode = TrainingMode.EPOCH,
+    max_epochs: int = 1,
+    max_steps: int = 0,
+    max_tokens: int = 0,
+    checkpoint_at_epoch: bool = False,
+    save_final_checkpoint: bool = False,
+    train_dtype: torch.dtype = torch.float32,
+    save_best_val_loss: bool = False,
+    val_loss_improvement_threshold: float = 0.0,
+    use_wandb: bool = False,
+    validation_frequency: int | None = None,
+):
+    """
+    Orchestrate multi-phase training where each phase trains on a different dataset
+    with optimizer and scheduler reset between phases.
+
+    Args:
+        model: The model to train
+        data_loaders: List of data loaders, one per phase
+        val_data_loaders: List of validation data loaders (optional, one per phase or None)
+        output_dir: Base output directory
+        model_name_or_path: Model identifier
+        learning_rate: Learning rate for training
+        num_warmup_steps: Warmup steps for scheduler
+        lr_scheduler: Scheduler type
+        scheduler_kwargs: Additional scheduler parameters
+        ... (other parameters same as train())
+    """
+    num_phases = len(data_loaders)
+    log_rank_0(f"\n{'='*60}")
+    log_rank_0(f"Starting multi-phase training with {num_phases} phases")
+    log_rank_0(f"Optimizer and scheduler will be reset between phases")
+    log_rank_0(f"{'='*60}\n")
+
+    # Wrap model with FSDP2 once before all phases
+    log_rank_0("Using FSDP2 wrapper")
+    model = wrap_fsdp2(model)
+
+    for phase_idx in range(num_phases):
+        log_rank_0(f"\n{'='*60}")
+        log_rank_0(f"PHASE {phase_idx + 1}/{num_phases}")
+        log_rank_0(f"{'='*60}\n")
+
+        # Create phase-specific output directory
+        phase_output_dir = os.path.join(output_dir, f"phase_{phase_idx}")
+        os.makedirs(phase_output_dir, exist_ok=True)
+
+        # Get data loader for this phase
+        current_data_loader = data_loaders[phase_idx]
+        current_val_loader = val_data_loaders[phase_idx] if val_data_loaders else None
+
+        # Calculate training steps for this phase
+        num_training_steps = calculate_num_training_steps(
+            training_mode=training_mode,
+            data_loader=current_data_loader,
+            max_epochs=max_epochs,
+            max_steps=max_steps,
+            max_tokens=max_tokens,
+        )
+
+        # Create fresh optimizer and scheduler for this phase
+        # Model is already FSDP-wrapped, so we only need optimizer and scheduler
+        optimizer, phase_lr_scheduler = setup_optimizer_and_scheduler(
+            model=model,
+            learning_rate=learning_rate,
+            num_warmup_steps=num_warmup_steps,
+            lr_scheduler=lr_scheduler,
+            num_training_steps=num_training_steps,
+            scheduler_kwargs=scheduler_kwargs,
+        )
+
+        # Train on this phase
+        train(
+            model=model,
+            optimizer=optimizer,
+            lr_scheduler=phase_lr_scheduler,
+            data_loader=current_data_loader,
+            output_dir=phase_output_dir,
+            min_samples_per_checkpoint=min_samples_per_checkpoint,
+            model_name_or_path=model_name_or_path,
+            training_mode=training_mode,
+            max_epochs=max_epochs,
+            max_steps=max_steps,
+            max_tokens=max_tokens,
+            checkpoint_at_epoch=checkpoint_at_epoch,
+            save_final_checkpoint=save_final_checkpoint,
+            train_dtype=train_dtype,
+            save_best_val_loss=save_best_val_loss,
+            val_loss_improvement_threshold=val_loss_improvement_threshold,
+            use_wandb=use_wandb,
+            val_data_loader=current_val_loader,
+            validation_frequency=validation_frequency,
+        )
+
+        log_rank_0(f"\n✓ Completed phase {phase_idx + 1}/{num_phases}")
+
+        # Sync all processes before moving to next phase
+        torch.distributed.barrier()
+
+    log_rank_0(f"\n{'='*60}")
+    log_rank_0(f"✓ All {num_phases} phases completed successfully!")
+    log_rank_0(f"{'='*60}\n")
+
+
 def calculate_num_training_steps(
     training_mode: TrainingMode,
     data_loader,
@@ -916,7 +1032,8 @@ def main(
     # the '...' is a way of defining required options/arguments without breaking Python's
     # positional vs keyword argument rules
     model_name_or_path: Annotated[str, Option(help="Model name or path")] = ...,
-    data_path: Annotated[str, Option(help="Path to the training data JSONL file")] = ...,
+    data_path: Annotated[str, Option(help="Path to the training data JSONL file")] = "",
+    data_paths: Annotated[str, Option(help="JSON-encoded list of data paths for multi-phase training")] = "",
     batch_size: Annotated[int, Option(help="Initial batch size before dynamic splitting")] = ...,
     max_tokens_per_gpu: Annotated[int, Option(help="Maximum tokens per GPU per minibatch")] = ...,
     learning_rate: Annotated[float, Option(help="Peak learning rate")] = ...,
@@ -1070,35 +1187,78 @@ def main(
         log_rank_0(f"Warning: Invalid JSON for lr_scheduler_kwargs: {lr_scheduler_kwargs}. Using empty dict.")
         scheduler_kwargs_dict = {}
     
-    # grab the data loader prior to the model so we can extract the dataset length
-    # and use this for calculating the number of training steps in the data loader
-    data_loader, val_data_loader = get_data_loader(
-        data_path=data_path,
-        batch_size=batch_size,
-        max_tokens_per_gpu=max_tokens_per_gpu,
-        seed=seed,
-        validation_split=validation_split,
-    )
-    
-    if validation_split > 0.0:
-        log_rank_0(f"Created train/validation split with {validation_split:.1%} validation data")
-        log_rank_0(f"Validation data loader length: {len(val_data_loader)}")
-        log_rank_0(f"Training data loader length: {len(data_loader)}")
+    # Check if this is multi-phase training mode
+    # Parse data_paths from JSON if provided
+    parsed_data_paths = None
+    if data_paths:
+        try:
+            parsed_data_paths = json.loads(data_paths)
+            if not isinstance(parsed_data_paths, list):
+                raise ValueError("data_paths must be a JSON-encoded list of strings")
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON for data_paths: {e}")
+
+    # Validate that either data_path or data_paths is provided (but not both)
+    if data_path and parsed_data_paths:
+        raise ValueError("Cannot provide both data_path and data_paths - use one or the other")
+    if not data_path and not parsed_data_paths:
+        raise ValueError("Must provide either data_path or data_paths")
+
+    is_multi_phase = parsed_data_paths is not None and len(parsed_data_paths) > 1
+    data_loaders = []
+    val_data_loaders = []
+
+    if is_multi_phase:
+        log_rank_0(f"Multi-phase training mode enabled with {len(parsed_data_paths)} phases")
+        # Load all data loaders for multi-phase training
+        for phase_idx, phase_data_path in enumerate(parsed_data_paths):
+            log_rank_0(f"Loading data for phase {phase_idx + 1}: {phase_data_path}")
+            phase_data_loader, phase_val_loader = get_data_loader(
+                data_path=phase_data_path,
+                batch_size=batch_size,
+                max_tokens_per_gpu=max_tokens_per_gpu,
+                seed=seed + phase_idx,  # Different seed per phase to ensure different shuffling
+                validation_split=validation_split,
+            )
+            data_loaders.append(phase_data_loader)
+            val_data_loaders.append(phase_val_loader)
+
+            if validation_split > 0.0:
+                log_rank_0(f"  Phase {phase_idx + 1} - Training batches: {len(phase_data_loader)}, Validation batches: {len(phase_val_loader)}")
+            else:
+                log_rank_0(f"  Phase {phase_idx + 1} - Training batches: {len(phase_data_loader)}")
     else:
-        log_rank_0("No validation split - using all data for training")
-        log_rank_0(f"Training data loader length: {len(data_loader)}")
+        # Single-phase training (standard mode)
+        effective_data_path = data_path if data_path else parsed_data_paths[0]
+        data_loader, val_data_loader = get_data_loader(
+            data_path=effective_data_path,
+            batch_size=batch_size,
+            max_tokens_per_gpu=max_tokens_per_gpu,
+            seed=seed,
+            validation_split=validation_split,
+        )
+
+        if validation_split > 0.0:
+            log_rank_0(f"Created train/validation split with {validation_split:.1%} validation data")
+            log_rank_0(f"Validation data loader length: {len(val_data_loader)}")
+            log_rank_0(f"Training data loader length: {len(data_loader)}")
+        else:
+            log_rank_0("No validation split - using all data for training")
+            log_rank_0(f"Training data loader length: {len(data_loader)}")
     
     # Calculate number of training steps based on training mode
+    # For multi-phase, use the first data loader to estimate
+    reference_data_loader = data_loaders[0] if is_multi_phase else data_loader
     num_training_steps = calculate_num_training_steps(
         training_mode=training_mode,
-        data_loader=data_loader,
+        data_loader=reference_data_loader,
         max_epochs=max_epochs,
         max_steps=max_steps,
         max_tokens=max_tokens,
     )
-    
+
     log_rank_0(f"Calculated num_training_steps: {num_training_steps}")
-    
+
     # If Orthogonal Subspace Learning is enabled, loads a model with decomposed trainable low-rank + fixed high-rank subspace weights (see osft_utils)
     # Convert user-facing osft_unfreeze_rank_ratio to internal osft_rank_ratio
     osft_rank_ratio = None if osft_unfreeze_rank_ratio is None else (1.0 - osft_unfreeze_rank_ratio)
@@ -1115,36 +1275,65 @@ def main(
         osft_output_dtype=osft_output_dtype_torch,
         osft_memory_efficient_init=osft_memory_efficient_init,
     )
-    model, optimizer, lr_scheduler = setup_training_components(
-        model=model,
-        learning_rate=learning_rate,
-        num_warmup_steps=num_warmup_steps,
-        lr_scheduler=lr_scheduler,
-        num_training_steps=num_training_steps,
-        scheduler_kwargs=scheduler_kwargs_dict,
-   )
-    
-    train(
-        model=model,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        data_loader=data_loader,
-        output_dir=output_dir,
-        min_samples_per_checkpoint=min_samples_per_checkpoint,
-        model_name_or_path=model_name_or_path,
-        training_mode=training_mode,
-        max_epochs=max_epochs,
-        max_steps=max_steps,
-        max_tokens=max_tokens,
-        checkpoint_at_epoch=checkpoint_at_epoch,
-        save_final_checkpoint=save_final_checkpoint,
-        train_dtype=train_dtype_torch,
-        save_best_val_loss=save_best_val_loss,
-        val_loss_improvement_threshold=val_loss_improvement_threshold,
-        use_wandb=use_wandb,
-        val_data_loader=val_data_loader,
-        validation_frequency=validation_frequency,
-    )
+
+    if is_multi_phase:
+        # Multi-phase training: optimizer and scheduler created fresh for each phase
+        # Model is set up, but optimizer/scheduler creation happens inside multi_phase_train
+        multi_phase_train(
+            model=model,
+            data_loaders=data_loaders,
+            val_data_loaders=val_data_loaders if validation_split > 0.0 else None,
+            output_dir=output_dir,
+            model_name_or_path=model_name_or_path,
+            learning_rate=learning_rate,
+            num_warmup_steps=num_warmup_steps,
+            lr_scheduler=lr_scheduler,
+            scheduler_kwargs=scheduler_kwargs_dict,
+            min_samples_per_checkpoint=min_samples_per_checkpoint,
+            training_mode=training_mode,
+            max_epochs=max_epochs,
+            max_steps=max_steps,
+            max_tokens=max_tokens,
+            checkpoint_at_epoch=checkpoint_at_epoch,
+            save_final_checkpoint=save_final_checkpoint,
+            train_dtype=train_dtype_torch,
+            save_best_val_loss=save_best_val_loss,
+            val_loss_improvement_threshold=val_loss_improvement_threshold,
+            use_wandb=use_wandb,
+            validation_frequency=validation_frequency,
+        )
+    else:
+        # Single-phase training (standard mode)
+        model, optimizer, lr_scheduler = setup_training_components(
+            model=model,
+            learning_rate=learning_rate,
+            num_warmup_steps=num_warmup_steps,
+            lr_scheduler=lr_scheduler,
+            num_training_steps=num_training_steps,
+            scheduler_kwargs=scheduler_kwargs_dict,
+        )
+
+        train(
+            model=model,
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler,
+            data_loader=data_loader,
+            output_dir=output_dir,
+            min_samples_per_checkpoint=min_samples_per_checkpoint,
+            model_name_or_path=model_name_or_path,
+            training_mode=training_mode,
+            max_epochs=max_epochs,
+            max_steps=max_steps,
+            max_tokens=max_tokens,
+            checkpoint_at_epoch=checkpoint_at_epoch,
+            save_final_checkpoint=save_final_checkpoint,
+            train_dtype=train_dtype_torch,
+            save_best_val_loss=save_best_val_loss,
+            val_loss_improvement_threshold=val_loss_improvement_threshold,
+            use_wandb=use_wandb,
+            val_data_loader=val_data_loader,
+            validation_frequency=validation_frequency,
+        )
 
     # once done, tear down distributed environment
     if use_wandb:

@@ -38,6 +38,10 @@ class TrainingArgs:
     max_tokens_per_gpu: int = field(metadata={"help": "The maximum number of tokens per GPU per minibatch."})
     learning_rate: float = field(metadata={"help": "The learning rate to use for training."})
     output_dir: str = field(metadata={"help": "Directory to save checkpoints and logs."})
+
+    # Multi-phase training (alternative to single data_path)
+    data_paths: Optional[list[str]] = field(default=None, metadata={"help": "List of data paths for multi-phase training. When provided, training runs in phases with optimizer reset between each."})
+    reset_optimizer_between_phases: bool = field(default=False, metadata={"help": "When True and data_paths is provided, reset optimizer and scheduler between training phases."})
     
     # Optional fields (with defaults)
     num_warmup_steps: int = field(default=0, metadata={"help": "The number of warmup steps for the learning rate scheduler."})

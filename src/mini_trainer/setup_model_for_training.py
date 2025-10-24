@@ -468,3 +468,66 @@ def setup_training_components(
     lr_scheduler.step() #the scheduler starts at 0 and there's no learning.
     return model, optimizer, lr_scheduler
 
+
+def setup_optimizer_and_scheduler(
+    model: torch.nn.Module,
+    learning_rate: float,
+    num_warmup_steps: int,
+    lr_scheduler: str,
+    num_training_steps: Optional[int] = None,
+    scheduler_kwargs: Optional[Dict[str, Any]] = None,
+) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
+    """
+    Set up optimizer and learning rate scheduler for an already-FSDP-wrapped model.
+
+    This function is used in multi-phase training where the model has already been
+    wrapped with FSDP2 and we only need to create fresh optimizer and scheduler.
+
+    Args:
+        model: The FSDP-wrapped model to be trained
+        learning_rate: Peak learning rate for the optimizer
+        num_warmup_steps: Number of warmup steps for the LR scheduler
+        lr_scheduler: Type of learning rate scheduler to use
+        num_training_steps: Total number of training steps (required for some schedulers)
+        scheduler_kwargs: Additional scheduler-specific keyword arguments
+
+    Returns:
+        Tuple of (optimizer, lr_scheduler)
+    """
+    from transformers import get_scheduler
+
+    # Filter parameters to only include those that require gradients
+    # This handles cases where some parameters (e.g., frozen router params) have requires_grad=False
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+
+    # Count trainable parameters for logging
+    total_params = sum(1 for _ in model.parameters())
+    trainable_count = len(trainable_params)
+    if total_params != trainable_count:
+        log_rank_0(f"📊 Using {trainable_count}/{total_params} trainable parameters in optimizer")
+
+    optimizer = torch.optim.AdamW(
+        trainable_params,
+        lr=learning_rate,
+        betas=(0.9, 0.95),
+        weight_decay=0.0,
+    )
+    from mini_trainer.osft_utils import optim_wrapper
+    optimizer = optim_wrapper(optimizer, model)
+
+    # Prepare scheduler kwargs
+    if scheduler_kwargs is None:
+        scheduler_kwargs = {}
+
+    lr_scheduler = get_scheduler(
+        name=lr_scheduler,
+        optimizer=optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps,
+        scheduler_specific_kwargs=scheduler_kwargs,
+    )
+    lr_scheduler.split_batches = True
+    lr_scheduler.step()  # the scheduler starts at 0 and there's no learning.
+
+    return optimizer, lr_scheduler
+

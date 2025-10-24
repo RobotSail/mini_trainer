@@ -95,7 +95,6 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
         f"--rdzv_endpoint={torch_args.rdzv_endpoint}",
         str(train_script),
         f"--model-name-or-path={train_args.model_name_or_path}",
-        f"--data-path={train_args.data_path}",
         f"--batch-size={train_args.batch_size}",
         f"--max-tokens-per-gpu={train_args.max_tokens_per_gpu}",
         f"--learning-rate={train_args.learning_rate}",
@@ -110,6 +109,14 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
         f"--max-tokens={train_args.max_tokens}",
         f"--train-dtype={train_args.train_dtype}",
     ]
+
+    # Handle data paths - either single or multiple
+    if train_args.data_paths is not None and len(train_args.data_paths) > 0:
+        # Multi-phase training mode
+        command.append(f"--data-paths={json.dumps(train_args.data_paths)}")
+    else:
+        # Single-phase training mode
+        command.append(f"--data-path={train_args.data_path}")
 
     
     # wandb-related arguments
