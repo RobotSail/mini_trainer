@@ -1113,7 +1113,6 @@ def main(
         osft_target_patterns=osft_target_patterns,
         osft_upcast_dtype=osft_upcast_dtype_torch,
         osft_output_dtype=osft_output_dtype_torch,
-        osft_memory_efficient_init=osft_memory_efficient_init,
     )
     model, optimizer, lr_scheduler = setup_training_components(
         model=model,

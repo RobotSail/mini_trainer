@@ -10,6 +10,8 @@ import torch
 from typing import Dict
 import logging
 
+from transformers import AutoConfig, PretrainedConfig
+
 from mini_trainer.utils import log_rank_0
 
 logger = logging.getLogger("mini_trainer")
@@ -337,10 +339,16 @@ def convert_dequantized_to_quantized_format_correct(state_dict: Dict[str, torch.
     return converted_state_dict
 
 
-def is_gpt_oss_model(model_config) -> bool:
+def is_gpt_oss_model(model_name_or_config: PretrainedConfig | dict | str) -> bool:
     """
     Check if the model config indicates this is a GPT-OSS model.
     """
+    # maybe this was a string not a config
+    if isinstance(model_name_or_config, str):
+        model_config = AutoConfig.from_pretrained(model_name_or_config, trust_remote_code=True)
+    else:
+        model_config = model_name_or_config
+
     return getattr(model_config, 'model_type', None) == 'gpt_oss'
 
 
