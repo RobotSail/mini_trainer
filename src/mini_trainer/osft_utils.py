@@ -1161,20 +1161,25 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             main_proc_rank = 0
             is_main_proc = current_rank == main_proc_rank
 
-            params_per_node = len(params_to_compute) // dist.get_world_size()
+            world_size = dist.get_world_size()
+            params_per_node = len(params_to_compute) // world_size
             params_to_compute_list = list[tuple[str, Tensor]](params_to_compute.items())
  
+            # distribute parameters across ranks, handling remainder
             work_assignments = []
+            for rank_idx in range(world_size):
+                start_idx = rank_idx * params_per_node
+                # give the last rank any remaining parameters
+                if rank_idx == world_size - 1:
+                    end_idx = len(params_to_compute_list)
+                else:
+                    end_idx = start_idx + params_per_node
+                work_assignments.append(params_to_compute_list[start_idx:end_idx])
 
-            # assign the actual work
-            k = 0
-            for i in range(0, len(params_to_compute_list), params_per_node):
-                work_assignments.append(params_to_compute_list[i:i+params_per_node])
-                k += 1
-
-            log_rank_0(f"📊 [compute_distributed_svd] Distributing work across {dist.get_world_size()} ranks")
+            log_rank_0(f"📊 [compute_distributed_svd] Distributing work across {world_size} ranks")
             log_rank_0(f"   • Total parameters: {len(params_to_compute)}")
-            log_rank_0(f"   • Parameters per node: {params_per_node}")
+            log_rank_0(f"   • Parameters per node (base): {params_per_node}")
+            log_rank_0(f"   • Last rank gets: {len(work_assignments[-1])} parameters")
 
             my_work = []
             for target_rank, assignment in enumerate[tuple[str, torch.Tensor]](work_assignments):
@@ -1260,7 +1265,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 for lk, svd_dict in gathered_results.items():
                     # we want to make sure we have this
                     if lk not in dist_model.osft_paramspec_registry:
-                        raise RuntimeError(f"key {lk} not in osft param registry, this is what exists:\n{self.osft_paramspec_registry.keys()}")
+                        raise RuntimeError(f"key {lk} not in osft param registry, this is what exists:\n{dist_model.osft_paramspec_registry.keys()}")
 
                     osft_spec = dist_model.osft_paramspec_registry[lk]
                     finalized_sd.update({
@@ -1274,12 +1279,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     })
 
 
-            log_rank_0("✅ [compute_distributed_svd] Results gathered on rank 0, broadcasting to all ranks")
-
-            print('----- [rank 0] non-strict state dict -----')
-            dist.breakpoint(rank=0)
-
-        
             # finally, the main process distributes the state dict
             log_rank_0("📤 [compute_distributed_svd] Distributing computed SVD data to sharded models")
             set_model_state_dict(
@@ -1527,17 +1526,14 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             parent_logical_key = logical_key.removesuffix(f'.{attr}')
 
 
-            # Get the bias
-            bias = mod.bias if hasattr(mod, "bias") else None
-
-            # TODO(osilkin): we define the function here and evaluate it 
-            # immediately, which means the factory defines the pointers
-            # wayyy too early. We will need to make sure that this works
-            # after we update the parameters
-
             # Override linear projection to use module-local OSFT params
-            def make_forward(owner_mod, bias):
+            # Note: we use the logical key to look up the module dynamically via the handle registry
+            # to ensure the reference survives FSDP2 wrapping and activation checkpointing
+            def make_forward(lkey):
                 def forward(x):
+                    owner_mod, _ = self._get_module_by_logical_key(lkey)
+                    if owner_mod is None:
+                        raise RuntimeError(f"Module for logical key '{lkey}' not found in handle registry")
                     svd_dict = {
                         "U_high": owner_mod.osft_U_high,
                         "S_high": owner_mod.osft_S_high,
@@ -1547,12 +1543,14 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         "V_low": owner_mod.osft_params.V_low,
                         "rank_high": owner_mod.osft_params.rank_high,
                     }
+                    # retrieve bias dynamically to avoid meta tensor issues
+                    bias = getattr(owner_mod, 'bias', None)
                     return self._factorized_linear(x, svd_dict, bias)
                 return forward
 
             
             # update the forward
-            mod.forward = make_forward(mod, bias)
+            mod.forward = make_forward(logical_key)
             meta_weight.requires_grad = False
             self.osft_paramspec_registry[logical_key] = OSFTFactorSpec(
                 parent_key=parent_logical_key,
@@ -1693,6 +1691,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
                     # Attach OSFT components to the owning module so only block-local params materialize
                     mod, attr = self._get_module_by_name(name)
+                    
+                    # Register this target in the handle registry for stable lookups
+                    self._register_osft_target(name, mod, attr)
+                    
                     # High-rank frozen components
                     mod.register_parameter("osft_U_high", nn.Parameter(svd_dict["U_high"], requires_grad=False))
                     mod.register_parameter("osft_S_high", nn.Parameter(svd_dict["S_high"], requires_grad=False))
@@ -1706,11 +1708,14 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     module_svd.safe_name = safe_name
                     mod.add_module("osft_params", module_svd)
 
-                    bias = mod.bias if hasattr(mod, "bias") else None
-
                     # Override linear projection to use module-local OSFT params
-                    def make_forward(owner_mod, bias):
+                    # Note: we use the logical key to look up the module dynamically via the handle registry
+                    # to ensure the reference survives FSDP2 wrapping and activation checkpointing
+                    def make_forward(lkey):
                         def forward(x):
+                            owner_mod, _ = self._get_module_by_logical_key(lkey)
+                            if owner_mod is None:
+                                raise RuntimeError(f"Module for logical key '{lkey}' not found in handle registry")
                             svd_dict = {
                                 "U_high": owner_mod.osft_U_high,
                                 "S_high": owner_mod.osft_S_high,
@@ -1720,10 +1725,12 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                                 "V_low": owner_mod.osft_params.V_low,
                                 "rank_high": owner_mod.osft_params.rank_high,
                             }
+                            # retrieve bias dynamically to avoid meta tensor issues
+                            bias = getattr(owner_mod, 'bias', None)
                             return self._factorized_linear(x, svd_dict, bias)
                         return forward
 
-                    mod.forward = make_forward(mod, bias)
+                    mod.forward = make_forward(name)
                     param.requires_grad = False
                     # Remove original parameter so it doesn't get updated
                     mod._parameters.pop(attr, None)

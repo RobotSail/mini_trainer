@@ -6,7 +6,7 @@ from sre_parse import State
 from typing import Optional, Dict, Any
 import torch
 import torch.distributed as dist
-from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
+from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, OffloadPolicy, fully_shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
@@ -135,8 +135,8 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
 
     # # TODO: make this work again
     # # # 2) Activation checkpoint each block
-    # for idx, block in enumerate(layers):
-    #     layers[idx] = ptd_checkpoint_wrapper(block, preserve_rng_state=False)
+    for idx, block in enumerate(layers):
+        layers[idx] = ptd_checkpoint_wrapper(block, preserve_rng_state=False)
 
 
     # 3) Build a 1D device mesh over all ranks
@@ -148,12 +148,22 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     log_rank_0("🔄 [OSFT FSDP2] Step 4: Wrapping model blocks with FSDP2")
     for idx, block in enumerate(layers):
         reshard = idx < len(layers) - 1
-        fully_shard(block, mesh=mesh, mp_policy=mp_policy, reshard_after_forward=reshard)
+        fully_shard(
+            block,
+            mesh=mesh,
+            mp_policy=mp_policy,
+            reshard_after_forward=reshard,
+        )
     log_rank_0(f"   • Wrapped {len(layers)} blocks with FSDP2")
 
     # 5) FSDP2 wrap full model
     log_rank_0("🔄 [OSFT FSDP2] Step 5: Wrapping full model with FSDP2")
-    fully_shard(model, mesh=mesh, mp_policy=mp_policy, reshard_after_forward=True)
+    fully_shard(
+        model,
+        mesh=mesh,
+        mp_policy=mp_policy,
+        reshard_after_forward=True,
+    )
     log_rank_0("   • Full model wrapped with FSDP2")
     
     # Normal nodes can exit by now
