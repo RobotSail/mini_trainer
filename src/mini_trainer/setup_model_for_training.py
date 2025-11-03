@@ -80,6 +80,162 @@ def load_and_distribute_config(
 
 # New simple HF-only activation-checkpointing + FSDP2 wrapper
 # This mirrors TorchTitan: checkpoint each block, then shard each block and the full model.
+def _sanitize_meta_rope_tensors(model: torch.nn.Module) -> int:
+    """Fixes meta tensors in RoPE modules by aliasing to existing buffers or recomputing.
+
+    Returns the number of modules sanitized.
+    """
+    repaired = 0
+    # best-effort device fallback
+    try:
+        model_device = next(model.parameters()).device
+    except StopIteration:
+        model_device = torch.device("cpu")
+
+    for module in model.modules():
+        # identify rotary embedding-like modules without relying on specific class names
+        has_rope = hasattr(module, "rope_init_fn") and hasattr(module, "config")
+        if not has_rope:
+            continue
+
+        orig = getattr(module, "original_inv_freq", None)
+        if not isinstance(orig, torch.Tensor):
+            continue
+
+        if orig.device.type != "meta":
+            continue
+
+        inv = getattr(module, "inv_freq", None)
+        if isinstance(inv, torch.Tensor) and inv.device.type != "meta":
+            module.original_inv_freq = inv
+            repaired += 1
+            continue
+
+        # determine target device to recompute
+        target_device = None
+        # prefer any local non-meta parameter/buffer
+        for p in module.parameters(recurse=False):
+            if isinstance(p, torch.Tensor) and p.device.type != "meta":
+                target_device = p.device
+                break
+        if target_device is None:
+            for _, b in module.named_buffers(recurse=False):
+                if isinstance(b, torch.Tensor) and b.device.type != "meta":
+                    target_device = b.device
+                    break
+        if target_device is None:
+            target_device = model_device
+
+        try:
+            inv_freq, _ = module.rope_init_fn(module.config, target_device)
+            # keep inv_freq buffer as-is; only fix the non-buffer attribute
+            module.original_inv_freq = inv_freq
+            repaired += 1
+        except Exception:
+            # leave untouched if recomputation is not possible
+            pass
+
+    return repaired
+
+
+def _sanitize_meta_attribute_aliases(model: torch.nn.Module) -> int:
+    """Repairs non-param/buffer tensor attributes generically.
+
+    Rules (simple and model-agnostic):
+    - If an attribute tensor is on meta and not OSFT-owned, clone the ONLY module-local
+      param/buffer with identical shape and dtype. If there is not exactly one match, skip.
+    - If an attribute tensor is on CPU and the module has a non-CPU param/buffer device,
+      move the attribute to that device. Otherwise keep as CPU.
+
+    Returns the number of attributes repaired or moved.
+    """
+    repaired = 0
+
+    # best-effort local target device per rank
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    default_device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
+
+    def _is_osft_owned_attribute(module: torch.nn.Module, name: str) -> bool:
+        if name.startswith("osft_") or name in {"U_low", "S_low", "V_low", "rank_high"}:
+            return True
+        return hasattr(module, "osft_params") and name in {"U_low", "S_low", "V_low", "rank_high"}
+
+    for module in model.modules():
+        # collect available candidates from this module
+        buf_map = dict(module._buffers) if hasattr(module, "_buffers") else {}
+        param_map = dict(module._parameters) if hasattr(module, "_parameters") else {}
+
+        # helper to pick a candidate tensor by name
+        def _get_by_name(name: str) -> torch.Tensor | None:
+            t = buf_map.get(name)
+            if t is not None:
+                return t
+            p = param_map.get(name)
+            if p is not None:
+                return p
+            return None
+
+        # helper to find a unique same-shape/dtype candidate among module-local param/buffer tensors
+        def _unique_match_by_shape_dtype(target: torch.Tensor) -> torch.Tensor | None:
+            matches = [
+                t
+                for t in list(buf_map.values()) + list(param_map.values())
+                if isinstance(t, torch.Tensor)
+                and t.device.type != "meta"
+                and t.shape == target.shape
+                and t.dtype == target.dtype
+            ]
+            if len(matches) == 1:
+                return matches[0]
+            return None
+
+        # derive a reasonable target device from module-local params/buffers
+        target_device = None
+        for t in list(param_map.values()) + list(buf_map.values()):
+            if isinstance(t, torch.Tensor) and t.device.type != "meta":
+                target_device = t.device
+                break
+        if target_device is None:
+            target_device = default_device
+
+        # iterate module attributes (avoid dir(); use __dict__ to skip methods)
+        for attr_name, value in list(getattr(module, "__dict__", {}).items()):
+            if not isinstance(value, torch.Tensor):
+                continue
+            # skip real params/buffers
+            if attr_name in buf_map or attr_name in param_map:
+                continue
+            # skip OSFT-owned attributes
+            if _is_osft_owned_attribute(module, attr_name):
+                continue
+
+            # meta → clone from a unique module-local shape/dtype match
+            if value.device.type == "meta":
+                candidate = _unique_match_by_shape_dtype(value)
+
+                if candidate is None:
+                    # no safe materialization path; leave untouched
+                    continue
+
+                try:
+                    fixed = candidate.detach().clone()
+                    module.__dict__[attr_name] = fixed
+                    repaired += 1
+                except Exception:
+                    pass
+                continue
+
+            # CPU → move to module-local device (only for non-param/buffer attributes)
+            if value.device.type == "cpu" and target_device.type != "cpu":
+                try:
+                    module.__dict__[attr_name] = value.to(device=target_device, dtype=value.dtype)
+                    repaired += 1
+                except Exception:
+                    # leave as-is if movement is unsafe
+                    pass
+
+    return repaired
+
 def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     # TODO: use the efficient initalization for SFT as well
 
@@ -168,6 +324,9 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     
     # Normal nodes can exit by now
     if not osft_fsdp2_lazy_init:
+        fixed_generic = _sanitize_meta_attribute_aliases(model)
+        if fixed_generic:
+            log_rank_0(f"🧩 [FSDP2] Sanitized {fixed_generic} meta tensor attributes")
         log_rank_0("✅ [OSFT FSDP2] Non-OSFT path complete, returning model")
         return model
     
@@ -207,7 +366,10 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
 
     model.compute_distributed_svd(model, rank0_og_osft_state_dict)
 
-    
+    fixed_generic = _sanitize_meta_attribute_aliases(model)
+    if fixed_generic:
+        log_rank_0(f"🧩 [FSDP2] Sanitized {fixed_generic} meta tensor attributes")
+
     return model
 
 def align_model_and_tokenizer(model, tokenizer):
