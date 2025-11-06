@@ -218,7 +218,17 @@ def _sanitize_meta_attribute_aliases(model: torch.nn.Module) -> int:
                     continue
 
                 try:
+                    # check if model has expected dtype (e.g., from OSFT)
+                    expected_dtype = None
+                    if hasattr(model, 'output_dtype'):
+                        expected_dtype = model.output_dtype
+                    elif hasattr(model, 'dtype'):
+                        expected_dtype = model.dtype
+                    
                     fixed = candidate.detach().clone()
+                    if expected_dtype and fixed.dtype != expected_dtype:
+                        fixed = fixed.to(dtype=expected_dtype)
+                    
                     module.__dict__[attr_name] = fixed
                     repaired += 1
                 except Exception:

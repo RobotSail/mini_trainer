@@ -1268,13 +1268,23 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         raise RuntimeError(f"key {lk} not in osft param registry, this is what exists:\n{dist_model.osft_paramspec_registry.keys()}")
 
                     osft_spec = dist_model.osft_paramspec_registry[lk]
+                    
+                    # get expected dtype from original parameter spec
+                    expected_dtype = dist_model.orig_param_registry[lk].dtype if lk in dist_model.orig_param_registry else None
+                    
+                    # helper to convert dtype if needed
+                    def ensure_dtype(tensor, expected_dtype):
+                        if expected_dtype and tensor.dtype != expected_dtype:
+                            return tensor.to(dtype=expected_dtype)
+                        return tensor
+                    
                     finalized_sd.update({
-                        osft_spec.U_low: svd_dict["U_low"],
-                        osft_spec.S_low: svd_dict["S_low"],
-                        osft_spec.V_low: svd_dict["V_low"],
-                        osft_spec.U_high: svd_dict["U_high"],
-                        osft_spec.S_high: svd_dict["S_high"],
-                        osft_spec.V_high: svd_dict["V_high"],
+                        osft_spec.U_low: ensure_dtype(svd_dict["U_low"], expected_dtype),
+                        osft_spec.S_low: ensure_dtype(svd_dict["S_low"], expected_dtype),
+                        osft_spec.V_low: ensure_dtype(svd_dict["V_low"], expected_dtype),
+                        osft_spec.U_high: ensure_dtype(svd_dict["U_high"], expected_dtype),
+                        osft_spec.S_high: ensure_dtype(svd_dict["S_high"], expected_dtype),
+                        osft_spec.V_high: ensure_dtype(svd_dict["V_high"], expected_dtype),
                         osft_spec.rank_high: svd_dict["rank_high"],
                     })
 
@@ -1314,6 +1324,13 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 # checks that the current buffer IS meta
                 assert (curr_buff := getattr(mod, attr, None)) is not None and curr_buff.device.type == "meta"
 
+                # check expected dtype from registry
+                if bk in self.orig_param_registry:
+                    expected_dtype = self.orig_param_registry[bk].dtype
+                    if data.dtype != expected_dtype:
+                        log_rank_0(f"Converting buffer {bk} from {data.dtype} to {expected_dtype}")
+                        data = data.to(dtype=expected_dtype)
+                
                 # this overwrites the buffer currently present (should be meta)
                 new_data = data.detach().clone()
                 mod.register_buffer(attr, new_data, persistent=True)
@@ -1336,7 +1353,14 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         # all of these are ignored
                         continue
 
-                    non_osft_sd[lk] = og_state_dict[lk]
+                    # convert dtype to match what was registered during initialization
+                    param_value = og_state_dict[lk]
+                    expected_dtype = spec.dtype
+                    if param_value.dtype != expected_dtype:
+                        log_rank_0(f"Converting {lk} from {param_value.dtype} to {expected_dtype}")
+                        param_value = param_value.to(dtype=expected_dtype)
+                    
+                    non_osft_sd[lk] = param_value
 
             # now the rank 0 proc shares the state dict
             set_model_state_dict(
