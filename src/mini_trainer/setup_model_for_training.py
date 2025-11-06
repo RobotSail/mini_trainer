@@ -246,6 +246,200 @@ def _sanitize_meta_attribute_aliases(model: torch.nn.Module) -> int:
 
     return repaired
 
+
+# ==============================================================================
+# Generic distributed model loading abstractions for SFT/OSFT integration
+# ==============================================================================
+
+def _load_model_distributed_meta(
+    model_class,
+    model_name_or_path: str,
+    model_args: tuple,
+    model_kwargs: dict,
+):
+    """
+    Generic meta device loading for distributed training.
+    
+    This function implements the memory-efficient pattern where:
+    - Rank 0 loads the full model to CPU and extracts state dict
+    - All other ranks create meta device models
+    - Config and metadata are broadcast to all ranks
+    
+    This can be used by both OSFT and SFT implementations.
+    
+    Args:
+        model_class: The model class to use for loading
+        model_name_or_path: HuggingFace model name or path
+        model_args: Positional arguments for model loading
+        model_kwargs: Keyword arguments for model loading
+        
+    Returns:
+        Tuple of (config, state_dict, param_keys, buffer_dict)
+        - config: Model configuration (available on all ranks)
+        - state_dict: Full state dict (only on rank 0, None on others)
+        - param_keys: List of parameter keys (available on all ranks)
+        - buffer_dict: Dictionary of buffers (available on all ranks)
+    """
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError("_load_model_distributed_meta requires torch.distributed to be initialized")
+    
+    config = None
+    state_dict = None
+    param_keys = []
+    buffer_dict = {}
+    
+    if dist.get_rank() == 0:
+        with torch.no_grad():
+            log_rank_0(f"📥 Loading base model to CPU for distributed initialization...")
+            base_model = model_class.from_pretrained(
+                model_name_or_path,
+                *model_args,
+                device_map='cpu',
+                **model_kwargs,
+            )
+            
+            # extract metadata
+            config = base_model.config
+            state_dict = base_model.state_dict()
+            param_keys = list(state_dict.keys())
+            buffer_dict = dict(base_model.named_buffers())
+            
+            # clean up
+            del base_model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            log_rank_0("🗑️ Base model deleted, metadata extracted")
+    
+    # broadcast metadata to all ranks
+    dist.barrier()
+    mailbox = [config, param_keys, buffer_dict]
+    dist.broadcast_object_list(mailbox, src=0)
+    
+    if dist.get_rank() != 0:
+        config, param_keys, buffer_dict = mailbox
+    
+    log_rank_0("✅ Model metadata distributed to all ranks")
+    return config, state_dict, param_keys, buffer_dict
+
+
+def _synchronize_state_dict_fsdp2(
+    model,
+    state_dict: dict[str, torch.Tensor],
+    strict: bool = False,
+):
+    """
+    Generic state dict synchronization for FSDP2-wrapped models.
+    
+    Broadcasts state dict from rank 0 to all other ranks after FSDP2 sharding.
+    
+    Args:
+        model: FSDP2-wrapped model
+        state_dict: Full state dict (only populated on rank 0, None/empty on others)
+        strict: Whether to enforce strict state dict loading
+    """
+    from torch.distributed.checkpoint.state_dict import set_model_state_dict, StateDictOptions
+    
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError("_synchronize_state_dict_fsdp2 requires torch.distributed to be initialized")
+    
+    # prepare state dict for rank 0
+    final_state_dict = {}
+    if dist.get_rank() == 0:
+        if state_dict is None or len(state_dict) == 0:
+            raise ValueError("Rank 0 must provide a non-empty state dict")
+        final_state_dict = state_dict
+    
+    # broadcast to all ranks
+    log_rank_0("📤 Broadcasting state dict to all ranks...")
+    set_model_state_dict(
+        model=model,
+        model_state_dict=final_state_dict,
+        options=StateDictOptions(
+            full_state_dict=True,
+            broadcast_from_rank0=True,
+            strict=strict,
+        )
+    )
+    log_rank_0("✅ State dict synchronized across all ranks")
+
+
+def _wrap_model_fsdp2(
+    model: torch.nn.Module,
+    mp_policy: MixedPrecisionPolicy | None = None,
+) -> torch.nn.Module:
+    """
+    Generic FSDP2 wrapping logic for transformer models.
+    
+    This handles:
+    - Finding transformer blocks (e.g., model.layers, transformer.h)
+    - Applying activation checkpointing
+    - FSDP2 sharding per-block and full model
+    
+    Args:
+        model: The model to wrap
+        mp_policy: Mixed precision policy (defaults to BF16 params, FP32 reduce)
+        
+    Returns:
+        FSDP2-wrapped model
+    """
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError("_wrap_model_fsdp2 requires torch.distributed to be initialized")
+    
+    # default mixed precision policy
+    if mp_policy is None:
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+        )
+    
+    # disable cache
+    if hasattr(model, 'config'):
+        try:
+            model.config.use_cache = False
+        except Exception as e:
+            log_rank_0(f"WARNING: Failed to disable cache: {e}")
+    
+    # find transformer blocks
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        layers = model.model.layers
+    elif hasattr(model, "transformer") and hasattr(model.transformer, "h"):
+        layers = model.transformer.h
+    else:
+        raise ValueError("Cannot find transformer block container (model.layers or transformer.h)")
+    
+    # apply activation checkpointing to each block
+    log_rank_0("🔄 Applying activation checkpointing to transformer blocks")
+    for idx, block in enumerate(layers):
+        layers[idx] = ptd_checkpoint_wrapper(block, preserve_rng_state=False)
+    
+    # create device mesh
+    world_size = dist.get_world_size()
+    mesh = init_device_mesh("cuda", [world_size], mesh_dim_names=["fsdp"])
+    
+    # wrap each block with FSDP2
+    log_rank_0(f"🔄 Wrapping {len(layers)} transformer blocks with FSDP2")
+    for idx, block in enumerate(layers):
+        reshard = idx < len(layers) - 1
+        fully_shard(
+            block,
+            mesh=mesh,
+            mp_policy=mp_policy,
+            reshard_after_forward=reshard,
+        )
+    
+    # wrap full model
+    log_rank_0("🔄 Wrapping full model with FSDP2")
+    fully_shard(
+        model,
+        mesh=mesh,
+        mp_policy=mp_policy,
+        reshard_after_forward=True,
+    )
+    
+    log_rank_0("✅ FSDP2 wrapping complete")
+    return model
+
+
 def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     # TODO: use the efficient initalization for SFT as well
 
@@ -482,11 +676,10 @@ def get_model_save_dtype(save_dtype: str | torch.dtype | None, model_name_or_pat
         log_rank_0(f"⚠️ Model's original dtype is '{original_dtype}', but new checkpoints will be saved as '{save_dtype}'. ⚠️")
     return save_dtype
 
-def setup_osft_model_meta(
+def setup_osft_model_distributed(
     model_name_or_path: str,
     base_model_args: dict,
     tokenizer,
-    # this was used to figure out whether to set a config or not, but no config is currently being set
     is_gpt_oss: bool,  
     rank: int,
     osft_rank_ratio=None,
@@ -495,12 +688,34 @@ def setup_osft_model_meta(
     osft_output_dtype=None,
 ):
     """
-    This function initializes an OSFT model, but in an efficient way that scales for distributed
-    environments. This requires some additional complexity which doesn't work well for the non-distributed
-    path.
+    Initialize an OSFT model for distributed training with memory-efficient loading.
+    
+    This function uses the FSDP2 lazy initialization path where:
+    - Rank 0 loads the full model to CPU
+    - All other ranks create meta device models
+    - State dict is broadcast after FSDP2 sharding
+    
+    This requires torch.distributed to be initialized.
+    
+    Args:
+        model_name_or_path: HuggingFace model name or path
+        base_model_args: Base arguments for model loading
+        tokenizer: Tokenizer for model alignment
+        is_gpt_oss: Whether this is a GPT-OSS model
+        rank: Current process rank
+        osft_rank_ratio: Ratio for OSFT rank selection
+        osft_target_patterns: Patterns for selecting OSFT target parameters
+        osft_upcast_dtype: Dtype for OSFT computations
+        osft_output_dtype: Dtype for OSFT outputs
+        
+    Returns:
+        OSFT model ready for FSDP2 wrapping
     """
     if not dist.is_available() or not dist.is_initialized():
-        raise RuntimeError("the setup_osft_model_meta` initialization method is not supported for non-distributed methods")
+        raise RuntimeError(
+            "setup_osft_model_distributed requires torch.distributed to be available and initialized. "
+            "For non-distributed training, use the model's from_pretrained method directly with fsdp2_lazy_init=False."
+        )
 
     osft_kwargs = _build_osft_kwargs(osft_rank_ratio, osft_target_patterns)
 
@@ -524,10 +739,10 @@ def setup_osft_model_meta(
     model: OSFTModel = osft_cls.from_pretrained(
         **model_load_args,
     )
-    model = align_model_and_tokenizer(model, tokenizer)
-
-    # Set OSFT dtype attributes
-    _set_osft_dtypes(model, osft_upcast_dtype, osft_output_dtype)
+    
+    # apply common OSFT configuration
+    from mini_trainer.osft_utils import _configure_osft_model
+    model = _configure_osft_model(model, tokenizer, osft_upcast_dtype, osft_output_dtype)
 
 
     # Print CPU memory utilization on each node
@@ -552,79 +767,6 @@ def setup_osft_model_meta(
 
 
 
-def setup_osft_model(
-    model_name_or_path: str,
-    base_model_args: dict,
-    tokenizer,
-    is_gpt_oss: bool,
-    rank: int,
-    osft_rank_ratio=None,
-    osft_target_patterns=None,
-    osft_upcast_dtype=torch.float32,
-    osft_output_dtype=None,
-):
-    """
-    High-level function to set up an OSFT model with all necessary configuration.
-
-    This function handles both GPT-OSS and standard model paths with minimal
-    duplication.
-
-    Args:
-        model_class: The base model class to use
-        base_model_args: Arguments for model loading
-        tokenizer: Tokenizer for model alignment
-        is_gpt_oss: Whether this is a GPT-OSS model
-        rank: Current process rank
-        osft_rank_ratio: Rank ratio for OSFT decomposition
-        osft_target_patterns: Target patterns for OSFT
-        osft_upcast_dtype: Upcast dtype for OSFT computations
-        osft_output_dtype: Output dtype for OSFT results
-
-    Returns:
-        Fully configured and initialized OSFT model
-    """
-    log_rank_0("🔧 [setup_osft_model] Starting OSFT model setup")
-    log_rank_0(f"   • model_name_or_path: {model_name_or_path}")
-    log_rank_0(f"   • is_gpt_oss: {is_gpt_oss}")
-    log_rank_0(f"   • osft_rank_ratio: {osft_rank_ratio}")
-    log_rank_0(f"   • osft_upcast_dtype: {osft_upcast_dtype}")
-    log_rank_0(f"   • osft_output_dtype: {osft_output_dtype}")
-    
-
-    osft_kwargs = _build_osft_kwargs(osft_rank_ratio, osft_target_patterns)
-
-    # Determine the actual model class and config
-    actual_model_class = get_model_class_from_config(model_name_or_path)
-
-    # Create OSFT model class and load model
-    log_rank_0("📦 [setup_osft_model] Creating OSFT model class and loading pretrained weights")
-    osft_cls = create_osft_model_class(actual_model_class)
-    model_load_args = {
-        **base_model_args,
-        "initialize_osft": False,  # We initialize later via _initialize_osft_with_distribution
-        **osft_kwargs,
-    }
-    
-
-    log_rank_0("🚀 [setup_osft_model] Calling osft_cls.from_pretrained (initialize_osft=False)")
-    model: OSFTModel = osft_cls.from_pretrained(**model_load_args)
-    model = align_model_and_tokenizer(model, tokenizer)
-
-    # Set OSFT dtype attributes
-    _set_osft_dtypes(model, osft_upcast_dtype, osft_output_dtype)
-
-    # Handle initialization based on memory_efficient_init flag
-    device = torch.device("cuda", rank)
-    log_rank_0(f"📍 [setup_osft_model] Ready to initialize OSFT parameters")
-    log_rank_0(f"   • target device: {device}")
-
-    # Memory-efficient: Initialize OSFT on CPU, then move to GPU
-    log_rank_0("🧠 [setup_osft_model] Using memory-efficient OSFT initialization (CPU → GPU)")
-    log_rank_0("🚀 [setup_osft_model] Calling _initialize_osft_with_distribution (model on CPU)")
-    model = _initialize_osft_with_distribution(model)
-    log_rank_0("✅ [setup_osft_model] OSFT initialization complete, keeping model on CPU until FSDP2 sharding")
-
-    return model
 
 
 def setup_model(
@@ -719,9 +861,10 @@ def setup_model(
         """Load a model with OSFT (Orthogonal Subspace Fine-Tuning) support."""
         # If osft_output_dtype is not specified, use train_dtype for consistency
         effective_osft_output_dtype = osft_output_dtype if osft_output_dtype is not None else train_dtype
+        
         if dist.is_available() and dist.is_initialized():
-            return setup_osft_model_meta(
-                # model_class=ModelClass,
+            # distributed path: always use memory-efficient loading
+            return setup_osft_model_distributed(
                 model_name_or_path=model_name_or_path,
                 base_model_args=base_model_args,
                 tokenizer=tokenizer,
@@ -733,21 +876,25 @@ def setup_model(
                 osft_output_dtype=effective_osft_output_dtype,
             )
         else:
-            return setup_osft_model(
-                # TODO(osilkin): some commit has updated the behavior of OSFT initialization,
-                #                so the `model_class` field isn't being read anymore. This means that
-                #                liger kernels are not currently working in OSFT. We need to fix this.
-                # model_class=ModelClass,
-                model_name_or_path=model_name_or_path,
-                base_model_args=base_model_args,
-                tokenizer=tokenizer,
-                is_gpt_oss=is_gpt_oss,
-                rank=local_rank,
-                osft_rank_ratio=osft_rank_ratio,
-                osft_target_patterns=osft_target_patterns,
-                osft_upcast_dtype=osft_upcast_dtype,
-                osft_output_dtype=effective_osft_output_dtype,
+            # non-distributed path: direct OSFT model creation
+            actual_model_class = get_model_class_from_config(model_name_or_path)
+            osft_cls = create_osft_model_class(actual_model_class)
+            
+            # prepare kwargs for OSFT loading
+            osft_kwargs = _build_osft_kwargs(osft_rank_ratio, osft_target_patterns)
+            model = osft_cls.from_pretrained(
+                model_name_or_path,
+                fsdp2_lazy_init=False,  # never use lazy init for non-distributed
+                initialize_osft=True,   # initialize OSFT immediately
+                **osft_kwargs,
+                **base_model_args,
             )
+            
+            # apply common configuration
+            from mini_trainer.osft_utils import _configure_osft_model
+            model = _configure_osft_model(model, tokenizer, osft_upcast_dtype, effective_osft_output_dtype)
+            
+            return model
     
     # Choose whether to apply orthogonal subspace learning (OSL) based on `osft` flag
     # OSL enables continual fine-tuning by constraining updates to low-rank directions orthogonal to critical knowledge that is to be preserved

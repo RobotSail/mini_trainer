@@ -726,6 +726,63 @@ def _extract_osft_class_kwargs(kwargs: dict) -> tuple[dict, dict]:
     return osft_class_kwargs, filtered_kwargs
 
 
+def _prepare_model_kwargs(
+    kwargs: dict,
+    is_gpt_oss: bool,
+    target_class: str = "osft",
+) -> tuple[dict, dict, type]:
+    """
+    Prepare and filter kwargs for model loading based on model type and target class.
+    
+    This function handles all the HuggingFace-specific parameter filtering needed for
+    different model types (GPT-OSS vs standard) and target classes (OSFT vs base model).
+    
+    Args:
+        kwargs: Full kwargs dictionary from user
+        is_gpt_oss: Whether this is a GPT-OSS model (requires special filtering)
+        target_class: Target class type - "osft", "base", or "distributed"
+        
+    Returns:
+        Tuple of (base_kwargs, osft_class_kwargs, actual_osft_cls)
+        - base_kwargs: Filtered kwargs for base model loading
+        - osft_class_kwargs: OSFT-specific configuration kwargs
+        - actual_osft_cls: The OSFT class to use (or None if not applicable)
+    
+    Notes:
+        HuggingFace Workarounds:
+        - GPT-OSS models don't accept OSFT-specific parameters in from_pretrained
+        - Base model loading needs additional OSFT parameters filtered out
+        - OSFT class kwargs (upcast_dtype, output_dtype) must be separated
+    """
+    # extract OSFT class-specific kwargs first
+    osft_class_kwargs, filtered_kwargs = _extract_osft_class_kwargs(kwargs)
+    
+    # determine actual OSFT class and filtering strategy
+    actual_osft_cls = None
+    base_kwargs = {}
+    
+    if is_gpt_oss:
+        # GPT-OSS models require more aggressive filtering
+        # HuggingFace workaround: GPT-OSS constructors don't accept any OSFT params
+        base_kwargs = _filter_osft_parameters(filtered_kwargs, OSFT_GPT_OSS_FILTERED_PARAMS)
+        
+        # For GPT-OSS, we need to use the specific GPT-OSS OSFT class
+        actual_osft_cls = create_osft_model_class(GptOssForCausalLM)
+        log_rank_0("🎯 Using GPT-OSS-specific OSFT class with aggressive parameter filtering")
+    else:
+        # standard models are more permissive
+        if target_class == "base":
+            # when calling base model's from_pretrained, filter OSFT parameters
+            base_kwargs = _filter_osft_parameters(filtered_kwargs, OSFT_BASE_MODEL_FILTERED_PARAMS)
+        else:
+            # for OSFT class, we can pass most parameters through
+            base_kwargs = filtered_kwargs.copy()
+            base_kwargs.setdefault('osft_config', {})
+            base_kwargs.setdefault('initialize_osft', False)
+    
+    return base_kwargs, osft_class_kwargs, actual_osft_cls
+
+
 
 def _load_model_memory_efficient(
     actual_osft_cls,
@@ -912,6 +969,33 @@ def _set_osft_dtypes(model, osft_upcast_dtype, osft_output_dtype):
         model.output_dtype = osft_output_dtype
 
 
+def _configure_osft_model(model, tokenizer, osft_upcast_dtype, osft_output_dtype):
+    """
+    Apply common OSFT model configuration including tokenizer alignment and dtype settings.
+    
+    This consolidates configuration logic that's common to both distributed and non-distributed
+    OSFT model loading paths.
+    
+    Args:
+        model: The OSFT model to configure
+        tokenizer: Tokenizer to align with the model
+        osft_upcast_dtype: Upcast dtype for OSFT computations
+        osft_output_dtype: Output dtype for OSFT results
+        
+    Returns:
+        Configured OSFT model
+    """
+    from mini_trainer.setup_model_for_training import align_model_and_tokenizer
+    
+    # align model and tokenizer
+    model = align_model_and_tokenizer(model, tokenizer)
+    
+    # set OSFT dtypes
+    _set_osft_dtypes(model, osft_upcast_dtype, osft_output_dtype)
+    
+    return model
+
+
 def _initialize_osft_with_distribution(model):
     """
     Initialize OSFT using appropriate method based on distributed setup.
@@ -1038,6 +1122,81 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             else:
                 log_rank_0("⏭️  [OSFT.__init__] Skipping _initialize_osft_parameters (initialize_osft=False)")
 
+        @staticmethod
+        def _load_non_distributed(
+            actual_osft_cls,
+            pretrained_model_name_or_path: str,
+            model_args: tuple,
+            base_kwargs: dict,
+            osft_class_kwargs: dict,
+        ):
+            """
+            Standard non-distributed loading for OSFT models.
+            
+            This method uses the parent class's from_pretrained directly,
+            which is simpler and doesn't require distributed coordination.
+            
+            Args:
+                actual_osft_cls: The OSFT model class to instantiate
+                pretrained_model_name_or_path: Model path or name
+                model_args: Positional arguments for model loading
+                base_kwargs: Base model kwargs (already filtered)
+                osft_class_kwargs: OSFT class-specific parameters
+                
+            Returns:
+                Loaded OSFT model
+            """
+            log_rank_0("🧠 Using standard (non-distributed) OSFT loading")
+            
+            # get the base model class from the OSFT class inheritance chain
+            base_model_class = None
+            for base in actual_osft_cls.__mro__:
+                if hasattr(base, 'from_pretrained') and base != actual_osft_cls and 'WithOSFT' not in base.__name__:
+                    base_model_class = base
+                    break
+            
+            if base_model_class is None:
+                raise ValueError(f"Could not find base model class in inheritance chain of {actual_osft_cls}")
+            
+            log_rank_0(f"🎯 Using base model class: {base_model_class.__name__}")
+            
+            # remove additional OSFT parameters before calling base model's from_pretrained
+            final_base_kwargs = _filter_osft_parameters(base_kwargs, OSFT_BASE_MODEL_FILTERED_PARAMS)
+            
+            # load the base model directly using parent's from_pretrained
+            log_rank_0(f"📥 Loading base model from {pretrained_model_name_or_path}...")
+            base_model = base_model_class.from_pretrained(
+                pretrained_model_name_or_path,
+                *model_args,
+                **final_base_kwargs,
+            )
+            
+            # extract config and state dict
+            config = base_model.config
+            state_dict = base_model.state_dict()
+            
+            # create OSFT model with config
+            log_rank_0("🔧 Creating OSFT model wrapper...")
+            model = actual_osft_cls(
+                config=config,
+                osft_config={},  # Will be set later
+                initialize_osft=False,
+                upcast_dtype=osft_class_kwargs.get('upcast_dtype', torch.float32),
+                output_dtype=osft_class_kwargs.get('output_dtype', None),
+                fsdp2_lazy_init=False,
+            )
+            
+            # load the state dict into the OSFT model
+            model.load_state_dict(state_dict)
+            
+            # clean up base model
+            del base_model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            log_rank_0("✅ Non-distributed OSFT model loaded successfully")
+            return model
+
         @classmethod
         def from_pretrained(
             cls,
@@ -1062,7 +1221,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             # validation
             if fsdp2_lazy_init:
                 if not dist.is_available() or not dist.is_initialized():
-                    raise ValueError("fsdp2 lazy init can only be run in a distributed environment")
+                    raise ValueError(
+                        "FSDP2 lazy initialization requires torch.distributed to be available and initialized. "
+                        "Either initialize distributed training or set fsdp2_lazy_init=False for non-distributed loading."
+                    )
  
  
             # Check if this is a GPT-OSS model
@@ -1082,15 +1244,25 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 base_kwargs['initialize_osft'] = False
                 actual_osft_cls = cls
             
-            # If on rank 0, this model contains the original weights. Otherwise, this contains a meta state-dict
-            model = _load_model_memory_efficient(
-                actual_osft_cls,
-                pretrained_model_name_or_path,
-                model_args,
-                base_kwargs,
-                # remove this temporarily
-                osft_class_kwargs,
-            )
+            # choose loading path based on fsdp2_lazy_init flag
+            if fsdp2_lazy_init:
+                # memory-efficient distributed loading
+                model = _load_model_memory_efficient(
+                    actual_osft_cls,
+                    pretrained_model_name_or_path,
+                    model_args,
+                    base_kwargs,
+                    osft_class_kwargs,
+                )
+            else:
+                # standard non-distributed loading
+                model = cls._load_non_distributed(
+                    actual_osft_cls,
+                    pretrained_model_name_or_path,
+                    model_args,
+                    base_kwargs,
+                    osft_class_kwargs,
+                )
 
             # quickly check this 
             assert not fsdp2_lazy_init or (fsdp2_lazy_init and model._lazy_init_pending)
