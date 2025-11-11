@@ -43,9 +43,9 @@ def validate_training_state(model, optimizer, expected_param_dtype=torch.float32
     """
     for name, param in model.named_parameters():
         if param.requires_grad and param.dtype != expected_param_dtype:
-            raise ValueError(f"Parameter {name} is not in {expected_param_dtype}")
+            raise ValueError(f"Parameter {name} is not in {expected_param_dtype}, got {param.dtype}")
         if param.grad is not None and param.grad.dtype != expected_param_dtype:
-            raise ValueError(f"Gradient {name} is not in {expected_param_dtype}")
+            raise ValueError(f"Gradient {name} is not in {expected_param_dtype}, got {param.grad.dtype}")
     
 
     # Check optimizer state tensors - only for trainable parameters
