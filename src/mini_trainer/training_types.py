@@ -70,7 +70,17 @@ class TrainingArgs:
     })
     osft_upcast_dtype: str | None = field(default="float32", metadata={"help": "Upcast dtype for OSFT computations. Can be 'float16', 'bfloat16', 'float32', etc."})
     osft_output_dtype: str | None = field(default=None, metadata={"help": "Output dtype for OSFT. If None, uses original model dtype. Can be 'float16', 'bfloat16', 'float32', etc."})
-    osft_memory_efficient_init: bool = field(default=False, metadata={"help": "Enable memory-efficient OSFT initialization (useful for large models and GPT-OSS)"})
+    osft_memory_efficient_init: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "DEPRECATED: This flag is now ignored and will be removed in v0.5.0. "
+                "Memory-efficient initialization is automatically enabled for distributed training "
+                "(when torch.distributed is initialized) and disabled for non-distributed scenarios. "
+                "This parameter has no effect and can be safely removed from your configuration."
+            )
+        }
+    )
     
     # Output options
     min_samples_per_checkpoint: Optional[int] = field(default=None, metadata={"help": "If provided, this must be the number of samples to process before saving a checkpoint."})

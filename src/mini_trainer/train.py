@@ -935,7 +935,13 @@ def main(
     )] = None,
     osft_upcast_dtype: Annotated[str | None, Option(help="Upcast dtype for OSFT computations. Can be 'float16', 'bfloat16', 'float32', etc.")] = "float32",
     osft_output_dtype: Annotated[str | None, Option(help="Output dtype for OSFT. If None, uses original model dtype. Can be 'float16', 'bfloat16', 'float32', etc.")] = None,
-    osft_memory_efficient_init: Annotated[bool, Option(help="Enable memory-efficient OSFT initialization (useful for large models and GPT-OSS)")] = False,
+    osft_memory_efficient_init: Annotated[bool, Option(
+        help=(
+            "DEPRECATED: This flag is now ignored and will be removed in v0.5.0. "
+            "Memory-efficient initialization is automatically enabled for distributed training. "
+            "This parameter has no effect and can be safely removed."
+        )
+    )] = False,
 
     output_dir: Annotated[str, Option(help="Directory to save checkpoints and logs (required)")] = ...,
     min_samples_per_checkpoint: Annotated[int | None, Option(help="Minimum number of samples processed before saving a checkpoint (required)")] = None,
@@ -977,7 +983,20 @@ def main(
             raise ValueError("osft_unfreeze_rank_ratio is required when osft is True")
         if osft_target_patterns:
             osft_target_patterns = osft_target_patterns.replace("'", "").replace('"', "").replace(" ", "").split(",")
-    
+
+        # Deprecation warning for osft_memory_efficient_init
+        if osft_memory_efficient_init:
+            import warnings
+            warnings.warn(
+                "The 'osft_memory_efficient_init' parameter is deprecated and will be "
+                "removed in mini_trainer v0.5.0. Memory-efficient initialization is now "
+                "automatically enabled for distributed training (when torch.distributed is "
+                "initialized). This flag no longer has any effect and can be safely removed "
+                "from your training configuration.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+
     # TODO(osilkin): we should eventually put this validation logic somewhere dedicated but
     # for now it's easy to read here
     if validation_split < 0.0 or validation_split >= 1.0:

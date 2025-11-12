@@ -864,6 +864,85 @@ def setup_osft_model_distributed(
     return model
 
 
+def setup_sft_model_distributed(
+    model_name_or_path: str,
+    base_model_args: dict,
+    tokenizer,
+    ModelClass: type,
+    train_dtype: torch.dtype,
+):
+    """
+    Initialize an SFT model for distributed training with memory-efficient loading.
+
+    Minimal implementation:
+    - Rank 0: Load model to CPU, extract config and state dict
+    - All ranks: Create model on meta device
+    - After FSDP2: Broadcast state dict via set_model_state_dict
+
+    This requires torch.distributed to be initialized.
+
+    Args:
+        model_name_or_path: HuggingFace model name or path
+        base_model_args: Base arguments for model loading
+        tokenizer: Tokenizer for model alignment
+        ModelClass: Model class to use for loading (e.g., AutoModelForCausalLM)
+        train_dtype: Training dtype for model parameters
+
+    Returns:
+        SFT model on meta device, ready for FSDP2 wrapping
+    """
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError(
+            "setup_sft_model_distributed requires torch.distributed to be available and initialized. "
+            "For non-distributed training, use the model's from_pretrained method directly."
+        )
+
+    # Rank 0: Load model to CPU and extract config + state dict + buffers
+    config = None
+    state_dict = None
+    buffer_dict = None
+
+    if dist.get_rank() == 0:
+        log_rank_0("📦 [setup_sft_model] Rank 0: Loading model to CPU")
+        try:
+            with torch.no_grad():
+                # Load model with device_map='cpu' to keep it on CPU
+                cpu_model = ModelClass.from_pretrained(**base_model_args, device_map='cpu')
+                config = cpu_model.config
+                state_dict = cpu_model.state_dict()
+                buffer_dict = dict(cpu_model.named_buffers())  # Extract all buffers
+        finally:
+            # Clean up immediately to free memory
+            if 'cpu_model' in locals():
+                del cpu_model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            log_rank_0("✅ [setup_sft_model] Rank 0: State dict and buffers extracted, model deleted")
+
+    # Broadcast config and buffer_dict to all ranks
+    dist.barrier()
+    mailbox = [config, buffer_dict]
+    dist.broadcast_object_list(mailbox, src=0)
+    if dist.get_rank() != 0:
+        config, buffer_dict = mailbox
+    log_rank_0("✅ [setup_sft_model] Config and buffers broadcast to all ranks")
+
+    # All ranks: Create model on meta device
+    log_rank_0("🏗️ [setup_sft_model] Creating model on meta device (all ranks)")
+    with torch.device("meta"):
+        model = ModelClass.from_config(config)
+
+    # Align model with tokenizer
+    model = align_model_and_tokenizer(model, tokenizer)
+
+    # Store state dict and buffers for post-FSDP loading
+    model._fsdp2_pending_state_dict = state_dict if dist.get_rank() == 0 else None
+    model._fsdp2_pending_buffers = buffer_dict  # All ranks have buffer_dict
+    model._fsdp2_train_dtype = train_dtype  # Store train_dtype for dtype conversion
+    model._requires_fsdp2_init = True
+
+    log_rank_0("✅ [setup_sft_model] Meta model created, ready for FSDP2 wrapping")
+    return model
 
 
 
@@ -952,80 +1031,6 @@ def setup_model(
             )
             ModelClass = AutoLigerKernelForCausalLM
 
-    def setup_sft_model_distributed(
-        model_name_or_path: str,
-        base_model_args: dict,
-        tokenizer,
-    ):
-        """
-        Initialize an SFT model for distributed training with memory-efficient loading.
-
-        Minimal implementation:
-        - Rank 0: Load model to CPU, extract config and state dict
-        - All ranks: Create model on meta device
-        - After FSDP2: Broadcast state dict via set_model_state_dict
-
-        This requires torch.distributed to be initialized.
-
-        Args:
-            model_name_or_path: HuggingFace model name or path
-            base_model_args: Base arguments for model loading
-            tokenizer: Tokenizer for model alignment
-
-        Returns:
-            SFT model on meta device, ready for FSDP2 wrapping
-        """
-        if not dist.is_available() or not dist.is_initialized():
-            raise RuntimeError(
-                "setup_sft_model_distributed requires torch.distributed to be available and initialized. "
-                "For non-distributed training, use the model's from_pretrained method directly."
-            )
-
-        # Rank 0: Load model to CPU and extract config + state dict + buffers
-        config = None
-        state_dict = None
-        buffer_dict = None
-
-        if dist.get_rank() == 0:
-            log_rank_0("📦 [setup_sft_model] Rank 0: Loading model to CPU")
-            with torch.no_grad():
-                # Load model with device_map='cpu' to keep it on CPU
-                cpu_model = ModelClass.from_pretrained(**base_model_args, device_map='cpu')
-                config = cpu_model.config
-                state_dict = cpu_model.state_dict()
-                buffer_dict = dict(cpu_model.named_buffers())  # Extract all buffers
-
-                # Clean up immediately to free memory
-                del cpu_model
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                log_rank_0("✅ [setup_sft_model] Rank 0: State dict and buffers extracted, model deleted")
-
-        # Broadcast config and buffer_dict to all ranks
-        dist.barrier()
-        mailbox = [config, buffer_dict]
-        dist.broadcast_object_list(mailbox, src=0)
-        if dist.get_rank() != 0:
-            config, buffer_dict = mailbox
-        log_rank_0("✅ [setup_sft_model] Config and buffers broadcast to all ranks")
-
-        # All ranks: Create model on meta device
-        log_rank_0("🏗️ [setup_sft_model] Creating model on meta device (all ranks)")
-        with torch.device("meta"):
-            model = ModelClass.from_config(config)
-
-        # Align model with tokenizer
-        model = align_model_and_tokenizer(model, tokenizer)
-
-        # Store state dict and buffers for post-FSDP loading
-        model._fsdp2_pending_state_dict = state_dict if dist.get_rank() == 0 else None
-        model._fsdp2_pending_buffers = buffer_dict  # All ranks have buffer_dict
-        model._fsdp2_train_dtype = train_dtype  # Store train_dtype for dtype conversion
-        model._requires_fsdp2_init = True
-
-        log_rank_0("✅ [setup_sft_model] Meta model created, ready for FSDP2 wrapping")
-        return model
-
     def load_standard_model():
         """Load a standard model (non-OSFT) with memory-efficient distributed loading when available."""
         if dist.is_available() and dist.is_initialized():
@@ -1034,6 +1039,8 @@ def setup_model(
                 model_name_or_path=model_name_or_path,
                 base_model_args=base_model_args,
                 tokenizer=tokenizer,
+                ModelClass=ModelClass,
+                train_dtype=train_dtype,
             )
         else:
             # non-distributed path: direct loading

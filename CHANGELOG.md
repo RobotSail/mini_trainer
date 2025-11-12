@@ -5,6 +5,18 @@ All notable changes to mini_trainer will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Deprecated
+- **`osft_memory_efficient_init` parameter**: This flag is deprecated and will be removed in v0.5.0.
+  Memory-efficient initialization is now automatically enabled when distributed training is detected
+  (when `torch.distributed.is_initialized()` returns `True`). The flag has no effect and can be
+  safely removed from training configurations.
+
+### Changed
+- **Automatic Memory-Efficient Initialization**: OSFT and SFT models now automatically use
+  memory-efficient initialization in distributed mode, eliminating the need for manual configuration.
+
 ## [v0.2.0] - 2025-09-16
 
 ### Added
@@ -69,7 +81,7 @@ from mini_trainer.training_types import TrainingArgs, TorchrunArgs
 
 train_args = TrainingArgs(
     model_name="openai/gpt-oss-20b",
-    osft_memory_efficient_init=True,
+    # osft_memory_efficient_init=True,  # DEPRECATED: No longer needed, automatic in distributed mode
     train_dtype="bfloat16",
     wandb=True,  # Enable wandb logging
     validation_split=0.05,  # 5% validation split
