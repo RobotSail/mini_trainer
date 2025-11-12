@@ -43,16 +43,18 @@ def load_and_distribute_config(
     """
     if rank == 0:
         log_rank_0("📥 [Rank 0] Loading model to extract config...")
-        # load the model on CPU only on rank 0
-        tmp = model_class.from_pretrained(**base_model_args)
-        
-        # extract config as JSON string (this creates a deep copy disconnected from the model)
-        config_json = tmp.config.to_json_string()
-        
-        # delete the model immediately to free memory
-        del tmp
-        torch.cuda.empty_cache()
-        log_rank_0("🗑️ [Rank 0] Model deleted, config extracted")
+        try:
+            # load the model on CPU only on rank 0
+            tmp = model_class.from_pretrained(**base_model_args)
+
+            # extract config as JSON string (this creates a deep copy disconnected from the model)
+            config_json = tmp.config.to_json_string()
+        finally:
+            # delete the model immediately to free memory
+            if 'tmp' in locals():
+                del tmp
+            torch.cuda.empty_cache()
+            log_rank_0("🗑️ [Rank 0] Model deleted, config extracted")
     else:
         config_json = None
     
@@ -289,23 +291,25 @@ def _load_model_distributed_meta(
     buffer_dict = {}
     
     if dist.get_rank() == 0:
-        with torch.no_grad():
-            log_rank_0(f"📥 Loading base model to CPU for distributed initialization...")
-            base_model = model_class.from_pretrained(
-                model_name_or_path,
-                *model_args,
-                device_map='cpu',
-                **model_kwargs,
-            )
-            
-            # extract metadata
-            config = base_model.config
-            state_dict = base_model.state_dict()
-            param_keys = list(state_dict.keys())
-            buffer_dict = dict(base_model.named_buffers())
-            
+        try:
+            with torch.no_grad():
+                log_rank_0(f"📥 Loading base model to CPU for distributed initialization...")
+                base_model = model_class.from_pretrained(
+                    model_name_or_path,
+                    *model_args,
+                    device_map='cpu',
+                    **model_kwargs,
+                )
+
+                # extract metadata
+                config = base_model.config
+                state_dict = base_model.state_dict()
+                param_keys = list(state_dict.keys())
+                buffer_dict = dict(base_model.named_buffers())
+        finally:
             # clean up
-            del base_model
+            if 'base_model' in locals():
+                del base_model
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             log_rank_0("🗑️ Base model deleted, metadata extracted")
