@@ -36,7 +36,7 @@ Role = t.Literal["osft_target", "non_osft"]
 class ParamSpec:
     logical_key: str                 # e.g., "transformer.blocks.12.attn.q_proj.weight"
     shape: tuple[int, ...]
-    dtype: str
+    dtype: torch.dtype
     role: Role
 
 
@@ -1128,13 +1128,14 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             
             # now distribute it to each node
             current_rank = dist.get_rank()
-            local_device = torch.device("cuda", current_rank)
+            local_rank = int(os.getenv("LOCAL_RANK", 0))
+            local_device = torch.device("cuda", local_rank)
             main_proc_rank = 0
             is_main_proc = current_rank == main_proc_rank
 
             world_size = dist.get_world_size()
             params_per_node = len(params_to_compute) // world_size
-            params_to_compute_list = list[tuple[str, Tensor]](params_to_compute.items())
+            params_to_compute_list = list[tuple[str, torch.Tensor]](params_to_compute.items())
  
             # distribute parameters across ranks, handling remainder
             work_assignments = []
