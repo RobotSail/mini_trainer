@@ -4,7 +4,6 @@ import math
 import os
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
-import psutil
 import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
@@ -17,7 +16,26 @@ from transformers import AutoTokenizer, AutoConfig, Mxfp4Config
 from mini_trainer.utils import get_model_class_from_config, log_rank_0, patch_target_module
 from mini_trainer.osft_utils import OSFTModel, _build_osft_kwargs, create_osft_model_class, _set_osft_dtypes
 from mini_trainer.gpt_oss_utils import freeze_router_params, is_gpt_oss_model
-from mini_trainer.osft_utils import optim_wrapper
+import mini_trainer.osft_utils as osft_utils
+
+
+def _distributed_initialized() -> bool:
+    """
+    Returns True when torch.distributed is both available and initialized.
+    """
+    return dist.is_available() and dist.is_initialized()
+
+
+def _require_distributed_initialized(action: str) -> None:
+    """
+    Raises a RuntimeError with a helpful message when an action requires the
+    torch.distributed process group but it has not been initialized.
+    """
+    if not _distributed_initialized():
+        raise RuntimeError(
+            f"{action} requires torch.distributed to be initialized. "
+            "Call torch.distributed.init_process_group() first."
+        )
 
 
 @dataclass
@@ -272,7 +290,9 @@ def prepare_model_for_fsdp2(model: torch.nn.Module) -> ModelInitializationContex
     context = ModelInitializationContext()
 
     # Check for SFT lazy initialization
-    if getattr(model, '_requires_fsdp2_init', False):
+    requires_sft_init = getattr(model, '_requires_fsdp2_init', False)
+    if isinstance(requires_sft_init, bool) and requires_sft_init:
+        _require_distributed_initialized("SFT lazy initialization")
         context.is_sft = True
         log_rank_0("🔧 [Phase 1] Detected SFT lazy initialization")
 
@@ -303,7 +323,9 @@ def prepare_model_for_fsdp2(model: torch.nn.Module) -> ModelInitializationContex
         return context
 
     # Check for OSFT lazy initialization
-    elif getattr(model, 'requires_fsdp2_initialization', False):
+    requires_osft_init = getattr(model, 'requires_fsdp2_initialization', False)
+    if isinstance(requires_osft_init, bool) and requires_osft_init:
+        _require_distributed_initialized("OSFT lazy initialization")
         context.is_osft = True
         log_rank_0("🔧 [Phase 1] Detected OSFT lazy initialization")
 
@@ -426,6 +448,7 @@ def finalize_model_initialization(
     """
     # Handle SFT finalization
     if context.is_sft:
+        _require_distributed_initialized("SFT finalization")
         log_rank_0("🔄 [Phase 3] Finalizing SFT initialization")
 
         # Convert dtypes on rank 0 before broadcasting
@@ -457,6 +480,7 @@ def finalize_model_initialization(
 
     # Handle OSFT finalization
     elif context.is_osft:
+        _require_distributed_initialized("OSFT finalization")
         log_rank_0("🔄 [Phase 3] Finalizing OSFT initialization")
 
         # Step 1: Synchronize non-OSFT parameters across ranks
@@ -470,7 +494,9 @@ def finalize_model_initialization(
         log_rank_0("   ✓ OSFT parameters computed and distributed")
         log_rank_0("✅ [Phase 3] OSFT finalization complete")
     else:
-        raise ValueError("invalid model type, expected SFT or OSFT model")
+        if _distributed_initialized():
+            raise ValueError("invalid model type, expected SFT or OSFT model")
+        log_rank_0("ℹ️  [Phase 3] Non-distributed initialization detected, skipping distributed finalization logic")
 
     # Sanitize meta tensor attributes (common to all paths)
     fixed_generic = _sanitize_meta_attribute_aliases(model)
@@ -897,11 +923,13 @@ def setup_model(
             model = osft_cls.from_pretrained(
                 model_name_or_path,
                 fsdp2_lazy_init=False,  # never use lazy init for non-distributed
-                initialize_osft=True,   # initialize OSFT immediately
+                initialize_osft=False,  # initialize outside from_pretrained for consistency
                 **osft_kwargs,
                 **base_model_args,
             )
- 
+
+            model.reinitialize_osft(decompose_existing_weights=True)
+
         # capture impossible state
         if not model:
             raise RuntimeError("model is still None after OSFT model loading")
@@ -1016,6 +1044,7 @@ def setup_training_components(
     log_rank_0("=" * 80)
     log_rank_0("Model initialization pipeline complete")
     log_rank_0("=" * 80)
+    log_rank_0("Using FSDP2 wrapper")
 
     # Filter parameters to only include those that require gradients
     # This handles cases where some parameters (e.g., frozen router params) have requires_grad=False
@@ -1033,7 +1062,7 @@ def setup_training_components(
         betas=(0.9, 0.95),
         weight_decay=0.0,
     )
-    optimizer = optim_wrapper(optimizer, model)
+    optimizer = osft_utils.optim_wrapper(optimizer, model)
     # Prepare scheduler kwargs
     if scheduler_kwargs is None:
         scheduler_kwargs = {}
@@ -1048,4 +1077,3 @@ def setup_training_components(
     lr_scheduler.split_batches = True
     lr_scheduler.step() #the scheduler starts at 0 and there's no learning.
     return model, optimizer, lr_scheduler
-

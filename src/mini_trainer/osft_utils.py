@@ -877,9 +877,24 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             default_dtype = getattr(self, 'dtype', torch.bfloat16)
             self.output_dtype = output_dtype if output_dtype is not None else default_dtype
 
+            self._reset_osft_metadata()
+
             if initialize_osft:
                 log_rank_0("initializing OSFT model parameters")
                 self._initialize_osft_parameters(decompose_existing_weights=True)
+
+        def _reset_osft_metadata(self):
+            """
+            Reset tracking structures that tie original parameter names to their OSFT
+            projections. This keeps the non-distributed path aligned with the new
+            distributed initialization flow.
+            """
+            self.name_mapping = {}
+            self.logical_osft_keys = []
+            self.orig_param_registry = {}
+            self.osft_paramspec_registry = {}
+            self._osft_handles = {}
+            self.osft_params = {}
 
         @staticmethod
         def _load_non_distributed(
@@ -1323,6 +1338,8 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             to be meta. Assuming this is the case, we then stage the original weight matrices to become
             OSFT params.
             """
+            self._reset_osft_metadata()
+
             # verify everything is a meta device
             for k, p in self.state_dict().items():
                 if p.device.type != "meta":
@@ -1372,8 +1389,8 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             log_rank_0("🔄 [reinitialize_osft] Starting OSFT reinitialization")
             log_rank_0(f"   • decompose_existing_weights: {decompose_existing_weights}")
             log_rank_0(f"   • assigned_params: {len(assigned_params) if assigned_params else 'None (all params)'}")
-            
-            self.name_mapping = {}
+
+            self._reset_osft_metadata()
             
             log_rank_0("🚀 [reinitialize_osft] Calling _initialize_osft_parameters")
             self._initialize_osft_parameters(
@@ -1381,6 +1398,19 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 assigned_params=assigned_params,
             )
             log_rank_0("✅ [reinitialize_osft] Completed _initialize_osft_parameters")
+
+        def reinitialize_osft_distributed(self):
+            """
+            Convenience wrapper that mirrors the distributed lazy-init pipeline.
+
+            This is primarily used for tests to ensure the method exists, but it also
+            provides a single entry point for re-running the distributed initialization
+            sequence when torch.distributed is active.
+            """
+            if not self.fsdp2_lazy_init:
+                raise RuntimeError("reinitialize_osft_distributed is only valid when fsdp2_lazy_init=True")
+            self._pre_fsdp2_wrap_initialize_lazy_osft()
+            self._pre_fsdp2_wrap_synchronize_buffers()
 
 
         @property
@@ -1412,6 +1442,28 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             p = getattr(module, attr)
             setattr(p, "_osft_key", logical_key)
             self._osft_handles[logical_key] = (weakref(module), attr)
+
+        def _record_osft_factor_spec(self, logical_key: str, attr: str) -> OSFTFactorSpec:
+            """Create and store the factor spec describing where OSFT tensors live."""
+            parent_logical_key = (
+                logical_key.rsplit(".", 1)[0] if "." in logical_key else ""
+            )
+
+            def _compose(parent: str, suffix: str) -> str:
+                return f"{parent}.{suffix}" if parent else suffix
+
+            spec = OSFTFactorSpec(
+                parent_key=parent_logical_key,
+                U_high=_compose(parent_logical_key, "osft_U_high"),
+                S_high=_compose(parent_logical_key, "osft_S_high"),
+                V_high=_compose(parent_logical_key, "osft_V_high"),
+                U_low=_compose(parent_logical_key, "osft_params.U_low"),
+                S_low=_compose(parent_logical_key, "osft_params.S_low"),
+                V_low=_compose(parent_logical_key, "osft_params.V_low"),
+                rank_high=_compose(parent_logical_key, "osft_params.rank_high"),
+            )
+            self.osft_paramspec_registry[logical_key] = spec
+            return spec
 
         
         def eject_og_state_dict(self):
@@ -1466,10 +1518,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             # this we want to improve
             mod.add_module("osft_params", module_svd)
 
-            # here we want to idenitfy the name mapping
-            parent_logical_key = logical_key.removesuffix(f'.{attr}')
-
-
             # Override linear projection to use module-local OSFT params
             # Note: we use the logical key to look up the module dynamically via the handle registry
             # to ensure the reference survives FSDP2 wrapping and activation checkpointing
@@ -1496,16 +1544,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             # update the forward
             mod.forward = make_forward(logical_key)
             meta_weight.requires_grad = False
-            self.osft_paramspec_registry[logical_key] = OSFTFactorSpec(
-                parent_key=parent_logical_key,
-                U_high='.'.join([parent_logical_key, "osft_U_high"]),
-                S_high='.'.join([parent_logical_key, "osft_S_high"]),
-                V_high='.'.join([parent_logical_key, "osft_V_high"]),
-                U_low='.'.join([parent_logical_key, "osft_params", "U_low"]),
-                S_low='.'.join([parent_logical_key, "osft_params", "S_low"]),
-                V_low='.'.join([parent_logical_key, "osft_params", "V_low"]),
-                rank_high='.'.join([parent_logical_key, "osft_params", "rank_high"]),
-            )
+            self._record_osft_factor_spec(logical_key, attr)
 
             mod._parameters.pop(attr)
 
@@ -1562,15 +1601,29 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             log_rank_0("⚙️  [_initialize_osft_parameters] Starting parameter initialization")
             log_rank_0(f"   • decompose_existing_weights: {decompose_existing_weights}")
             
+            self._reset_osft_metadata()
+
             local_rank = int(os.getenv("LOCAL_RANK", 0))
 
-            # If assigned_params is provided, only process those parameters
+            all_named_params = list(self.named_parameters())
             if assigned_params is not None:
                 named_params = assigned_params
                 log_rank_0(f"   • Processing {len(assigned_params)} assigned parameters")
             else:
-                named_params = list(self.named_parameters())
+                named_params = all_named_params
                 log_rank_0(f"   • Processing all {len(named_params)} model parameters")
+
+            # Populate registry metadata so later distributed utilities can rely on it
+            for param_name, param in all_named_params:
+                role: Role = "osft_target" if param_name in self.osft_config else "non_osft"
+                self.orig_param_registry[param_name] = ParamSpec(
+                    role=role,
+                    dtype=param.dtype,
+                    logical_key=param_name,
+                    shape=param.shape,
+                )
+                if role == "osft_target":
+                    self.logical_osft_keys.append(param_name)
 
             # Show progress bar only on the rank doing the work
             if assigned_params is not None and len(assigned_params) > 0:
@@ -1678,6 +1731,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     param.requires_grad = False
                     # Remove original parameter so it doesn't get updated
                     mod._parameters.pop(attr, None)
+                    self._record_osft_factor_spec(name, attr)
                     torch.cuda.empty_cache()
                     
                     osft_params_processed += 1
@@ -1919,5 +1973,3 @@ def optim_wrapper(optimizer, model):
 
     optimizer.step = types.MethodType(step, optimizer)
     return optimizer
-
-

@@ -23,9 +23,12 @@ from transformers import (
     MistralForCausalLM,
     Qwen2Config,
     Qwen2ForCausalLM,
+    GPT2Config,
+    GPT2LMHeadModel,
 )
 
 from mini_trainer.setup_model_for_training import align_model_and_tokenizer, setup_model, setup_training_components
+from mini_trainer.osft_utils import create_osft_model_class, auto_generate_target_osft_config
 
 
 # TODO: add tests to validate our codebase works with these models 
@@ -177,13 +180,55 @@ class TestModelInitialization:
 
 class TestOSFTModelInitialization:
     """Test OSFT/orthogonal subspace learning with tiny models."""
-    
-    @pytest.mark.skipif(True, reason="OSFT initialization requires significant setup")
+
     def test_osft_model_creation(self):
-        """Test creating an OSFT model from a tiny base model."""
-        # This would require implementing OSFT for tiny models
-        # Skipping for now as it's complex and optional
-        pytest.skip("OSFT model tests require full OSFT implementation")
+        """End-to-end OSFT initialization on a tiny GPT2 model."""
+
+        # Create a tiny GPT-2 configuration to keep runtime small
+        config = GPT2Config(
+            vocab_size=128,
+            n_layer=2,
+            n_head=2,
+            n_embd=32,
+            n_positions=64,
+        )
+
+        # Instantiate a tiny GPT-2 model on CPU
+        base_model = GPT2LMHeadModel(config)
+        base_model.eval()
+
+        # Dynamically wrap the model with OSFT capabilities
+        OSFTModelCls = create_osft_model_class(GPT2LMHeadModel)
+        osft_config = auto_generate_target_osft_config(
+            base_model,
+            model_name_or_class="gpt2",
+            target_patterns=["attn.c_proj", "attn.c_attn", "mlp.c_fc", "mlp.c_proj"],
+            rank_ratio=0.5,
+        )
+
+        osft_model = OSFTModelCls(
+            config=config,
+            osft_config=osft_config,
+            initialize_osft=False,
+            upcast_dtype=torch.float32,
+            output_dtype=torch.float32,
+            fsdp2_lazy_init=False,
+        )
+
+        # initialize OSFT parameters in the non-distributed path
+        osft_model.reinitialize_osft(decompose_existing_weights=True)
+
+        # Validate that OSFT structures were created
+        assert hasattr(osft_model, "osft_paramspec_registry")
+        assert len(osft_model.osft_paramspec_registry) > 0
+        assert hasattr(osft_model, "name_mapping")
+        assert len(osft_model.name_mapping) > 0
+
+        # ensure we can reconstruct at least one parameter
+        first_key = next(iter(osft_model.name_mapping.values()))
+        reconstructed = osft_model._reconstruct_weight_by_safe_name(first_key)
+        assert isinstance(reconstructed, torch.Tensor)
+        assert reconstructed.ndim == 2
 
 
 
