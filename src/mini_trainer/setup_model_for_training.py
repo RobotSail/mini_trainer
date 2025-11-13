@@ -2,82 +2,22 @@ import json
 import gc
 import math
 import os
-from sre_parse import State
 from typing import Optional, Dict, Any
+import psutil
 import torch
 import torch.distributed as dist
-from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, OffloadPolicy, fully_shard
+from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
-from torch.distributed.checkpoint.state_dict import set_model_state_dict, set_state_dict, StateDictOptions, get_model_state_dict
 from torch.distributed.device_mesh import init_device_mesh
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, Mxfp4Config
+from torch.distributed.checkpoint.state_dict import set_model_state_dict, StateDictOptions
+from transformers import AutoTokenizer, AutoConfig, Mxfp4Config
 from mini_trainer.utils import get_model_class_from_config, log_rank_0, patch_target_module
-from mini_trainer.osft_utils import OSFTModel, _build_osft_kwargs, _initialize_osft_with_distribution, _set_osft_dtypes, create_osft_model_class
+from mini_trainer.osft_utils import OSFTModel, _build_osft_kwargs, create_osft_model_class, _configure_osft_model
 from mini_trainer.gpt_oss_utils import freeze_router_params, is_gpt_oss_model
+from mini_trainer.osft_utils import optim_wrapper
 
-
-def load_and_distribute_config(
-    model_class,
-    base_model_args: dict,
-    rank: int,
-) -> Any:
-    """
-    Load model config on rank 0 and distribute to all ranks.
-    
-    This function ensures memory-efficient config loading by:
-    1. Only rank 0 loads the actual model onto CPU
-    2. Config is extracted and deep-copied via serialization
-    3. Original model is deleted and garbage collected
-    4. Config dict is broadcast to all other ranks
-    
-    Args:
-        model_class: The model class to use for loading
-        model_name_or_path: Path to the pretrained model
-        base_model_args: Arguments for model loading
-        rank: Current process rank
-        
-    Returns:
-        The model config object (available on all ranks)
-    """
-    if rank == 0:
-        log_rank_0("📥 [Rank 0] Loading model to extract config...")
-        try:
-            # load the model on CPU only on rank 0
-            tmp = model_class.from_pretrained(**base_model_args)
-
-            # extract config as JSON string (this creates a deep copy disconnected from the model)
-            config_json = tmp.config.to_json_string()
-        finally:
-            # delete the model immediately to free memory
-            if 'tmp' in locals():
-                del tmp
-            torch.cuda.empty_cache()
-            log_rank_0("🗑️ [Rank 0] Model deleted, config extracted")
-    else:
-        config_json = None
-    
-    # broadcast the config JSON from rank 0 to all other ranks
-    log_rank_0("📡 Broadcasting config from rank 0 to all ranks...")
-    config_json_list = [config_json]
-    dist.broadcast_object_list(config_json_list, src=0)
-    config_json = config_json_list[0]
-    
-    # reconstruct config from JSON on all ranks
-    config_dict = json.loads(config_json)
-    model_type = config_dict.get("model_type")
-    if model_type is None:
-        raise ValueError("Config dict does not contain 'model_type' field")
-    
-    config = AutoConfig.for_model(**config_dict)
-    
-    import gc
-    gc.collect()
-
-    
-    log_rank_0(f"✅ Config distributed to all ranks (rank {rank})")
-    return config
 
 
 # New simple HF-only activation-checkpointing + FSDP2 wrapper
@@ -253,79 +193,6 @@ def _sanitize_meta_attribute_aliases(model: torch.nn.Module) -> int:
 # Generic distributed model loading abstractions for SFT/OSFT integration
 # ==============================================================================
 
-def _load_model_distributed_meta(
-    model_class,
-    model_name_or_path: str,
-    model_args: tuple,
-    model_kwargs: dict,
-):
-    """
-    Generic meta device loading for distributed training.
-    
-    This function implements the memory-efficient pattern where:
-    - Rank 0 loads the full model to CPU and extracts state dict
-    - All other ranks create meta device models
-    - Config and metadata are broadcast to all ranks
-    
-    This can be used by both OSFT and SFT implementations.
-    
-    Args:
-        model_class: The model class to use for loading
-        model_name_or_path: HuggingFace model name or path
-        model_args: Positional arguments for model loading
-        model_kwargs: Keyword arguments for model loading
-        
-    Returns:
-        Tuple of (config, state_dict, param_keys, buffer_dict)
-        - config: Model configuration (available on all ranks)
-        - state_dict: Full state dict (only on rank 0, None on others)
-        - param_keys: List of parameter keys (available on all ranks)
-        - buffer_dict: Dictionary of buffers (available on all ranks)
-    """
-    if not dist.is_available() or not dist.is_initialized():
-        raise RuntimeError("_load_model_distributed_meta requires torch.distributed to be initialized")
-    
-    config = None
-    state_dict = None
-    param_keys = []
-    buffer_dict = {}
-    
-    if dist.get_rank() == 0:
-        try:
-            with torch.no_grad():
-                log_rank_0(f"📥 Loading base model to CPU for distributed initialization...")
-                base_model = model_class.from_pretrained(
-                    model_name_or_path,
-                    *model_args,
-                    device_map='cpu',
-                    **model_kwargs,
-                )
-
-                # extract metadata
-                config = base_model.config
-                state_dict = base_model.state_dict()
-                param_keys = list(state_dict.keys())
-                buffer_dict = dict(base_model.named_buffers())
-        finally:
-            # clean up
-            if 'base_model' in locals():
-                del base_model
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            log_rank_0("🗑️ Base model deleted, metadata extracted")
-    
-    # broadcast metadata to all ranks
-    dist.barrier()
-    mailbox = [config, param_keys, buffer_dict]
-    dist.broadcast_object_list(mailbox, src=0)
-    
-    if dist.get_rank() != 0:
-        config, param_keys, buffer_dict = mailbox
-    
-    log_rank_0("✅ Model metadata distributed to all ranks")
-    return config, state_dict, param_keys, buffer_dict
-
-
 def _synchronize_state_dict_fsdp2(
     model,
     state_dict: dict[str, torch.Tensor],
@@ -341,7 +208,6 @@ def _synchronize_state_dict_fsdp2(
         state_dict: Full state dict (only populated on rank 0, None/empty on others)
         strict: Whether to enforce strict state dict loading
     """
-    from torch.distributed.checkpoint.state_dict import set_model_state_dict, StateDictOptions
     
     if not dist.is_available() or not dist.is_initialized():
         raise RuntimeError("_synchronize_state_dict_fsdp2 requires torch.distributed to be initialized")
@@ -366,82 +232,6 @@ def _synchronize_state_dict_fsdp2(
     )
     log_rank_0("✅ State dict synchronized across all ranks")
 
-
-def _wrap_model_fsdp2(
-    model: torch.nn.Module,
-    mp_policy: MixedPrecisionPolicy | None = None,
-) -> torch.nn.Module:
-    """
-    Generic FSDP2 wrapping logic for transformer models.
-    
-    This handles:
-    - Finding transformer blocks (e.g., model.layers, transformer.h)
-    - Applying activation checkpointing
-    - FSDP2 sharding per-block and full model
-    
-    Args:
-        model: The model to wrap
-        mp_policy: Mixed precision policy (defaults to BF16 params, FP32 reduce)
-        
-    Returns:
-        FSDP2-wrapped model
-    """
-    if not dist.is_available() or not dist.is_initialized():
-        raise RuntimeError("_wrap_model_fsdp2 requires torch.distributed to be initialized")
-    
-    # default mixed precision policy
-    if mp_policy is None:
-        mp_policy = MixedPrecisionPolicy(
-            param_dtype=torch.bfloat16,
-            reduce_dtype=torch.float32,
-        )
-    
-    # disable cache
-    if hasattr(model, 'config'):
-        try:
-            model.config.use_cache = False
-        except Exception as e:
-            log_rank_0(f"WARNING: Failed to disable cache: {e}")
-    
-    # find transformer blocks
-    if hasattr(model, "model") and hasattr(model.model, "layers"):
-        layers = model.model.layers
-    elif hasattr(model, "transformer") and hasattr(model.transformer, "h"):
-        layers = model.transformer.h
-    else:
-        raise ValueError("Cannot find transformer block container (model.layers or transformer.h)")
-    
-    # apply activation checkpointing to each block
-    log_rank_0("🔄 Applying activation checkpointing to transformer blocks")
-    for idx, block in enumerate(layers):
-        layers[idx] = ptd_checkpoint_wrapper(block, preserve_rng_state=False)
-    
-    # create device mesh
-    world_size = dist.get_world_size()
-    mesh = init_device_mesh("cuda", [world_size], mesh_dim_names=["fsdp"])
-    
-    # wrap each block with FSDP2
-    log_rank_0(f"🔄 Wrapping {len(layers)} transformer blocks with FSDP2")
-    for idx, block in enumerate(layers):
-        reshard = idx < len(layers) - 1
-        fully_shard(
-            block,
-            mesh=mesh,
-            mp_policy=mp_policy,
-            reshard_after_forward=reshard,
-        )
-    
-    # wrap full model
-    log_rank_0("🔄 Wrapping full model with FSDP2")
-    fully_shard(
-        model,
-        mesh=mesh,
-        mp_policy=mp_policy,
-        reshard_after_forward=True,
-    )
-    
-    log_rank_0("✅ FSDP2 wrapping complete")
-    return model
 
 
 def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
@@ -554,8 +344,7 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
         raise ValueError("Cannot find transformer block container on model. This likely means we need to update the code to support this model.")
 
 
-    # # TODO: make this work again
-    # # # 2) Activation checkpoint each block
+    # 2) Activation checkpoint each block
     for idx, block in enumerate(layers):
         layers[idx] = ptd_checkpoint_wrapper(block, preserve_rng_state=False)
 
@@ -779,7 +568,6 @@ def setup_osft_model_distributed(
     model_name_or_path: str,
     base_model_args: dict,
     tokenizer,
-    is_gpt_oss: bool,  
     rank: int,
     osft_rank_ratio=None,
     osft_target_patterns=None,
@@ -800,7 +588,6 @@ def setup_osft_model_distributed(
         model_name_or_path: HuggingFace model name or path
         base_model_args: Base arguments for model loading
         tokenizer: Tokenizer for model alignment
-        is_gpt_oss: Whether this is a GPT-OSS model
         rank: Current process rank
         osft_rank_ratio: Ratio for OSFT rank selection
         osft_target_patterns: Patterns for selecting OSFT target parameters
@@ -840,12 +627,10 @@ def setup_osft_model_distributed(
     )
     
     # apply common OSFT configuration
-    from mini_trainer.osft_utils import _configure_osft_model
     model = _configure_osft_model(model, tokenizer, osft_upcast_dtype, osft_output_dtype)
 
 
     # Print CPU memory utilization on each node
-    import psutil
     process = psutil.Process()
     mem_info = process.memory_info()
     mem_rss_gb = mem_info.rss / (1024 ** 3)  # Convert bytes to GB
@@ -1057,7 +842,6 @@ def setup_model(
                 model_name_or_path=model_name_or_path,
                 base_model_args=base_model_args,
                 tokenizer=tokenizer,
-                is_gpt_oss=is_gpt_oss,
                 rank=local_rank,
                 osft_rank_ratio=osft_rank_ratio,
                 osft_target_patterns=osft_target_patterns,
@@ -1080,7 +864,6 @@ def setup_model(
             )
             
             # apply common configuration
-            from mini_trainer.osft_utils import _configure_osft_model
             model = _configure_osft_model(model, tokenizer, osft_upcast_dtype, effective_osft_output_dtype)
             
             return model
@@ -1188,7 +971,6 @@ def setup_training_components(
         weight_decay=0.0,
         foreach=False
     )
-    from mini_trainer.osft_utils import optim_wrapper
     optimizer = optim_wrapper(optimizer, model)
     # Prepare scheduler kwargs
     if scheduler_kwargs is None:

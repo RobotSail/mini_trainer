@@ -357,7 +357,6 @@ def test_osft_orthogonalization(
         osft_upcast_dtype=torch.float32,
         osft_rank_ratio=osft_rank_ratio,
         use_liger_kernels=False,
-        osft_memory_efficient_init=False,
     )
 
     # Verify it's an OSFT model
