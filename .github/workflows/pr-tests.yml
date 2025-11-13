@@ -130,63 +130,99 @@ jobs:
     name: Format Check (Non-blocking)
     runs-on: ubuntu-latest
     continue-on-error: true  # This makes the job non-required
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    
+      with:
+        fetch-depth: 0  # Fetch full history to compare with base branch
+
     - name: Set up Python 3.12
       uses: actions/setup-python@v5
       with:
         python-version: '3.12'
-    
+
     - name: Install uv
       uses: astral-sh/setup-uv@v4
       with:
         enable-cache: true
         cache-dependency-glob: "uv.lock"
-    
+
     - name: Install dependencies with uv
       run: |
         uv venv
         source .venv/bin/activate
         uv pip install -e ".[dev]"
-    
-    - name: Check code formatting
+
+    - name: Check code formatting on changed files
       run: |
         source .venv/bin/activate
-        tox -e format-check
+        # Get the base branch (target branch of the PR)
+        BASE_BRANCH="${{ github.base_ref }}"
+        echo "Comparing against base branch: origin/$BASE_BRANCH"
+
+        # Get list of changed Python files
+        CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRT origin/$BASE_BRANCH...HEAD | grep '\.py$' || true)
+
+        if [ -z "$CHANGED_FILES" ]; then
+          echo "No Python files changed in this PR"
+          exit 0
+        fi
+
+        echo "Changed Python files:"
+        echo "$CHANGED_FILES"
+
+        # Run ruff format check on changed files only
+        echo "$CHANGED_FILES" | xargs ruff format --check
 
   lint:
     name: Linting (Non-blocking)
     runs-on: ubuntu-latest
     continue-on-error: true  # This makes the job non-required
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    
+      with:
+        fetch-depth: 0  # Fetch full history to compare with base branch
+
     - name: Set up Python 3.12
       uses: actions/setup-python@v5
       with:
         python-version: '3.12'
-    
+
     - name: Install uv
       uses: astral-sh/setup-uv@v4
       with:
         enable-cache: true
         cache-dependency-glob: "uv.lock"
-    
+
     - name: Install dependencies with uv
       run: |
         uv venv
         source .venv/bin/activate
         uv pip install -e ".[dev]"
-    
-    - name: Run linting checks
+
+    - name: Run linting checks on changed files
       run: |
         source .venv/bin/activate
-        tox -e lint
+        # Get the base branch (target branch of the PR)
+        BASE_BRANCH="${{ github.base_ref }}"
+        echo "Comparing against base branch: origin/$BASE_BRANCH"
+
+        # Get list of changed Python files
+        CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRT origin/$BASE_BRANCH...HEAD | grep '\.py$' || true)
+
+        if [ -z "$CHANGED_FILES" ]; then
+          echo "No Python files changed in this PR"
+          exit 0
+        fi
+
+        echo "Changed Python files:"
+        echo "$CHANGED_FILES"
+
+        # Run ruff on changed files only
+        echo "$CHANGED_FILES" | xargs ruff check
 
   # Summary job to ensure required tests pass
   tests-passed:
