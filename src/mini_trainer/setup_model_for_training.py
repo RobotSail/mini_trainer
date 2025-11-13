@@ -955,7 +955,7 @@ def setup_model(
         "GraniteMoeHybridForCausalLM",
         "Qwen2ForCausalLM",
         "Phi3ForCausalLM",  # covers phi3 and phi4
-        # NEED TO CHECK QWEN3
+        "Qwen3ForCausalLM",
     ]:
         log_rank_0(
             f"\033[38;2;255;255;0mWarning: Model class name: {class_name} is not in the list of supported models.\033[0m",
