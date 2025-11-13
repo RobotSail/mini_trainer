@@ -44,8 +44,12 @@ class ParamSpec:
 class OSFTFactorSpec:
     parent_key: str                  # e.g., "transformer.blocks.12.attn.q_proj"
     # Derived runtime keys that will exist after OSFT install:
-    U_high: str; S_high: str; V_high: str
-    U_low: str;  S_low: str;  V_low: str
+    U_high: str
+    S_high: str
+    V_high: str
+    U_low: str
+    S_low: str
+    V_low: str
     rank_high: str
 
 
@@ -121,7 +125,10 @@ OSFT_BASE_MODEL_FILTERED_PARAMS = {
 
 # Parameters that OSFT class constructors can handle
 OSFT_CLASS_PARAMS = {
-    'upcast_dtype', 'output_dtype', 'model_name_or_class'
+    'upcast_dtype',
+    'output_dtype',
+    'model_name_or_class',
+    'lazy_init_tokenizer_align_fn',
 }
 
 
@@ -676,13 +683,12 @@ def _load_model_memory_efficient(
     # Remove additional OSFT parameters before calling base model's from_pretrained
     final_base_kwargs = _filter_osft_parameters(base_kwargs, OSFT_BASE_MODEL_FILTERED_PARAMS)
     
-    # Force CPU loading and use the train_dtype for consistency with FSDP2
+    # Force CPU loading via default behavior and match the train_dtype for FSDP2
     # Need to get train_dtype from base_kwargs or default to float32
     load_dtype = base_kwargs.get('torch_dtype', None)
     if load_dtype is None:
         raise ValueError("error: model does not have a `torch_dtype` setting, please report this to the developers")
     final_base_kwargs['torch_dtype'] = load_dtype
-    final_base_kwargs['device_map'] = 'cpu'
 
     
     # initialize params to instance the OSFT model
@@ -706,6 +712,10 @@ def _load_model_memory_efficient(
                 *model_args,
                 **final_base_kwargs,
             )
+
+            align_fn = osft_class_kwargs.get('lazy_init_tokenizer_align_fn')
+            if align_fn:
+                base_model = align_fn(base_model)
 
             # Extract config and state dict immediately
             config = base_model.config
@@ -1029,7 +1039,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             # choose loading path based on fsdp2_lazy_init flag
             if fsdp2_lazy_init:
                 # memory-efficient distributed loading
-                log_rank_0(f"🧠 distributed environment detected, using memory-efficient loading strategy")
+                log_rank_0("🧠 distributed environment detected, using memory-efficient loading strategy")
                 model = _load_model_memory_efficient(
                     actual_osft_cls,
                     pretrained_model_name_or_path,

@@ -10,15 +10,15 @@ Tests validate:
 
 import pytest
 import tempfile
-import json
 import torch
 import torch.nn as nn
 from pathlib import Path
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 import subprocess
 
-from mini_trainer.api_train import run_training, StreamablePopen
-from mini_trainer.training_types import TorchrunArgs, TrainingArgs, TrainingMode
+from mini_trainer.api_train import run_training
+from mini_trainer.training_types import TorchrunArgs, TrainingArgs
+import mini_trainer.osft_utils as osft_module
 from mini_trainer.osft_utils import (
     auto_generate_target_osft_config, 
     get_model_config, 
@@ -27,6 +27,7 @@ from mini_trainer.osft_utils import (
     MODEL_CONFIGS,
     _get_model_patterns_from_name,
     optim_wrapper,
+    _load_model_memory_efficient,
 )
 from mini_trainer.setup_model_for_training import setup_model
 from tests.test_utils.orthogonality import (
@@ -840,7 +841,7 @@ class TestSetupModelIntegration:
         mock_transformers_auto_config.from_pretrained.return_value = mock_osft_config
         
         # Call setup_model with OSFT params
-        model = setup_model(
+        setup_model(
             osft=True,
             local_rank=0,
             osft_rank_ratio=0.75,
@@ -1358,6 +1359,68 @@ class TestOSFTOrthogonality:
         summary = tracker.get_summary()
         assert "FAILED" in summary
         assert "param2" in summary
+
+
+class TestLazyInitTokenizerAlignment:
+    """Ensure memory-efficient loading aligns tokenizers before broadcasting."""
+
+    def test_memory_efficient_loading_calls_alignment_hook(self, monkeypatch):
+        """Alignment hook should run on the fully materialized CPU model."""
+        loaded_models = []
+
+        class DummyLoadedModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.config = MagicMock()
+                self.config.vocab_size = 10
+                self.aligned = False
+
+            def state_dict(self):
+                return {"weight": torch.zeros(1)}
+
+            def named_buffers(self):
+                return [("buffer", torch.zeros(1))]
+
+        class DummyBase(nn.Module):
+            def __init__(self):
+                super().__init__()
+
+            @classmethod
+            def from_pretrained(cls, *args, **kwargs):
+                model = DummyLoadedModel()
+                loaded_models.append(model)
+                return model
+
+        class DummyOSFT(DummyBase):
+            def __init__(self, config, **kwargs):
+                super().__init__()
+                self.config = config
+                self._lazy_init_pending = True
+
+        def _align(model):
+            model.aligned = True
+            return model
+
+        align_mock = MagicMock(side_effect=_align)
+
+        monkeypatch.setattr(osft_module.dist, "is_available", lambda: True)
+        monkeypatch.setattr(osft_module.dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(osft_module.dist, "get_rank", lambda: 0)
+        monkeypatch.setattr(osft_module.dist, "barrier", lambda: None)
+        monkeypatch.setattr(osft_module.dist, "broadcast_object_list", lambda *_, **__: None)
+        monkeypatch.setattr(osft_module.torch.cuda, "is_available", lambda: False)
+
+        model = _load_model_memory_efficient(
+            actual_osft_cls=DummyOSFT,
+            pretrained_model_name_or_path="dummy",
+            model_args=tuple(),
+            base_kwargs={"torch_dtype": torch.float32},
+            osft_class_kwargs={"lazy_init_tokenizer_align_fn": align_mock},
+        )
+
+        assert isinstance(model, DummyOSFT)
+        assert align_mock.call_count == 1
+        assert loaded_models and loaded_models[0].aligned is True
 
 
 if __name__ == "__main__":

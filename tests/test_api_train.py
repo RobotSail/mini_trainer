@@ -4,7 +4,7 @@ import pytest
 import tempfile
 import json
 from pathlib import Path
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 import subprocess
 
 from mini_trainer.api_train import (
@@ -28,7 +28,7 @@ class TestDataclasses:
         assert args.nproc_per_node == 1
         assert args.node_rank == 0
         assert args.rdzv_id == 123
-        assert args.rdzv_endpoint == None
+        assert args.rdzv_endpoint is None
         
         # Test with custom nproc_per_node only
         args = TorchrunArgs(nproc_per_node=8)
@@ -590,17 +590,6 @@ for i, arg in enumerate(sys.argv):
             with patch('mini_trainer.api_train.Path') as mock_path:
                 # Make the train script path point to our mock script
                 mock_path.return_value.__truediv__.return_value = mock_script
-                
-                torch_args = TorchrunArgs()  # Both are defaults now
-                train_args = TrainingArgs(
-                    model_name_or_path="test-model",
-                    data_path="test.jsonl",
-                    batch_size=32,
-                    max_tokens_per_gpu=1000,
-                    learning_rate=1e-5,
-                    output_dir=tmpdir,
-                    lr_scheduler_kwargs=None  # Should default to empty dict
-                )
                 
                 # Capture the subprocess output
                 with patch('subprocess.Popen') as mock_popen:

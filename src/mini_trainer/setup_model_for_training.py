@@ -1,5 +1,3 @@
-import json
-import gc
 import math
 import os
 from typing import Optional, Dict, Any
@@ -671,7 +669,13 @@ def setup_osft_model_distributed(
         "fsdp2_lazy_init": True,
         **osft_kwargs,
     }
- 
+
+    # Provide an alignment hook so rank 0 can adjust embeddings before broadcasting
+    def _lazy_align(model):
+        return align_model_and_tokenizer(model, tokenizer)
+
+    model_load_args["lazy_init_tokenizer_align_fn"] = _lazy_align
+
 
     log_rank_0("loading OSFT model")
     model: OSFTModel = osft_cls.from_pretrained(
@@ -742,8 +746,9 @@ def setup_sft_model_distributed(
         log_rank_0("rank 0: loading model to CPU")
         try:
             with torch.no_grad():
-                # Load model with device_map='cpu' to keep it on CPU
-                cpu_model = ModelClass.from_pretrained(**base_model_args, device_map='cpu')
+                # Default load targets CPU when no device_map or accelerate is present
+                cpu_model = ModelClass.from_pretrained(**base_model_args)
+                cpu_model = align_model_and_tokenizer(cpu_model, tokenizer)
                 config = cpu_model.config
                 state_dict = cpu_model.state_dict()
                 buffer_dict = dict(cpu_model.named_buffers())  # Extract all buffers
@@ -820,7 +825,7 @@ def setup_model(
     
     # Check if flash_attn is available and set appropriate attention implementation
     try:
-        import flash_attn
+        import flash_attn as _  # noqa: F401
         if is_gpt_oss:
             base_model_args["attn_implementation"] = "kernels-community/vllm-flash-attn3"
             log_rank_0("Set attention implementation to vllm-flash-attn3 for GPT-OSS")

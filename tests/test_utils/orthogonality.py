@@ -10,7 +10,7 @@ in unit tests that don't require full-scale distributed training.
 
 import torch
 import math
-from typing import Dict, List, Optional
+from typing import Dict, List
 from dataclasses import dataclass
 
 
@@ -167,7 +167,7 @@ def compute_angle_differences(A: torch.Tensor, B: torch.Tensor = None, top_n: in
         top_diffs, _ = torch.topk(diff_flat, min(top_n, len(diff_flat)))
         return top_diffs.cpu().tolist()
 
-    except Exception as e:
+    except Exception:
         return []
 
 

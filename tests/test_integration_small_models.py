@@ -11,9 +11,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import json
 import tempfile
 import torch
-import torch.nn as nn
 import pytest
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from transformers import (
@@ -27,7 +25,7 @@ from transformers import (
     GPT2LMHeadModel,
 )
 
-from mini_trainer.setup_model_for_training import align_model_and_tokenizer, setup_model, setup_training_components
+from mini_trainer.setup_model_for_training import align_model_and_tokenizer, setup_training_components
 from mini_trainer.osft_utils import create_osft_model_class, auto_generate_target_osft_config
 
 

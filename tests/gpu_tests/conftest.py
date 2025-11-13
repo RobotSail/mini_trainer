@@ -33,7 +33,7 @@ def gpu_count():
 def flash_attn_available():
     """Check if flash attention is available."""
     try:
-        import flash_attn
+        import flash_attn as _  # noqa: F401
         return True
     except ImportError:
         return False

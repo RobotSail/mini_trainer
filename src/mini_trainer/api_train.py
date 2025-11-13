@@ -159,7 +159,7 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
             command.append(f"--validation-frequency={train_args.validation_frequency}")
 
         if train_args.save_best_val_loss:
-            command.append(f"--save-best-val-loss")
+            command.append("--save-best-val-loss")
             command.append(f"--val-loss-improvement-threshold={train_args.val_loss_improvement_threshold}")
 
     # Add optional min_samples_per_checkpoint if specified

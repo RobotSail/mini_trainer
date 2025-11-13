@@ -1,7 +1,7 @@
 # User-added stuff
 wandb/**/*
 
-# Byte-compiled / optimized / DLL files
+# Byte-copiled / optimized / DLL files
 __pycache__/
 *.py[codz]
 *$py.class

@@ -315,7 +315,7 @@ def convert_dequantized_to_quantized_format_correct(state_dict: Dict[str, torch.
             scales_u8 = (scales_i8.to(torch.int32) + 127).clamp(0, 255).to(torch.uint8)
 
             # OPTIMIZATION: Move results back to CPU immediately to free GPU memory
-            logger.info(f"   📥 Moving quantized results back to CPU to free GPU memory")
+            logger.info("   📥 Moving quantized results back to CPU to free GPU memory")
             converted_state_dict[blocks_name] = blocks_u8.cpu()
             converted_state_dict[scales_name] = scales_u8.cpu()
 

@@ -11,10 +11,8 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
-import torch.nn as nn
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock, call
-from transformers import AutoConfig
+from unittest.mock import MagicMock, patch
 
 from mini_trainer.setup_model_for_training import (
     wrap_fsdp2,
@@ -60,20 +58,20 @@ class TestAlignModelAndTokenizer:
         """Test vocab resizing when tokenizer has more tokens."""
         mock_tokenizer.__len__ = MagicMock(return_value=32005)
         
-        with patch('mini_trainer.setup_model_for_training.log_rank_0') as mock_log:
-            result = align_model_and_tokenizer(mock_model, mock_tokenizer)
+        with patch('mini_trainer.setup_model_for_training.log_rank_0'):
+            mock_model = align_model_and_tokenizer(mock_model, mock_tokenizer)
         
         # Should resize to next multiple of 8
         mock_model.resize_token_embeddings.assert_called_once_with(32008)
     
-    def test_align_fix_special_tokens(self, mock_model, mock_tokenizer):
+    @patch('mini_trainer.setup_model_for_training.log_rank_0')
+    def test_align_fix_special_tokens(self, mock_log, mock_model, mock_tokenizer):
         """Test fixing mismatched special tokens."""
         mock_model.config.pad_token_id = 999
         mock_model.config.bos_token_id = 998
         mock_model.config.eos_token_id = 997
         
-        with patch('mini_trainer.setup_model_for_training.log_rank_0') as mock_log:
-            result = align_model_and_tokenizer(mock_model, mock_tokenizer)
+        mock_model = align_model_and_tokenizer(mock_model, mock_tokenizer)
         
         # Special tokens should be aligned
         assert mock_model.config.pad_token_id == 0
@@ -83,13 +81,13 @@ class TestAlignModelAndTokenizer:
         # Should have logged warnings
         assert mock_log.call_count == 3
     
-    def test_align_none_special_tokens(self, mock_model, mock_tokenizer):
+    @patch('mini_trainer.setup_model_for_training.log_rank_0')
+    def test_align_none_special_tokens(self, mock_log, mock_model, mock_tokenizer):
         """Test handling of None special tokens."""
         mock_model.config.pad_token_id = None
         mock_tokenizer.pad_token_id = None
         
-        with patch('mini_trainer.setup_model_for_training.log_rank_0') as mock_log:
-            result = align_model_and_tokenizer(mock_model, mock_tokenizer)
+        mock_model = align_model_and_tokenizer(mock_model, mock_tokenizer)
         
         # None values should be left alone
         assert mock_model.config.pad_token_id is None
@@ -127,10 +125,11 @@ class TestWrapFSDP2:
         mock_init_mesh.return_value = mock_mesh
         mock_checkpoint.side_effect = lambda x, **kwargs: x
         
-        result = wrap_fsdp2(mock_model)
+        wrapped_model = wrap_fsdp2(mock_model)
         
         # Should disable cache
-        assert mock_model.config.use_cache == False
+        assert not mock_model.config.use_cache
+        assert wrapped_model == mock_model
         
         # Should wrap each layer with checkpoint wrapper
         assert mock_checkpoint.call_count == 4
@@ -154,13 +153,24 @@ class TestWrapFSDP2:
         mock_init_mesh.return_value = mock_mesh
         mock_checkpoint.side_effect = lambda x, **kwargs: x
         
-        # Model should be moved to correct GPU (ensure it's not memory-constrained)
-        mock_model.device = torch.device('cpu')
-        # Make sure the model doesn't have _target_device (which would make it memory-constrained)
-        if hasattr(mock_model, '_target_device'):
-            delattr(mock_model, '_target_device')
+        mock_model = wrap_fsdp2(mock_model)
         
-        result = wrap_fsdp2(mock_model)
+        # Should disable cache
+        assert not mock_model.config.use_cache
+        
+        # Should wrap each layer with checkpoint wrapper
+        assert mock_checkpoint.call_count == 4
+        
+        # Should create device mesh with world size 4
+        mock_init_mesh.assert_called_once_with("cuda", [4], mesh_dim_names=["fsdp"])
+        
+        # Should fully shard each layer and the model (4 layers + 1 model = 5 calls)
+        assert mock_fully_shard.call_count == 5
+        
+        # Verify that fully_shard was called with the mesh
+        for call in mock_fully_shard.call_args_list:
+            assert 'mesh' in call.kwargs
+            assert call.kwargs['mesh'] == mock_mesh
         
         # FSDP2 handles GPU placement automatically, so no explicit .to() call
     
@@ -285,7 +295,7 @@ class TestSetupTrainingComponents:
         )
         
         # Check scheduler properties and step
-        assert lr_scheduler.split_batches == True
+        assert lr_scheduler.split_batches
         lr_scheduler.step.assert_called_once()
     
     @patch('mini_trainer.setup_model_for_training.wrap_fsdp2')
@@ -332,58 +342,57 @@ class TestIntegration:
         # Skipping for unit tests to avoid downloading models
         pytest.skip("Integration test requiring actual model download")
     
-    def test_end_to_end_mock(self):
+    @patch('mini_trainer.osft_utils.optim_wrapper')
+    @patch('transformers.get_scheduler')
+    @patch('mini_trainer.setup_model_for_training.torch.optim.AdamW')
+    @patch('mini_trainer.setup_model_for_training.log_rank_0')
+    @patch('mini_trainer.setup_model_for_training.wrap_fsdp2')
+    @patch('transformers.AutoConfig.from_pretrained')
+    @patch('transformers.AutoModelForCausalLM.from_pretrained')
+    @patch('transformers.AutoTokenizer.from_pretrained')
+    def test_end_to_end_mock(self, mock_tok, mock_model_cls, mock_config, mock_wrap,
+                            mock_log, mock_adamw, mock_sched, mock_opt_wrap):
         """Test end-to-end flow with mocks."""
-        with (
-            patch('transformers.AutoTokenizer.from_pretrained') as mock_tok,
-            patch('transformers.AutoModelForCausalLM.from_pretrained') as mock_model_cls,
-            patch('transformers.AutoConfig.from_pretrained') as mock_config,
-            patch('mini_trainer.setup_model_for_training.wrap_fsdp2') as mock_wrap,
-            patch('mini_trainer.setup_model_for_training.log_rank_0'),
-            patch('mini_trainer.setup_model_for_training.torch.optim.AdamW') as mock_adamw,
-            patch('transformers.get_scheduler') as mock_sched,
-            patch('mini_trainer.osft_utils.optim_wrapper') as mock_opt_wrap
-        ):
-            # Setup tokenizer mock
-            mock_tokenizer = MagicMock()
-            mock_tokenizer.__len__ = MagicMock(return_value=32000)
-            mock_tok.return_value = mock_tokenizer
-            
-            # Setup model mock
-            mock_model = MagicMock()
-            mock_model.__class__.__name__ = "LlamaForCausalLM"
-            mock_model.config = MagicMock()
-            mock_model.config.vocab_size = 32000
-            mock_model.parameters = MagicMock(return_value=[MagicMock()])
-            mock_model_cls.return_value = mock_model
-            mock_wrap.return_value = mock_model
-            
-            # Setup optimizer and scheduler mocks
-            mock_optimizer = MagicMock()
-            mock_adamw.return_value = mock_optimizer
-            mock_opt_wrap.return_value = mock_optimizer
-            mock_scheduler = MagicMock()
-            mock_sched.return_value = mock_scheduler
-            
-            # Setup model
-            model = setup_model(
-                model_name_or_path="test/model",
-                use_liger_kernels=False,
-                osft=False,
-                local_rank=0
-            )
-            
-            # Setup training components
-            model, optimizer, scheduler = setup_training_components(
-                model,
-                learning_rate=1e-5,
-                num_warmup_steps=10,
-                lr_scheduler="constant"
-            )
-            
-            assert model is not None
-            assert optimizer is not None
-            assert scheduler is not None
+        # Setup tokenizer mock
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.__len__ = MagicMock(return_value=32000)
+        mock_tok.return_value = mock_tokenizer
+        
+        # Setup model mock
+        mock_model = MagicMock()
+        mock_model.__class__.__name__ = "LlamaForCausalLM"
+        mock_model.config = MagicMock()
+        mock_model.config.vocab_size = 32000
+        mock_model.parameters = MagicMock(return_value=[MagicMock()])
+        mock_model_cls.return_value = mock_model
+        mock_wrap.return_value = mock_model
+        
+        # Setup optimizer and scheduler mocks
+        mock_optimizer = MagicMock()
+        mock_adamw.return_value = mock_optimizer
+        mock_opt_wrap.return_value = mock_optimizer
+        mock_scheduler = MagicMock()
+        mock_sched.return_value = mock_scheduler
+        
+        # Setup model
+        model = setup_model(
+            model_name_or_path="test/model",
+            use_liger_kernels=False,
+            osft=False,
+            local_rank=0
+        )
+        
+        # Setup training components
+        model, optimizer, scheduler = setup_training_components(
+            model,
+            learning_rate=1e-5,
+            num_warmup_steps=10,
+            lr_scheduler="constant"
+        )
+        
+        assert model is not None
+        assert optimizer is not None
+        assert scheduler is not None
 
 
 if __name__ == "__main__":
