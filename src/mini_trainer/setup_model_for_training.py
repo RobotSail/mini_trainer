@@ -989,8 +989,7 @@ def setup_model(
             base_model_args["attn_implementation"] = "kernels-community/vllm-flash-attn3"
             log_rank_0("Set attention implementation to vllm-flash-attn3 for GPT-OSS")
         else:
-            if 'granite-4' not in model_name_or_path:
-                base_model_args["attn_implementation"] = "flash_attention_2"
+            base_model_args["attn_implementation"] = "flash_attention_2"
 
     except ImportError as e:
         if os.environ.get("TESTING", "false").lower() == "true":
@@ -1116,6 +1115,7 @@ def setup_model(
     if class_name.endswith("WithOSFT"):
         class_name = class_name[:-8]  # Remove "WithOSFT"
     
+    # List of supported architectures
     if class_name not in [
         "MistralForCausalLM",
         "GPTDolomiteForCausalLM", 
@@ -1124,6 +1124,10 @@ def setup_model(
         "GemmaForCausalLM",
         "MixtralForCausalLM",
         "GraniteForCausalLM",
+        "GraniteMoeHybridForCausalLM",
+        "Qwen2ForCausalLM",
+        "Phi3ForCausalLM",  # covers phi3 and phi4
+        # NEED TO CHECK QWEN3
     ]:
         log_rank_0(
             f"\033[38;2;255;255;0mWarning: Model class name: {class_name} is not in the list of supported models.\033[0m",
