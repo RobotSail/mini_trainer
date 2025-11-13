@@ -17,6 +17,12 @@ from mini_trainer.utils import get_model_class_from_config, log_rank_0, patch_ta
 from mini_trainer.osft_utils import OSFTModel, _build_osft_kwargs, create_osft_model_class, _set_osft_dtypes
 from mini_trainer.gpt_oss_utils import freeze_router_params, is_gpt_oss_model
 import mini_trainer.osft_utils as osft_utils
+from mini_trainer.fsdp2_lazy_init import (
+    FSDP2_LAZY_INIT_SFT,
+    FSDP2_LAZY_INIT_OSFT,
+    get_fsdp2_lazy_init_mode,
+    set_fsdp2_lazy_init_mode,
+)
 
 
 def _distributed_initialized() -> bool:
@@ -289,9 +295,9 @@ def prepare_model_for_fsdp2(model: torch.nn.Module) -> ModelInitializationContex
     """
     context = ModelInitializationContext()
 
-    # Check for SFT lazy initialization
-    requires_sft_init = getattr(model, '_requires_fsdp2_init', False)
-    if isinstance(requires_sft_init, bool) and requires_sft_init:
+    init_mode = get_fsdp2_lazy_init_mode(model)
+
+    if init_mode == FSDP2_LAZY_INIT_SFT:
         _require_distributed_initialized("SFT lazy initialization")
         context.is_sft = True
         log_rank_0("🔧 [Phase 1] Detected SFT lazy initialization")
@@ -315,16 +321,13 @@ def prepare_model_for_fsdp2(model: torch.nn.Module) -> ModelInitializationContex
             _materialize_meta_buffers(model, buffer_dict, expected_dtype=None)
 
         # Clean up temporary attributes
-        model._requires_fsdp2_init = False
         model._fsdp2_pending_state_dict = None
         model._fsdp2_pending_buffers = None
 
         log_rank_0("✅ [Phase 1] SFT preparation complete")
         return context
 
-    # Check for OSFT lazy initialization
-    requires_osft_init = getattr(model, 'requires_fsdp2_initialization', False)
-    if isinstance(requires_osft_init, bool) and requires_osft_init:
+    if init_mode == FSDP2_LAZY_INIT_OSFT:
         _require_distributed_initialized("OSFT lazy initialization")
         context.is_osft = True
         log_rank_0("🔧 [Phase 1] Detected OSFT lazy initialization")
@@ -492,11 +495,17 @@ def finalize_model_initialization(
         log_rank_0("🔄 [OSFT] Computing distributed SVD for OSFT parameters")
         model.compute_distributed_svd(model, context.state_dict)
         log_rank_0("   ✓ OSFT parameters computed and distributed")
+
+        if hasattr(model, "_lazy_init_pending"):
+            model._lazy_init_pending = False
         log_rank_0("✅ [Phase 3] OSFT finalization complete")
     else:
         if _distributed_initialized():
             raise ValueError("invalid model type, expected SFT or OSFT model")
         log_rank_0("ℹ️  [Phase 3] Non-distributed initialization detected, skipping distributed finalization logic")
+
+    if context.is_sft or context.is_osft:
+        set_fsdp2_lazy_init_mode(model, None)
 
     # Sanitize meta tensor attributes (common to all paths)
     fixed_generic = _sanitize_meta_attribute_aliases(model)
@@ -766,7 +775,7 @@ def setup_sft_model_distributed(
     model._fsdp2_pending_state_dict = state_dict if dist.get_rank() == 0 else None
     model._fsdp2_pending_buffers = buffer_dict  # All ranks have buffer_dict
     model._fsdp2_train_dtype = train_dtype  # Store train_dtype for dtype conversion
-    model._requires_fsdp2_init = True
+    set_fsdp2_lazy_init_mode(model, FSDP2_LAZY_INIT_SFT)
 
     log_rank_0("meta model created, ready for FSDP2 wrapping")
     return model

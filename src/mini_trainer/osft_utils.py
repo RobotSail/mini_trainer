@@ -16,6 +16,11 @@ from tqdm import tqdm
 from mini_trainer.utils import log_rank_0
 from mini_trainer.gpt_oss_utils import is_gpt_oss_model
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
+from mini_trainer.fsdp2_lazy_init import (
+    FSDP2_LAZY_INIT_OSFT,
+    get_fsdp2_lazy_init_mode,
+    set_fsdp2_lazy_init_mode,
+)
 
 import os
 
@@ -858,6 +863,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             self.fsdp2_lazy_init = fsdp2_lazy_init
             self._lazy_init_pending = fsdp2_lazy_init
             self._lazy_init_og_state_dict = lazy_init_og_state_dict
+            set_fsdp2_lazy_init_mode(
+                self,
+                FSDP2_LAZY_INIT_OSFT if fsdp2_lazy_init else None,
+            )
 
  
             # create a set of logical keys
@@ -1423,7 +1432,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             Returns true when the OSFT module is loading via the FSDP2 
             lazy init method.
             """
-            return self.fsdp2_lazy_init and not self.is_initialized
+            return (
+                get_fsdp2_lazy_init_mode(self) == FSDP2_LAZY_INIT_OSFT
+                and not self.is_initialized
+            )
 
 
         def _get_module_by_logical_key(self, logical_key: str):
