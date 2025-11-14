@@ -167,7 +167,8 @@ def compute_angle_differences(A: torch.Tensor, B: torch.Tensor = None, top_n: in
         top_diffs, _ = torch.topk(diff_flat, min(top_n, len(diff_flat)))
         return top_diffs.cpu().tolist()
 
-    except Exception:
+    except Exception as e:
+        print(f"Error computing angle differences: {e}")
         return []
 
 
