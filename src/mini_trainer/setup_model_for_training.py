@@ -504,15 +504,15 @@ def finalize_model_initialization(
         model.compute_distributed_svd(model, context.state_dict)
         log_rank_0("   ✓ OSFT parameters computed and distributed")
 
-        if hasattr(model, "_lazy_init_pending"):
-            model._lazy_init_pending = False
+        # Mark OSFT initialization as complete
+        model.mark_fsdp2_initialized()
         log_rank_0("✅ [Phase 3] OSFT finalization complete")
     else:
         if _distributed_initialized():
             raise ValueError("invalid model type, expected SFT or OSFT model")
         log_rank_0("ℹ️  [Phase 3] Non-distributed initialization detected, skipping distributed finalization logic")
 
-    if context.is_sft or context.is_osft:
+    if context.is_sft:
         set_fsdp2_lazy_init_mode(model, None)
 
     # Sanitize meta tensor attributes (common to all paths)

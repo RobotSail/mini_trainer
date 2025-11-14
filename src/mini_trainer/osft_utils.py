@@ -1486,7 +1486,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
         @property
         def requires_fsdp2_initialization(self):
             """
-            Returns true when the OSFT module is loading via the FSDP2 
+            Returns true when the OSFT module is loading via the FSDP2
             lazy init method.
             """
             return (
@@ -1494,6 +1494,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 and not self.is_initialized
             )
 
+        def mark_fsdp2_initialized(self):
+            """Mark FSDP2 lazy initialization as complete."""
+            self._lazy_init_pending = False
+            set_fsdp2_lazy_init_mode(self, None)
 
         def _get_module_by_logical_key(self, logical_key: str):
             """Return (module, attr) using the stable handle; independent of FQNs/wrappers."""
