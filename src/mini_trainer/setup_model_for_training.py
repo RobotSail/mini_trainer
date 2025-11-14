@@ -1,5 +1,6 @@
 import math
 import os
+import gc
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 import torch
@@ -476,6 +477,15 @@ def finalize_model_initialization(
             state_dict=context.state_dict if dist.get_rank() == 0 else {},
             strict=False,  # Use strict=False since buffers are handled separately
         )
+
+        # Next, we need to delete the state dict
+        sd = context.state_dict
+        del sd
+        context.state_dict = None
+        # Ensures no residual data is still being allocated by Pytorch
+        torch.cuda.empty_cache()
+        gc.collect()
+
         log_rank_0("✅ [SFT] State dict distributed successfully")
         log_rank_0("✅ [Phase 3] SFT finalization complete")
 

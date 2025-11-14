@@ -1100,21 +1100,40 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
             """
             log_rank_0("🔄 [compute_distributed_svd] Starting distributed SVD computation")
+            
+            # Helfpul vars
+            current_rank = dist.get_rank()
+            local_rank = int(os.getenv("LOCAL_RANK", 0))
+            local_device = torch.device("cuda", local_rank)
+            main_proc_rank = 0
+            is_main_proc = current_rank == main_proc_rank
+            world_size = dist.get_world_size()
 
-            # here we just need to collect the OSFT keys
+            # all params to be computed in distributed SVD are moved from the OG state dict
+            # into `params_to_compute` on rank 0, while all other procs initialize a meta
+            # tensor of the same shape + dtype in order to properly populate the data afterwards
             params_to_compute = {}
             for lk, spec in dist_model.orig_param_registry.items():
                 if spec.role == "osft_target":
                     # only the first rank will send out the real parameter, all other processes
                     # will use the metadata to create a simple one
-                    if dist.get_rank() == 0:
-                        params_to_compute[lk] = rank0_og_osft_state_dict[lk]
+                    if current_rank == 0:
+                        # remove the param from the state dict so we can clear the data properly
+                        # afterwards
+                        params_to_compute[lk] = rank0_og_osft_state_dict.pop(lk)
                     else:
                         params_to_compute[lk] = torch.zeros(
                             size=spec.shape,
                             dtype=spec.dtype,
                             device=torch.device("meta"),
                         )
+
+            # Sanity check:
+            # We need to make sure that we clear the data of the old parameters as we move
+            # each param from rank 0 to the intended target. 
+            if current_rank == 0:
+                if any(k in rank0_og_osft_state_dict for k in params_to_compute.keys()):
+                    raise ValueError("key still in rank0_og_osft_state_dict after removing it")
  
             # At this point we should have OSFT params to train. If not, raise an error
             # since this degenerates down to SFT if not managed
@@ -1125,36 +1144,32 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             if len(params_to_compute) == 0:
                 raise ValueError("No parameters to compute SVD for")
 
+            # The following section assigns each rank in the process group a set of
+            # parameters to compute the SVD on. This will determine where rank 0 sends the data.
             
-            # now distribute it to each node
-            current_rank = dist.get_rank()
-            local_rank = int(os.getenv("LOCAL_RANK", 0))
-            local_device = torch.device("cuda", local_rank)
-            main_proc_rank = 0
-            is_main_proc = current_rank == main_proc_rank
-
-            world_size = dist.get_world_size()
-            params_per_node = len(params_to_compute) // world_size
-            params_to_compute_list = list[tuple[str, torch.Tensor]](params_to_compute.items())
  
-            # distribute parameters across ranks, handling remainder
+            # Compute the assignments
+            params_per_rank = len(params_to_compute) // world_size
+            params_to_compute_list = list[tuple[str, torch.Tensor]](params_to_compute.items())
             work_assignments = []
             for rank_idx in range(world_size):
-                start_idx = rank_idx * params_per_node
+                start_idx = rank_idx * params_per_rank
                 # give the last rank any remaining parameters
                 if rank_idx == world_size - 1:
                     end_idx = len(params_to_compute_list)
                 else:
-                    end_idx = start_idx + params_per_node
+                    end_idx = start_idx + params_per_rank
                 work_assignments.append(params_to_compute_list[start_idx:end_idx])
 
             log_rank_0(f"📊 [compute_distributed_svd] Distributing work across {world_size} ranks")
             log_rank_0(f"   • Total parameters: {len(params_to_compute)}")
-            log_rank_0(f"   • Parameters per node (base): {params_per_node}")
+            log_rank_0(f"   • Parameters per rank (base): {params_per_rank}")
             log_rank_0(f"   • Last rank gets: {len(work_assignments[-1])} parameters")
 
+            # Next, rank 0 sends the assigned params to its intended recipients
             my_work = []
-            for target_rank, assignment in enumerate[tuple[str, torch.Tensor]](work_assignments):
+            for target_rank in range(len(work_assignments)):
+                assignment = work_assignments[target_rank]
                 if target_rank == main_proc_rank:
                     # main process doesn't need to send
                     if is_main_proc:
@@ -1162,10 +1177,27 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     continue
                 
                 mailbox = [None]
+                
+                # transfer logic:
+                #   main proc: sends the names + tensors assigned to the proc and deletes the data afterwards
+                #   non-main proc: receives the data and prepares to process it in the next step
                 if is_main_proc:
-                    # main process sends
                     mailbox = [assignment]
                     dist.send_object_list(mailbox, dst=target_rank, use_batch=True)
+
+                    # delete params from local list
+                    for _ in range(len(assignment)):
+                        _, param = assignment.pop()
+                        del param
+                        param = None
+                    
+                    # null the respective assignment entry
+                    work_assignments[target_rank] = None
+                    
+                    # garbage collection
+                    torch.cuda.empty_cache()
+                    gc.collect()
+
                 elif target_rank == current_rank:
                     # target ranks sends
                     dist.recv_object_list(mailbox, src=main_proc_rank, use_batch=True)
@@ -1184,7 +1216,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 
                 # store it and make sure we don't have a lingering reference
                 processed_svd_dicts[logical_key] = svd_dict
-                svd_dict = None
 
                 # clear the old params
                 del param_gpu
@@ -1215,6 +1246,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         w = processed_svd_dicts.pop(k)
                         del w
                         w = None
+                    processed_svd_dicts = None
 
                     # empty cache and gc
                     torch.cuda.empty_cache()
@@ -1313,6 +1345,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
         @staticmethod
         def post_fsdp2_wrap_synchronize_state_dict_across_procs(dist_model: "ModelWithOSFT", og_state_dict: dict[str, torch.Tensor]):
+            """
+            This method broadcasts non-OSFT params across all processes. After these are shared,
+            they are cleared from the original state dict in order to free up memory.
+            """
             non_osft_sd = {}
             if dist.get_rank() == 0:
                 # sanity check
@@ -1347,6 +1383,16 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 )
             )
 
+            # keys to clear
+            keys_to_clear = list[str](non_osft_sd.keys())
+            for k in keys_to_clear:
+                p = non_osft_sd.pop(k)
+                del p
+                p = None
+
+            # empty cache and gc
+            torch.cuda.empty_cache()
+            gc.collect()
 
         def _pre_fsdp2_wrap_initialize_lazy_osft(self):
             """
