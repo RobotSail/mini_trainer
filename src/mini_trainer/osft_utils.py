@@ -1,4 +1,3 @@
-from torch._tensor import Tensor
 import torch
 import torch.nn as nn
 import numpy as np
@@ -1388,7 +1387,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             for k in keys_to_clear:
                 p = non_osft_sd.pop(k)
                 del p
-                p = None
 
             # empty cache and gc
             torch.cuda.empty_cache()
