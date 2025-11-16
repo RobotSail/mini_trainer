@@ -803,8 +803,7 @@ def train(
             if is_local_main_process:
                 metric_logger.log_sync(batch_metrics)
 
-
-            torch.distributed.barrier()
+            dist.barrier()
 
             # sample-based saving, keep in the inner loop
             if checkpointer.should_save_checkpoint(

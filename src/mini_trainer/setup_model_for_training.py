@@ -1,6 +1,7 @@
 import math
 import os
 import gc
+import inspect
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 import torch
@@ -41,6 +42,39 @@ def _require_distributed_initialized(action: str) -> None:
             f"{action} requires torch.distributed to be initialized. "
             "Call torch.distributed.init_process_group() first."
         )
+
+
+def _apply_liger_kernels_if_requested(use_liger_kernels, model_config, base_model_args):
+    """
+    Mirror AutoLiger’s monkey-patching behavior before OSFT creates its wrapper class.
+    Mutates base_model_args by removing kwargs consumed by the Liger patcher.
+    """
+    if not use_liger_kernels:
+        return
+
+    try:
+        from liger_kernel.transformers.monkey_patch import (
+            MODEL_TYPE_TO_APPLY_LIGER_FN,
+            _apply_liger_kernel,
+        )
+    except ImportError as e:
+        raise ImportError(
+            "Tried to use liger kernels for OSFT, but they are not installed. "
+            "Please install the CUDA dependencies or disable Liger kernels."
+        ) from e
+
+    model_type = getattr(model_config, "model_type", None)
+    apply_fn = MODEL_TYPE_TO_APPLY_LIGER_FN.get(model_type)
+    if apply_fn is None:
+        raise ValueError(f"Liger kernels do not support model type '{model_type}'.")
+
+    apply_signature = inspect.signature(apply_fn)
+    liger_kwargs = {}
+    for key in list(base_model_args.keys()):
+        if key in apply_signature.parameters:
+            liger_kwargs[key] = base_model_args.pop(key)
+
+    _apply_liger_kernel(model_type, **liger_kwargs)
 
 
 @dataclass
@@ -902,6 +936,11 @@ def setup_model(
         log_rank_0("loading OSFT model")
         # If osft_output_dtype is not specified, use train_dtype for consistency
         effective_osft_output_dtype = osft_output_dtype if osft_output_dtype is not None else train_dtype
+
+        # We monkey-patch the HF model class OSFT will wrap ahead of time so that liger can be properly loaded.
+        # This is necessary because OSFT has to set up the model in a very specfic way which is incompatible with the
+        # simple load path for SFT.
+        _apply_liger_kernels_if_requested(use_liger_kernels, model_config, base_model_args)
 
         # Since OSFT requires modifying the base model architecture, we have to write our own
         # model loading logic to prevent wasteful memory usage on CPU and GPU.
