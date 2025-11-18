@@ -1269,7 +1269,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     dist.recv_object_list(mailbox, src=sender_rank, use_batch=True, group=control_pg)
                     gathered_results.update(mailbox.pop())
 
-            log_rank_0(f"[compute_distributed_svd] gathering SVD results from world onto main process")
+            log_rank_0("[compute_distributed_svd] gathering SVD results from world onto main process")
             # this is the final state dict
             finalized_sd = {}
             if is_main_proc:

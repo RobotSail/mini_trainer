@@ -6,13 +6,11 @@ import os
 from typing import Any
 
 import torch
-from torch.distributed import is_initialized, get_rank
+from torch.distributed import is_initialized
 import torch.distributed as dist
 from rich.logging import RichHandler
-from transformers import AutoModel, AutoModelForCausalLM, AutoConfig
-from transformers.models.auto import MODEL_MAPPING, MODEL_FOR_CAUSAL_LM_MAPPING
-
-from mini_trainer.training_types import TorchrunArgs
+from transformers import AutoConfig
+from transformers.models.auto import MODEL_FOR_CAUSAL_LM_MAPPING
 
 _CONTROL_PROCESS_GROUP = None
 
