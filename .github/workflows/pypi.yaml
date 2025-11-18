@@ -19,6 +19,7 @@ on:
 
 env:
     LC_ALL: en_US.UTF-8
+    UV_PYTHON: python3.12
 
 defaults:
     run:
@@ -35,8 +36,6 @@ jobs:
     build-package:
         name: Build and check packages
         runs-on: ubuntu-latest
-        env:
-            UV_PYTHON: python3.12
         steps:
             - name: "Harden Runner"
               uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
@@ -52,8 +51,8 @@ jobs:
 
             - name: "Set up Python"
               uses: actions/setup-python@v5
-              with:
-                  python-version: '3.12.x'
+            #   with:
+            #       python-version: '3.12.x'
 
             - name: "Build and Inspect"
               uses: hynek/build-and-inspect-python-package@c52c3a4710070b50470d903818a7b25115dcd076 # v2.13.0
