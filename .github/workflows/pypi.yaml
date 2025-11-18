@@ -19,7 +19,6 @@ on:
 
 env:
     LC_ALL: en_US.UTF-8
-    UV_PYTHON: python3.12
 
 defaults:
     run:
