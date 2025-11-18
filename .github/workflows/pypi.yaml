@@ -35,13 +35,6 @@ jobs:
     build-package:
         name: Build and check packages
         runs-on: ubuntu-latest
-        outputs:
-            artifact-name: Packages
-            dist: dist
-            package_name: ${{ steps.metadata.outputs.package_name }}
-            package_version: ${{ steps.metadata.outputs.package_version }}
-            supported_python_classifiers_json_array: ${{ steps.metadata.outputs.supported_python_classifiers_json_array }}
-            supported_python_classifiers_json_job_matrix_value: ${{ steps.metadata.outputs.supported_python_classifiers_json_job_matrix_value }}
         steps:
             - name: "Harden Runner"
               uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0 # v2.12.0
@@ -55,86 +48,8 @@ jobs:
                   # for setuptools-scm
                   fetch-depth: 0
 
-            - name: "Set up Python"
-              uses: actions/setup-python@v5
-              with:
-                  python-version: '3.12.x'
-
-            - name: "Install uv"
-              uses: astral-sh/setup-uv@v4
-
-            - name: "Build package"
-              run: uv build
-
-            - name: "List build artifacts"
-              run: ls -lh dist/
-
-            - name: "Check wheel contents"
-              run: uvx check-wheel-contents dist/
-
-            - name: "Check package metadata with twine"
-              run: uvx twine check dist/*
-
-            - name: "Extract package metadata"
-              id: metadata
-              run: |
-                  cd dist
-                  tar xzf *.tar.gz --wildcards '*/PKG-INFO' --strip-components=1
-                  cat PKG-INFO | python - <<'EOF' >> $GITHUB_OUTPUT
-                  import email.parser
-                  import json, pathlib, re, sys
-
-                  pkg_info = email.parser.Parser().parsestr(sys.stdin.read())
-
-                  version_tokens = []
-                  for classifier in pkg_info.get_all("Classifier", []):
-                      if match := re.match(r"Programming Language :: Python :: (\d+\.\d+)$", classifier):
-                          version_tokens.append(match.group(1))
-
-                  package_name = pkg_info.get("Name")
-                  if package_name is None:
-                      raise RuntimeError("Package name is not set")
-
-                  package_version = pkg_info.get("Version", "0.0.0")
-
-                  print(f"package_name={package_name}")
-                  print(f"package_version={package_version}")
-                  print(f"supported_python_classifiers_json_array={json.dumps(version_tokens)}")
-                  print(f"""supported_python_classifiers_json_job_matrix_value={json.dumps({"python-version": version_tokens})}""")
-                  EOF
-
-            - name: "Generate GitHub summary"
-              run: |
-                  echo "### Contents of the <code>${{ steps.metadata.outputs.package_name }}</code> package" >> $GITHUB_STEP_SUMMARY
-                  echo "" >> $GITHUB_STEP_SUMMARY
-                  echo "**Version:** ${{ steps.metadata.outputs.package_version }}" >> $GITHUB_STEP_SUMMARY
-                  echo "" >> $GITHUB_STEP_SUMMARY
-                  echo "<details><summary>SDist contents</summary>" >> $GITHUB_STEP_SUMMARY
-                  echo "" >> $GITHUB_STEP_SUMMARY
-                  echo '```' >> $GITHUB_STEP_SUMMARY
-                  tar tzf dist/*.tar.gz >> $GITHUB_STEP_SUMMARY
-                  echo '```' >> $GITHUB_STEP_SUMMARY
-                  echo "</details>" >> $GITHUB_STEP_SUMMARY
-                  echo "" >> $GITHUB_STEP_SUMMARY
-                  echo "<details><summary>Wheel contents</summary>" >> $GITHUB_STEP_SUMMARY
-                  echo "" >> $GITHUB_STEP_SUMMARY
-                  echo '```' >> $GITHUB_STEP_SUMMARY
-                  unzip -l dist/*.whl >> $GITHUB_STEP_SUMMARY
-                  echo '```' >> $GITHUB_STEP_SUMMARY
-                  echo "</details>" >> $GITHUB_STEP_SUMMARY
-                  echo "" >> $GITHUB_STEP_SUMMARY
-                  echo "<details><summary>Package metadata</summary>" >> $GITHUB_STEP_SUMMARY
-                  echo "" >> $GITHUB_STEP_SUMMARY
-                  echo '```' >> $GITHUB_STEP_SUMMARY
-                  cat dist/PKG-INFO >> $GITHUB_STEP_SUMMARY
-                  echo '```' >> $GITHUB_STEP_SUMMARY
-                  echo "</details>" >> $GITHUB_STEP_SUMMARY
-
-            - name: "Upload build artifacts"
-              uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
-              with:
-                  name: Packages
-                  path: dist/*
+            - name: "Build and Inspect"
+              uses: hynek/build-and-inspect-python-package@efb823f52190ad02594531168b7a2d5790e66516 # v2.14.0
 
     # push to Test PyPI on
     # - a new GitHub release is published
