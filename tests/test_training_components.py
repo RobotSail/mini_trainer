@@ -295,13 +295,12 @@ class TestSaveModel:
         # Check barrier for synchronization
         mock_barrier.assert_called()
     
-    @patch.dict(os.environ, {'RANK': '1', 'LOCAL_WORLD_SIZE': '2'})
+    @patch.dict(os.environ, {'RANK': '1', 'LOCAL_WORLD_SIZE': '2', 'LOCAL_RANK': '1'})
     @patch('mini_trainer.train.torch.distributed.get_rank', return_value=1)
-    @patch('mini_trainer.utils.get_rank', return_value=1)  # Also patch the utils version
     @patch('mini_trainer.utils.is_initialized', return_value=True)
     @patch('mini_trainer.train.torch.distributed.barrier')
     @patch('torch.distributed.checkpoint.state_dict.get_model_state_dict')
-    def test_save_model_non_rank_0(self, mock_get_state_dict, mock_barrier, mock_is_init, mock_utils_rank, mock_rank, mock_fsdp_model):
+    def test_save_model_non_rank_0(self, mock_get_state_dict, mock_barrier, mock_is_init, mock_rank, mock_fsdp_model):
         """Test that non-rank-0 processes wait at barrier."""
         # Mock state dict to avoid processing MagicMock
         mock_get_state_dict.return_value = {}
