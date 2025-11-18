@@ -8,26 +8,17 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import json
 import tempfile
 import torch
-import torch.nn as nn
-import torch.distributed as dist
 import numpy as np
 import pytest
-from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock, call, mock_open
+from unittest.mock import MagicMock, patch, mock_open
 from collections import defaultdict
 
 from mini_trainer.train import take_gradient_step, save_model
 from mini_trainer.batch_metrics import BatchMetrics
 from mini_trainer.utils import (
-    init_distributed_environment,
-    check_distributed_is_synchronized,
-    log_rank_0,
-    setup_logger,
     patch_target_module,
-    get_caller
 )
 
 
