@@ -12,7 +12,7 @@ import types
 
 from tqdm import tqdm
 
-from mini_trainer.utils import log_rank_0
+from mini_trainer.utils import log_rank_0, get_control_process_group
 from mini_trainer.gpt_oss_utils import is_gpt_oss_model
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
 from mini_trainer.fsdp2_lazy_init import (
@@ -1087,7 +1087,11 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
 
         @staticmethod
-        def compute_distributed_svd(dist_model, rank0_og_osft_state_dict: dict[str, torch.Tensor]):
+        def compute_distributed_svd(
+            dist_model,
+            rank0_og_osft_state_dict: dict[str, torch.Tensor],
+            offload_to_cpu: bool = False,
+        ):
             """Rank 0 distributes work to all nodes, SVD gets computed across all ranks,
             then they communicate the SVD back to the originating node.
 
@@ -1121,6 +1125,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         # afterwards
                         params_to_compute[lk] = rank0_og_osft_state_dict.pop(lk)
                     else:
+                        # no other ranks will have the full state dict, so instead they initialize a tensor of equal shape on the meta device
                         params_to_compute[lk] = torch.zeros(
                             size=spec.shape,
                             dtype=spec.dtype,
@@ -1130,7 +1135,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             # Sanity check:
             # We need to make sure that we clear the data of the old parameters as we move
             # each param from rank 0 to the intended target. 
-            if current_rank == 0:
+            if is_main_proc:
                 if any(k in rank0_og_osft_state_dict for k in params_to_compute.keys()):
                     raise ValueError("key still in rank0_og_osft_state_dict after removing it")
  
@@ -1145,7 +1150,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
             # The following section assigns each rank in the process group a set of
             # parameters to compute the SVD on. This will determine where rank 0 sends the data.
-            
+
  
             # Compute the assignments
             params_per_rank = len(params_to_compute) // world_size
@@ -1165,6 +1170,11 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
             log_rank_0(f"   • Parameters per rank (base): {params_per_rank}")
             log_rank_0(f"   • Last rank gets: {len(work_assignments[-1])} parameters")
 
+            # The torch.distributed.*_object_list set of APIs have an active memory leak issue when sending CPU-based objects
+            # in a NCCL-based process group. To prevent these APIs from allocating uncreclaimable memory, we create or obtain a CPU-based process-group
+            # based on the Gloo backend, which we use for communcating CPU-based objects which aren't yet ready to be moved onto a CUDA device.
+            control_pg = get_control_process_group()
+
             # Next, rank 0 sends the assigned params to its intended recipients
             my_work = []
             for target_rank in range(len(work_assignments)):
@@ -1173,6 +1183,9 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                     # main process doesn't need to send
                     if is_main_proc:
                         my_work = assignment
+                    
+                    # Equally clear this out
+                    work_assignments[target_rank] = None
                     continue
                 
                 mailbox = [None]
@@ -1182,9 +1195,11 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 #   non-main proc: receives the data and prepares to process it in the next step
                 if is_main_proc:
                     mailbox = [assignment]
-                    dist.send_object_list(mailbox, dst=target_rank, use_batch=True)
+                    dist.send_object_list(mailbox, dst=target_rank, use_batch=True, group=control_pg)
 
                     # delete params from local list
+                    mailbox.pop()
+                    del mailbox
                     for _ in range(len(assignment)):
                         _, param = assignment.pop()
                         del param
@@ -1199,14 +1214,13 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
                 elif target_rank == current_rank:
                     # target ranks sends
-                    dist.recv_object_list(mailbox, src=main_proc_rank, use_batch=True)
+                    dist.recv_object_list(mailbox, src=main_proc_rank, use_batch=True, group=control_pg)
                     my_work = mailbox.pop()
 
                 # everyone else waits until they're done
                 dist.barrier()
 
             log_rank_0("✅ [compute_distributed_svd] Work distribution complete, starting SVD computation")
-
             # now each process computes the SVD separately
             processed_svd_dicts = {}
             for logical_key, param in my_work:
@@ -1223,7 +1237,6 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 gc.collect()
             
             log_rank_0("✅ [compute_distributed_svd] SVD computation complete, gathering results")
-
             # by now, each rank has a mapping of logical keys --> new SVD params
             # worker procs need to return the processed dicts
             gathered_results = {}
@@ -1238,7 +1251,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 mailbox = [None]
                 if sender_rank == current_rank:
                     mailbox = [processed_svd_dicts]
-                    dist.send_object_list(mailbox, dst=main_proc_rank, use_batch=True)
+                    dist.send_object_list(mailbox, dst=main_proc_rank, use_batch=True, group=control_pg)
  
                     # now we delete the data from memory
                     for k in list(processed_svd_dicts.keys()):
@@ -1253,12 +1266,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                 
                 # main process receives
                 elif is_main_proc:
-                    dist.recv_object_list(mailbox, src=sender_rank, use_batch=True)
+                    dist.recv_object_list(mailbox, src=sender_rank, use_batch=True, group=control_pg)
                     gathered_results.update(mailbox.pop())
 
-                # everyone else weights until done
-                dist.barrier()
-            
+            log_rank_0(f"[compute_distributed_svd] gathering SVD results from world onto main process")
             # this is the final state dict
             finalized_sd = {}
             if is_main_proc:
@@ -1363,7 +1374,7 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
                         continue
 
                     # convert dtype to match what was registered during initialization
-                    param_value = og_state_dict[lk]
+                    param_value = og_state_dict.pop(lk)
                     expected_dtype = spec.dtype
                     if param_value.dtype != expected_dtype:
                         log_rank_0(f"Converting {lk} from {param_value.dtype} to {expected_dtype}")

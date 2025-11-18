@@ -14,6 +14,22 @@ from transformers.models.auto import MODEL_MAPPING, MODEL_FOR_CAUSAL_LM_MAPPING
 
 from mini_trainer.training_types import TorchrunArgs
 
+_CONTROL_PROCESS_GROUP = None
+
+
+
+def get_control_process_group():
+    """
+    Lazily create a CPU-friendly (Gloo) process group for control traffic.
+    """
+    global _CONTROL_PROCESS_GROUP
+    if _CONTROL_PROCESS_GROUP is None:
+        if not dist.is_initialized():
+            raise RuntimeError("Distributed process group must be initialized before creating control group")
+        ranks = list(range(dist.get_world_size()))
+        _CONTROL_PROCESS_GROUP = dist.new_group(ranks=ranks, backend="gloo")
+    return _CONTROL_PROCESS_GROUP
+
 
 def get_caller(num_frames=1):
     frame = inspect.currentframe().f_back
