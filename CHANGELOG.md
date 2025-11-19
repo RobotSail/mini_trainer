@@ -7,15 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.4.0] - 2025-11-19
+
+### Added
+- **Distributed Initialization Documentation**: Comprehensive architecture documentation explaining the 3-phase distributed initialization process for SFT and OSFT models in `docs/distributed_initialization.md`
+- **OSFT Orthogonalization Tests**: Extensive regression tests for OSFT orthogonalization properties (`regression_tests/test_osft_orthogonalization.py`, `tests/test_utils/orthogonality.py`)
+- **Model Support**: Added support for Qwen3 and GPT-2 models
+- **Activation Checkpointing**: Enabled activation checkpointing support for memory-efficient training
+- **FSDP2 Lazy Initialization**: New `fsdp2_lazy_init.py` module for managing lazy initialization state
+
+### Changed
+- **Major OSFT Refactor**: Complete refactoring of OSFT implementation for improved memory efficiency and production readiness
+  - Restructured model initialization into 3 clear phases: prepare, wrap, and finalize
+  - Significantly improved memory efficiency during distributed OSFT model loading
+  - Cleaner separation of concerns between SFT and OSFT initialization paths
+  - Better handling of tensor attributes and dtype conversions
+- **Memory-Efficient Loading Extended to SFT**: SFT models now also benefit from the memory-efficient distributed loading path
+- **CI/Linting Improvements**:
+  - Linting workflow optimized to only run on changed files between target and base branch
+  - Updated GitHub Actions workflows for better efficiency
+  - Improved test stability and coverage
+- **Code Quality**: Extensive code cleanup, removed dead code, improved error handling with try/finally blocks
+- **Dependencies**: Updated to transformers v2.14.0
+
 ### Deprecated
 - **`osft_memory_efficient_init` parameter**: This flag is deprecated and will be removed in v0.5.0.
   Memory-efficient initialization is now automatically enabled when distributed training is detected
   (when `torch.distributed.is_initialized()` returns `True`). The flag has no effect and can be
   safely removed from training configurations.
 
-### Changed
-- **Automatic Memory-Efficient Initialization**: OSFT and SFT models now automatically use
-  memory-efficient initialization in distributed mode, eliminating the need for manual configuration.
+### Fixed
+- **Non-distributed OSFT**: Fixed implementation and tests for non-distributed OSFT setups
+- **Dtype Consistency**: Fixed dtype mismatch issues when loading state dicts from GPT-OSS models
+- **Linting Errors**: Resolved various linting issues across the codebase
+- **Memory Leaks**: Added try/finally blocks to prevent memory leakage during model initialization
+- **Bias Handling**: Fixed pulling bias from modules in OSFT setup
+- **Progress Bar**: Fixed epoch counter in progress bar display
+- **Tensor Attributes**: Enabled distributed OSFT to properly carry over tensor attributes that are hidden/not registered as parameters or buffers
+- **Gloo Backend**: Uses gloo backend when communicating CPU-based objects in distributed setup
 
 ## [v0.2.0] - 2025-09-16
 
