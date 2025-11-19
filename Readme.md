@@ -127,6 +127,9 @@ For the complete list of arguments and advanced configuration options, see [`src
 
 ---
 
+> 🛠️ **Contributors** – Looking for the lazy-init + FSDP2 loading flow?  
+> See [docs/distributed_initialization.md](docs/distributed_initialization.md) for diagrams and a detailed walkthrough of the SFT and OSFT pipelines.
+
 ## 📊 Data Format
 
 Mini Trainer expects pre-tokenized data in **JSONL format** with the following structure:
