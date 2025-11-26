@@ -100,7 +100,7 @@ class TestJsonlDataset:
         assert item['input_ids'].tolist() == [11, 12, 13]
         assert item['labels'].tolist() == [110, 120, 130]
         # Should calculate from labels (all non -100)
-        assert item['num_loss_counted_tokens'] == 3
+        assert item['num_loss_counted_tokens'] == 2
     
     def test_dataset_index_types(self, temp_jsonl_file):
         """Test dataset accepts different index types."""

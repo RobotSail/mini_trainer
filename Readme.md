@@ -27,6 +27,7 @@
 - 🚫 **Padding-Free** - Leverages Flash Attention for efficient computation without padding overhead
 - ♾️ **Infinite Sampling** - Continuous data streaming without manual epoch configuration
 - 🔬 **Orthogonal Subspace Fine-Tuning (OSFT)** - Advanced continual learning technique for parameter-efficient training
+- 📚 **Continual Pretraining** - Document-style pretraining with configurable block sizes and column names
 - 📊 **Flexible Logging** - JSONL metrics logging with optional Weights & Biases integration
 
 ---
@@ -122,6 +123,7 @@ torchrun --nnodes=1 --nproc-per-node=8 -m mini_trainer.train \
 - `--use-liger-kernels` - Enable memory-efficient Liger kernels
 - `--osft` - Enable Orthogonal Subspace Fine-Tuning mode
 - `--osft-unfreeze-rank-ratio` - Ratio of model parameters to train with OSFT (0.0-1.0)
+- `--block-size` - Enables document-style continual pretraining with the given block length
 
 For the complete list of arguments and advanced configuration options, see [`src/mini_trainer/api_train.py`](src/mini_trainer/api_train.py).
 
@@ -147,6 +149,39 @@ Each line should contain:
 ### 🔄 Data Processing
 
 **Mini Trainer does not include data processing utilities.** For tokenization and data preparation, please use the **[instructlab-training](https://github.com/instructlab/training)** APIs, which provide robust data processing pipelines compatible with Mini Trainer's input format.
+
+### 🧱 Continual Pretraining on Raw Documents
+
+Mini Trainer now supports continual pretraining on raw document corpora. Pass a `--block-size` to enable the document pipeline and optionally specify the column name containing your text:
+
+```bash
+torchrun --nnodes=1 --nproc-per-node=4 -m mini_trainer.train \
+    --model-name-or-path qwen/Qwen2.5-1.5B-Instruct \
+    --data-path ./documents.jsonl \
+    --output-dir ./checkpoints \
+    --batch-size 16 \
+    --max-tokens-per-gpu 8192 \
+    --block-size 512
+```
+
+- `--block-size` (required) turns on continual pretraining and defines the token length for each block.
+
+Programmatic usage mirrors the CLI via `PretrainingConfig`:
+
+```python
+from mini_trainer import TrainingArgs, PretrainingConfig
+
+args = TrainingArgs(
+    model_name_or_path="mistralai/Mistral-7B-v0.1",
+    data_path="documents.jsonl",
+    output_dir="./checkpoints",
+    batch_size=128,
+    max_tokens_per_gpu=40000,
+    pretraining_config=PretrainingConfig(
+        block_size=4096,
+    ),
+)
+```
 
 ---
 
