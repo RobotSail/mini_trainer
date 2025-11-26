@@ -33,6 +33,7 @@ import numpy as np
 from datasets import load_dataset, Dataset as HFDataset
 from mini_trainer.batch_packer import batch_lengths_to_minibatches_lpt
 from mini_trainer.utils import log_rank_0
+from mini_trainer.training_types import PretrainingConfig
 
 def reset_minibatches(num_ranks: int):
     return [[] for _ in range(num_ranks)], np.zeros(num_ranks)
@@ -136,16 +137,24 @@ class JsonlDataset(Dataset):
         
         # Determine the number of loss-counted tokens if the field is missing.
         if (loss_counted_tokens := sample.get("num_loss_counted_tokens", None)) is None:
+            
+            # causal LMs shift labels to the left when calculating cross-entropy loss
+            # so we must account for this shift when we calculate cross-entropy
             loss_counted_tokens = sum(
-                1 if label != -100 else 0 for label in sample["labels"]
+                1 if label != -100 else 0 for label in sample["labels"][1:]  
             )
 
-        return {
+        item = {
             'input_ids': torch.tensor(sample['input_ids'], dtype=torch.long),
             'labels': torch.tensor(sample['labels'], dtype=torch.long),
             'len': sample['len'],
             'num_loss_counted_tokens': loss_counted_tokens,
         }
+
+        # ensure that an attention mask exists if the sample came with one
+        if 'attention_mask' in sample:
+            item['attention_mask'] = torch.tensor(sample['attention_mask'], dtype=torch.long)
+        return item
     
     @classmethod
     def add_necessary_fields(cls, dataset: HFDataset) -> HFDataset:
@@ -158,8 +167,9 @@ class JsonlDataset(Dataset):
         if "num_loss_counted_tokens" not in dataset.features:
             dataset = dataset.map(
                 lambda s: {
+                    # causal LMs shift labels to the left when calculating cross-entropy loss
                     "num_loss_counted_tokens": sum(
-                        1 for tok in s["labels"] if tok != -100
+                        1 for tok in s["labels"][1:] if tok != -100 
                     )
                 }
             )
@@ -223,7 +233,153 @@ class JsonlDataset(Dataset):
         train_dataset = cls(hf_dataset=split_dataset["train"])
         val_dataset = cls(hf_dataset=split_dataset["test"])
         return train_dataset, val_dataset
+
+
+class PretrainingBlockDataset(Dataset):
+    """
+    Dataset for pretraining that concatenates documents and views them as fixed-size blocks.
+
+    Loads JSONL with {"input_ids": [...]} (no labels), concatenates all documents,
+    then provides access to fixed-size blocks.
+    """
+
+    def __init__(self, dataset: HFDataset, block_size: int, pad_token_id: int):
+        """
+        Args:
+            data_path: Path to JSONL file with tokenized documents
+            block_size: Size of each block in tokens
+            pad_token_id: Token ID to use for padding the last block
+        """
+        self.block_size = block_size
+        self.pad_token_id = pad_token_id
+
+        # Validate required fields
+        if "input_ids" not in dataset.column_names:
+            raise ValueError("Pretraining data must have 'input_ids' field")
+
+        if pad_token_id < 0:
+            raise ValueError("pad_token_id must be a positive integer")
+
+        log_rank_0(f"Concatenating {len(dataset):,} documents for pretraining...")
+
+        # Concatenate all input_ids into one giant list
+        all_input_ids = []
+        for sample in dataset:
+            all_input_ids.extend(sample['input_ids'])
+
+        # calculates the offset of the final block (which may be smaller than block_size)
+        # so we can sample from the full list of IDs and avoid wasting data
+        total_tokens = len(all_input_ids)
+        num_complete_blocks = total_tokens // block_size
+        remainder = total_tokens % block_size
+
+        # include partial block if there is one
+        last_block_len = block_size
+        if remainder > 0:
+            num_complete_blocks += 1
+            last_block_len = remainder
+
+        # store information needed to sample from the dataset in `block` strides
+        self.num_blocks = num_complete_blocks
+        self.last_block_len = last_block_len
+        self.all_input_ids = all_input_ids  # keep all tokens
+
+        log_rank_0(f"Total tokens: {total_tokens:,}")
+        log_rank_0(f"Block size: {block_size}")
+        log_rank_0(f"Total blocks: {self.num_blocks:,} ({num_complete_blocks} complete, {1 if remainder else 0} partial)")
+        if remainder:
+            log_rank_0(f"Partial block size: {remainder} tokens")
+
+    def __len__(self):
+        return self.num_blocks
     
+    @classmethod
+    def from_jsonl_file(cls, data_path: str, block_size: int, pad_token_id: int) -> "PretrainingBlockDataset":
+        """Load a dataset from a JSONL file and create a PretrainingBlockDataset."""
+        dataset = load_dataset("json", data_files=data_path, split="train")
+        return cls(dataset, block_size, pad_token_id)
+
+    @classmethod
+    def load_and_split(
+        cls, 
+        data_path: str, 
+        block_size: int, 
+        pad_token_id: int,
+        validation_split: float = 0.0,
+        seed: int = 42
+    ) -> tuple["PretrainingBlockDataset", "PretrainingBlockDataset | None"]:
+        """
+        Load a dataset from a JSONL file and create a PretrainingBlockDataset,
+        optionally splitting it into train and validation sets.
+        
+        Args:
+            data_path: Path to JSONL file with tokenized documents
+            block_size: Size of each block in tokens
+            validation_split: Fraction of data to use for validation (0.0 to 1.0)
+            seed: Random seed for splitting
+            
+        Returns:
+            Tuple of (train_dataset, val_dataset). val_dataset is None if validation_split is 0.
+        """
+        if not (0.0 <= validation_split < 1.0):
+            raise ValueError(f"validation_split must be in [0.0, 1.0), got {validation_split}")
+        
+        dataset = load_dataset("json", data_files=data_path, split="train")
+        
+        if validation_split == 0.0:
+            train_dataset = cls(dataset, block_size, pad_token_id)
+            return train_dataset, None
+        
+        # Split the dataset
+        split_dataset = dataset.train_test_split(
+            test_size=validation_split,
+            seed=seed
+        )
+        
+        # create and return the datasets
+        train_dataset = cls(split_dataset["train"], block_size, pad_token_id)
+        val_dataset = cls(split_dataset["test"], block_size, pad_token_id)
+        return train_dataset, val_dataset
+
+
+    def __getitem__(self, idx: int):
+        """
+        Return a block of tokens starting at idx * block_size.
+
+        For pretraining: labels == input_ids (no masking)
+        """
+        if idx >= self.num_blocks:
+            raise IndexError(f"Index {idx} out of range for {self.num_blocks} blocks")
+
+        start = idx * self.block_size
+        end = start + self.block_size
+
+        is_last_block = (idx == self.num_blocks - 1)
+        is_partial = is_last_block and (len(self.all_input_ids) % self.block_size != 0)
+        if is_partial:
+            # partial block: get actual tokens and pad the rest
+            actual_tokens = self.all_input_ids[start:]
+            actual_len = len(actual_tokens)
+            pad_len = self.block_size - actual_len
+
+            input_ids = actual_tokens + [self.pad_token_id] * pad_len
+            # mask padding in labels so it doesn't contribute to loss
+            labels = actual_tokens + [-100] * pad_len
+            num_loss_counted = actual_len - 1  # causal shift
+        else:
+            input_ids = self.all_input_ids[start:end]
+            labels = list(input_ids)  # Create explicit copy to avoid reference issues
+            num_loss_counted = self.block_size - 1
+ 
+
+        return {
+            'input_ids': torch.tensor(input_ids, dtype=torch.long),
+            'labels': torch.tensor(labels, dtype=torch.long),
+            'len': self.block_size,
+            'num_loss_counted_tokens': num_loss_counted,
+        }
+
+
 class EpochSampler(Sampler):
     """
     Here we redefine RandomSampler so we can have a consistent signature with InfiniteSampler
@@ -319,6 +475,88 @@ def mb_collate_fn(minibatch, batch_num_loss_counted_tokens):
         "num_samples": num_samples,
         "batch_num_loss_counted_tokens": batch_num_loss_counted_tokens,
     }
+
+
+def padded_mb_collate_fn(minibatch: list[dict], batch_num_loss_counted_tokens: int, pad_token_id: int) -> dict:
+    """Collates a list of samples into a padded batch for standard attention.
+
+    This function takes a minibatch (list of dataset samples) and creates padded
+    tensors suitable for standard attention mechanisms. Unlike the flash attention
+    version, this pads all sequences to the same length and creates attention masks.
+
+    Args:
+        minibatch: A list of dictionaries, where each dictionary represents a
+                   sample and contains 'input_ids' and 'labels'.
+        batch_num_loss_counted_tokens: Total number of loss-counted tokens in the batch.
+        pad_token_id: Token id to use for padding in padded batches.
+
+    Returns:
+        A dictionary containing the collated batch:
+        - 'input_ids': 2D tensor of padded input IDs [batch_size, max_len]
+        - 'labels': 2D tensor of padded labels [batch_size, max_len]
+        - 'attention_mask': 2D tensor indicating real vs padding tokens
+        - 'position_ids': None (not used for standard attention)
+        - 'num_loss_counted_tokens': Total number of non-ignored label tokens
+        - 'num_samples': The number of real sequences in this batch
+        - 'batch_num_loss_counted_tokens': Total number of loss-counted tokens in the batch
+    """
+    if pad_token_id < 0:
+        raise ValueError("pad_token_id must be a non-negative integer")
+
+    if not minibatch:
+        return {
+            "input_ids": torch.tensor([[]], dtype=torch.long),
+            "labels": torch.tensor([[]], dtype=torch.long),
+            "attention_mask": torch.tensor([[]], dtype=torch.long),
+            "position_ids": None,
+            "num_loss_counted_tokens": 0,
+            "num_samples": 0,
+            "batch_num_loss_counted_tokens": batch_num_loss_counted_tokens,
+        }
+
+    max_len = max(len(item["input_ids"]) for item in minibatch)
+
+    padded_input_ids = []
+    padded_labels = []
+    attention_masks = []
+    num_loss_counted_tokens = 0
+    num_samples = 0
+
+    for item in minibatch:
+        item_len = len(item["input_ids"])
+        pad_len = max_len - item_len
+
+        input_ids = item["input_ids"]
+        labels = item["labels"]
+        if isinstance(input_ids, torch.Tensor):
+            input_ids = input_ids.tolist()
+        if isinstance(labels, torch.Tensor):
+            labels = labels.tolist()
+
+        padded_input_ids.append(input_ids + [pad_token_id] * pad_len)
+        padded_labels.append(labels + [-100] * pad_len)
+
+        # add attention masks for datasets which don't already have them
+        attn = item.get("attention_mask")
+        if isinstance(attn, torch.Tensor):
+            attn = attn.tolist()
+        if attn is None:
+            attn = [1] * item_len
+        attention_masks.append(attn + [0] * pad_len)
+
+        # calculate aggregate statistics
+        num_loss_counted_tokens += item["num_loss_counted_tokens"]
+        num_samples += 1 if item["num_loss_counted_tokens"] > 0 else 0
+
+    return {
+        "input_ids": torch.tensor(padded_input_ids, dtype=torch.long),
+        "labels": torch.tensor(padded_labels, dtype=torch.long),
+        "attention_mask": torch.tensor(attention_masks, dtype=torch.long),
+        "position_ids": None,
+        "num_loss_counted_tokens": num_loss_counted_tokens,
+        "num_samples": num_samples,
+        "batch_num_loss_counted_tokens": batch_num_loss_counted_tokens,
+    }
     
 class MaxTokensPerRankCollator:
     """A collate function for PyTorch DataLoader for distributed training.
@@ -383,6 +621,10 @@ class MaxTokensPerRankCollator:
         all_minibatches_indices = batch_lengths_to_minibatches_lpt(
             batch_lengths, self.max_tokens_per_rank, self.world_size, self.global_rank
         )
+        if not all_minibatches_indices:
+            # Ensure every rank returns at least one (dummy) microbatch so downstream
+            # metric aggregation always has expected keys.
+            all_minibatches_indices = [[-1]]
 
         all_minibatches = []
         for mb_indices in all_minibatches_indices:
@@ -403,12 +645,14 @@ def get_data_loader(
     num_workers: int = 0,
     validation_split: float = 0.0,
     max_seq_len: int | None = None,
+    pretraining_config: PretrainingConfig | None = None,
+    pad_token_id: int = 0,
 ) -> tuple[DataLoader, DataLoader | None]:
     """Create data loader(s) with optional train/validation split.
-    
+
     Efficiently loads the dataset once and splits it if needed, avoiding
     multiple reads of the same data.
-    
+
     Args:
         data_path: Path to the JSONL data file or HuggingFace dataset
         batch_size: Number of samples per batch
@@ -420,25 +664,46 @@ def get_data_loader(
         num_workers: Number of worker processes for data loading
         validation_split: Fraction of data to use for validation (0.0 to 1.0)
         max_seq_len: Maximum sequence length to keep (filters out longer sequences)
-    
+        pretraining_config: Configuration for pretraining mode. If provided, enables
+            pretraining with block-based sampling.
+        pad_token_id: Token id to use for padding in padded batches.
     Returns:
         tuple: (train_loader, val_loader) where val_loader is None if validation_split <= 0
+            or if in pretraining mode
     """
-    # validate validation_split parameter
+    # Validate parameters
     if validation_split < 0.0 or validation_split >= 1.0:
         raise ValueError(f"validation_split must be between 0 and 1 (exclusive of 1), got {validation_split}")
     
-    # create the jsonl dataset and optionally the validation dataset
-    train_dataset, val_dataset = JsonlDataset.load_and_split(
-        data_path=data_path,
-        validation_split=validation_split,
-        max_seq_len=max_seq_len,
-        seed=seed
-    )
-    if val_dataset is not None:
-        log_rank_0(f"Dataset split: {len(train_dataset)} train, {len(val_dataset)} validation samples")
+    # Create dataset based on mode
+    if pretraining_config is not None:
+        if pad_token_id is None or pad_token_id < 0:
+            raise ValueError(f"pretraining mode requires a valid non-negative pad_token_id, got: {pad_token_id=}")
+        # Pretraining mode: use PretrainingBlockDataset
+        train_dataset, val_dataset = PretrainingBlockDataset.load_and_split(
+            data_path=data_path,
+            block_size=pretraining_config.block_size,
+            pad_token_id=pad_token_id,
+            validation_split=validation_split,
+            seed=seed,
+        )
+        log_rank_0(f"Pretraining dataset: {len(train_dataset)} blocks of size {pretraining_config.block_size}")
+        if val_dataset is not None:
+            log_rank_0(f"Validation dataset: {len(val_dataset)} blocks of size {pretraining_config.block_size}")
+        else:
+            log_rank_0("No validation dataset")
     else:
-        log_rank_0(f"Dataset split: {len(train_dataset)} train")
+        # Instruction tuning mode: use JsonlDataset with optional validation split
+        train_dataset, val_dataset = JsonlDataset.load_and_split(
+            data_path=data_path,
+            validation_split=validation_split,
+            max_seq_len=max_seq_len,
+            seed=seed
+        )
+        if val_dataset is not None:
+            log_rank_0(f"Dataset split: {len(train_dataset)} train, {len(val_dataset)} validation samples")
+        else:
+            log_rank_0(f"Dataset split: {len(train_dataset)} train")
 
     
     # Create collate function
@@ -492,6 +757,3 @@ if __name__ == "__main__":
     data_loader2 = iter(data_loader2)
     batch = next(data_loader)
     batch2 = next(data_loader2)
-    from IPython import embed
-    embed()
-

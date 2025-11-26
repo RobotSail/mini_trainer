@@ -162,6 +162,10 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
             command.append("--save-best-val-loss")
             command.append(f"--val-loss-improvement-threshold={train_args.val_loss_improvement_threshold}")
 
+    # pretraining-related arguments
+    if train_args.pretraining_config is not None:
+        command.append(f"--block-size={train_args.pretraining_config.block_size}")
+
     # Add optional min_samples_per_checkpoint if specified
     if train_args.min_samples_per_checkpoint is not None:
         command.append(f"--min-samples-per-checkpoint={train_args.min_samples_per_checkpoint}")

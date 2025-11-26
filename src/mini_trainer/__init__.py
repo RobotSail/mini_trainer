@@ -24,11 +24,11 @@ from . import utils
 
 # Export main API functions for convenience
 from .api_train import run_training
-from .training_types import TorchrunArgs, TrainingArgs, TrainingMode
+from .training_types import TorchrunArgs, TrainingArgs, TrainingMode, PretrainingConfig
 
 __all__ = [
     "api_train",
-    "batch_metrics", 
+    "batch_metrics",
     "batch_packer",
     "none_reduction_losses",
     "sampler",
@@ -41,4 +41,5 @@ __all__ = [
     "TorchrunArgs",
     "TrainingArgs",
     "TrainingMode",
+    "PretrainingConfig",
 ]

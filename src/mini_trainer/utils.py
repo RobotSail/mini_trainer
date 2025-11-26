@@ -1,4 +1,6 @@
 from datetime import timedelta
+import random
+import numpy as np
 import importlib
 import inspect
 import logging
@@ -156,3 +158,18 @@ def destroy_distributed_environment():
     dist.barrier()
     log_rank_0("Training complete 😀, tearing down distributed environment")
     dist.destroy_process_group()
+
+
+def set_seed(seed: int):
+    """
+    This function sets the seed for the random number generators in the standard library,
+    NumPy, and PyTorch.
+
+    Args:
+        seed: The seed to set.
+    """
+    # Reproducibility: align with HF Trainer seeding behavior
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)

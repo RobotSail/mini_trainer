@@ -402,6 +402,7 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     log_rank_0("🔄 [Phase 2] Starting FSDP2 wrapping")
 
     # Configure mixed precision policy (bfloat16 for Flash Attention compatibility)
+    # TODO: make these settings configurable so that non-FA users can leverage FP32 param storage
     mp_policy = MixedPrecisionPolicy(
         param_dtype=torch.bfloat16,
         reduce_dtype=torch.float32,
@@ -431,7 +432,8 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     # Apply activation checkpointing to each block
     log_rank_0(f"🔄 [Phase 2] Applying activation checkpointing to {len(layers)} blocks")
     for idx, block in enumerate(layers):
-        layers[idx] = ptd_checkpoint_wrapper(block, preserve_rng_state=False)
+        # preserve_rng_state needs to be true so that the backward pass can be accurate
+        layers[idx] = ptd_checkpoint_wrapper(block, preserve_rng_state=True)
 
     # Build 1D device mesh over all ranks
     world_size = dist.get_world_size()
@@ -570,25 +572,38 @@ def align_model_and_tokenizer(model, tokenizer):
             int(8 * math.ceil(len(tokenizer) / 8.0))
         )  # make the vocab size multiple of 8 for sharding the embedding layer.
 
-    # Fix any discrepancy between model and tokenizer
+    # Step 1: Ensure tokenizer has a pad_token_id (required for training)
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token_id is not None:
+            log_rank_0(
+                "\033[38;5;226m"
+                f"⚠️  Tokenizer missing pad_token_id, setting to eos_token_id ({tokenizer.eos_token_id})"
+                "\033[0m"
+            )
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        else:
+            raise ValueError(
+                "Tokenizer has neither pad_token_id nor eos_token_id. "
+                "Cannot proceed with training - please configure the tokenizer properly."
+            )
+
+    # Step 2: Sync all special tokens from tokenizer to model.config
+    # This ensures model.config always reflects tokenizer's special tokens
     special_tokens = {
-        'pad': ('pad_token_id', 'Fixing model pad token id'),
-        'bos': ('bos_token_id', 'Fixing model bos token id'),
-        'eos': ('eos_token_id', 'Fixing model eos token id')
+        'pad': ('pad_token_id', 'Syncing model pad token id'),
+        'bos': ('bos_token_id', 'Syncing model bos token id'),
+        'eos': ('eos_token_id', 'Syncing model eos token id')
     }
 
     for token_type, (token_attr, message) in special_tokens.items():
         model_token = getattr(model.config, token_attr)
         tokenizer_token = getattr(tokenizer, token_attr)
-        
-        if (model_token is not None and tokenizer_token is not None 
-            and model_token != tokenizer_token):
+
+        # Always sync tokenizer -> model.config when tokenizer has a valid value
+        if tokenizer_token is not None and model_token != tokenizer_token:
             log_rank_0(
-                "\033[38;5;226m"
-                f"WARNING: There is a mismatch between {token_type} token id of "
-                f"model({model_token}) and tokenizer({tokenizer_token}). "
-                f"{message} to be same as tokenizer's {token_type} token id"
-                "\033[0m"
+                f"{message}: {model_token} -> {tokenizer_token}"
             )
             setattr(model.config, token_attr, tokenizer_token)
 
@@ -878,7 +893,7 @@ def setup_model(
 
     except ImportError as e:
         if os.environ.get("TESTING", "false").lower() == "true":
-            base_model_args["attn_implementation"] = "eager"
+            base_model_args["attn_implementation"] = "sdpa"
         else:
             raise e
 
@@ -1137,6 +1152,4 @@ def setup_training_components(
         num_training_steps=num_training_steps,
         scheduler_specific_kwargs=scheduler_kwargs,
     )
-    lr_scheduler.split_batches = True
-    lr_scheduler.step() #the scheduler starts at 0 and there's no learning.
     return model, optimizer, lr_scheduler

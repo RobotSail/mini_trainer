@@ -19,6 +19,16 @@ class TrainingMode(str, Enum):
 
 
 @dataclass
+class PretrainingConfig:
+    """Configuration for pretraining mode."""
+
+    block_size: int
+    # Future extensibility for rehearsal/replay:
+    # rehearsal_rate: float | None = None
+    # rehearsal_data_path: str | None = None
+
+
+@dataclass
 class TorchrunArgs:
     """Arguments for torchrun distributed training configuration."""
     nnodes: int = 1
@@ -114,6 +124,9 @@ class TrainingArgs:
     # validation
     validation_split: float = field(default=0.0, metadata={"help": "The fraction of data to use for validation. 0.0 means no validation, 0.1 means 10% of the data is used for validation."})
     validation_frequency: Optional[int] = field(default=None, metadata={"help": "The frequency of validation in steps. Required when validation_split > 0."})
+
+    # Pretraining configuration (None = instruction tuning, non-None = pretraining)
+    pretraining_config: Optional[PretrainingConfig] = field(default=None, metadata={"help": "Pretraining configuration. If provided, enables pretraining mode with block-based sampling."})
 
     # from train.py:
     save_best_val_loss: bool = field(default=False, metadata={"help": "Whether to save checkpoints when validation loss improves"})

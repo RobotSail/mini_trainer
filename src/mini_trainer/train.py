@@ -22,8 +22,9 @@ from mini_trainer.utils import (
     setup_logger,
     get_node_rank,
     destroy_distributed_environment,
+    set_seed
 )
-from mini_trainer.training_types import TrainingMode
+from mini_trainer.training_types import TrainingMode, PretrainingConfig
 
 SaveType = Literal["min_samples", "epoch", "final", "best_val_loss"]
 
@@ -78,8 +79,6 @@ def take_gradient_step(model, optimizer, lr_scheduler, expected_dtype=torch.floa
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
     lr_scheduler.step()
-    # keep this here in case mixed precision settings are ever broken
-    # With FSDP2 mixed precision, optimizer state follows the parameter dtype
     validate_training_state(model, optimizer, expected_param_dtype=expected_dtype, expected_optimizer_dtype=expected_dtype)
     optimizer.zero_grad()
     return grad_norm
@@ -304,8 +303,17 @@ def compute_validation_loss(model, val_data_loader, device):
                 model_inputs = {
                     'input_ids': mb['input_ids'].to(device),
                     'labels': mb['labels'].to(device),
-                    'position_ids': mb['position_ids'].to(device),
                 }
+
+                # add optional fields onto `model_inputs` object
+                pos_ids = mb.get('position_ids')
+                if pos_ids is not None:
+                    # position_ids gets used for padding-free training
+                    model_inputs['position_ids'] = pos_ids.to(device)
+                attn_mask = mb.get('attention_mask')
+                if attn_mask is not None:
+                    # attention_mask gets used for padded training
+                    model_inputs['attention_mask'] = attn_mask.to(device)
                 
                 # Forward pass
                 output = model(**model_inputs)
@@ -729,24 +737,24 @@ def train(
                 model_inputs = {
                     'input_ids': mb['input_ids'].to(device),
                     'labels': mb['labels'].to(device),
-                    'position_ids': mb['position_ids'].to(device),
                 }
+                # position_ids is for padding-free training, attention_mask is for padded training
+                if (pos_ids := mb.get('position_ids')) is not None:
+                    model_inputs['position_ids'] = pos_ids.to(device)
+                if (attn_mask := mb.get('attention_mask')) is not None:
+                    model_inputs['attention_mask'] = attn_mask.to(device)
 
                 output = model(**model_inputs)
                 
                 # GPT-OSS: add auxiliary loss if present, otherwise use standard loss
+                loss = output.loss.float().sum()
                 if hasattr(output, 'aux_loss') and output.aux_loss is not None:
-                    # GPT-OSS model: add auxiliary loss to main loss
-                    loss = output.loss.float().sum() + output.aux_loss.float()
-                else:
-                    # Standard model: use existing loss computation
-                    loss = output.loss.float().sum()
-                
-                loss_metrics = loss.detach().item()
-                '''multiply by world_size to account for the fact that fsdp takes the mean of the gradients across the world_size'''
-                '''the loss is a sum of all cross entropy losses for all tokens in the batch, we divide by batch_num_loss_counted_tokens to get the average loss per token'''
-                loss = loss * world_size / batch_num_loss_counted_tokens
+                    # MoE-style models will have an aux loss which we want to compute
+                    loss += output.aux_loss.float().sum()
 
+                # Ensure scalar loss even if model returns per-token loss
+                loss = (loss / batch_num_loss_counted_tokens) * world_size
+                loss_metrics = loss.detach().cpu().item()
                 loss.backward()
                 torch.cuda.empty_cache()
 
@@ -755,6 +763,9 @@ def train(
                     num_total_tokens=mb['input_ids'].shape[1],
                     num_samples=mb_num_samples,
                     loss=loss_metrics,
+
+                    # since FSDP2 automatically averages gradients by the world-size,
+                    # each rank's gradient contributes 1/8 to the backward
                     loss_backward=loss.detach().item()/world_size,
                     time_per_minibatch=time.time() - mb_start_time,
                 )
@@ -766,16 +777,23 @@ def train(
             bm = batch_totals.totals
             total_samples_accumulated += bm['num_samples']
             total_tokens_processed += batch_num_loss_counted_tokens  # Track tokens for TOKEN mode
+
+            # capture the LR that we'll use when taking a training step
+            current_lr = lr_scheduler.get_last_lr()[0]
             grad_norm = take_gradient_step(model, optimizer, lr_scheduler, expected_dtype=train_dtype)
 
             batch_time = time.time() - batch_start_time
+
+            # Since the loss accounts for FSDP2's world_size averaging, we need to adjust this back to
+            # its original scale after adding up the losses across each proc
+            logged_loss = bm['loss'] / world_size
             batch_metrics = {
                     "step": step,
                     "epoch": epoch,
                     "steps_per_epoch": len(data_loader),
-                    "lr": lr_scheduler.get_last_lr()[0],
+                    "lr": current_lr,
                     "grad_norm": grad_norm.item(),
-                    "loss": bm['loss']/batch_num_loss_counted_tokens,
+                    "loss": logged_loss,
                     "avg_loss_backward": bm['loss_backward']/(grad_accum+1),
                     "num_samples": bm['num_samples'],
                     "num_loss_counted_tokens": bm['num_loss_counted_tokens'],
@@ -958,17 +976,23 @@ def main(
     # validation parameters
     validation_split: Annotated[float, Option(help="Fraction of data to use for validation (0.0 to 1.0)")] = 0.0,
     validation_frequency: Annotated[int | None, Option(help="Frequency of validation evaluation (in steps). Required when validation_split > 0")] = None,
-    
+
     # checkpoint parameters
     save_best_val_loss: Annotated[bool, Option(help="Whether to save checkpoints when validation loss improves")] = False,
     val_loss_improvement_threshold: Annotated[float, Option(help="Minimum validation loss improvement required to trigger a save")] = 0.0,
-    
+
+    # pretraining parameters
+    block_size: Annotated[int | None, Option(help="Block size for pretraining mode (in tokens). When provided, enables pretraining with block-based sampling")] = None,
+
     # wandb parameters
     wandb_project: Annotated[str | None, Option(help="Weights & Biases project name")] = None,
     wandb_run_name: Annotated[str | None, Option(help="Weights & Biases run name")] = None,
     wandb_entity: Annotated[str | None, Option(help="Weights & Biases entity/team name")] = None,
 ):
     
+    # Reproducibility: align with HF Trainer seeding behavior
+    set_seed(seed)
+
     init_distributed_environment()
     # TODO: make the path creation lazy, but confirm that we can write to the given directory
     # at this point
@@ -1087,7 +1111,29 @@ def main(
     except json.JSONDecodeError:
         log_rank_0(f"Warning: Invalid JSON for lr_scheduler_kwargs: {lr_scheduler_kwargs}. Using empty dict.")
         scheduler_kwargs_dict = {}
-    
+ 
+    # If Orthogonal Subspace Learning is enabled, loads a model with decomposed trainable low-rank + fixed high-rank subspace weights (see osft_utils)
+    # Convert user-facing osft_unfreeze_rank_ratio to internal osft_rank_ratio
+    osft_rank_ratio = None if osft_unfreeze_rank_ratio is None else (1.0 - osft_unfreeze_rank_ratio)
+    model = setup_model(
+        model_name_or_path=model_name_or_path,
+        save_dtype=save_dtype,
+        train_dtype=train_dtype_torch,
+        use_liger_kernels=use_liger_kernels,
+        osft=osft,
+        local_rank=local_rank,
+        osft_rank_ratio=osft_rank_ratio,
+        osft_target_patterns=osft_target_patterns,
+        osft_upcast_dtype=osft_upcast_dtype_torch,
+        osft_output_dtype=osft_output_dtype_torch,
+    )
+
+    # Create PretrainingConfig if block_size is provided
+    pretraining_config = None
+    if block_size is not None:
+        pretraining_config = PretrainingConfig(block_size=block_size)
+        log_rank_0(f"Pretraining mode enabled with block_size={block_size}")
+
     # grab the data loader prior to the model so we can extract the dataset length
     # and use this for calculating the number of training steps in the data loader
     data_loader, val_data_loader = get_data_loader(
@@ -1095,7 +1141,9 @@ def main(
         batch_size=batch_size,
         max_tokens_per_gpu=max_tokens_per_gpu,
         seed=seed,
+        pad_token_id=model.config.pad_token_id,
         validation_split=validation_split,
+        pretraining_config=pretraining_config,
     )
     
     if validation_split > 0.0:
@@ -1116,22 +1164,6 @@ def main(
     )
     
     log_rank_0(f"Calculated num_training_steps: {num_training_steps}")
-    
-    # If Orthogonal Subspace Learning is enabled, loads a model with decomposed trainable low-rank + fixed high-rank subspace weights (see osft_utils)
-    # Convert user-facing osft_unfreeze_rank_ratio to internal osft_rank_ratio
-    osft_rank_ratio = None if osft_unfreeze_rank_ratio is None else (1.0 - osft_unfreeze_rank_ratio)
-    model = setup_model(
-        model_name_or_path=model_name_or_path,
-        save_dtype=save_dtype,
-        train_dtype=train_dtype_torch,
-        use_liger_kernels=use_liger_kernels,
-        osft=osft,
-        local_rank=local_rank,
-        osft_rank_ratio=osft_rank_ratio,
-        osft_target_patterns=osft_target_patterns,
-        osft_upcast_dtype=osft_upcast_dtype_torch,
-        osft_output_dtype=osft_output_dtype_torch,
-    )
     model, optimizer, lr_scheduler = setup_training_components(
         model=model,
         learning_rate=learning_rate,
