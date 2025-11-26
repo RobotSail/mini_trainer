@@ -89,8 +89,10 @@ class TestAlignModelAndTokenizer:
         
         mock_model = align_model_and_tokenizer(mock_model, mock_tokenizer)
         
-        # None values should be left alone
-        mock_log.assert_not_called()
+        # make sure everything worked properly
+        assert mock_model.config.pad_token_id is not None
+        assert mock_tokenizer.pad_token_id is not None
+        assert mock_model.config.pad_token_id == mock_tokenizer.pad_token_id
 
 
 class TestWrapFSDP2:
