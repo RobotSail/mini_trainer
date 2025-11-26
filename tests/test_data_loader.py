@@ -13,8 +13,7 @@ import tempfile
 import torch
 import numpy as np
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
-from pathlib import Path
+from unittest.mock import MagicMock, patch
 from torch.utils.data import DataLoader
 
 from mini_trainer.sampler import (
@@ -254,7 +253,7 @@ class TestMaxTokensPerRankCollator:
             world_size=2
         )
         
-        result = collator(sample_batch)
+        collator(sample_batch)
         
         # Check that warning was printed
         captured = capsys.readouterr()
@@ -479,7 +478,6 @@ class TestGetDataLoader:
     def test_padded_samples_on_last_rank(self, mock_world_size, mock_rank, mock_available, mock_initialized, temp_data_file):
         """Test basic data loader creation."""
         expected_batch_size = 9
-        expected_leftover_samples = 1
 
         # first try with an even batch size, so the last step will have 2 samples
         loader, _ = get_data_loader(
@@ -1122,8 +1120,8 @@ class TestDataLoaderBatchCount:
                     input_ids = list(range(100, 100 + seq_length))
                     # Make some labels -100 (ignored in loss)
                     labels = [lid if j > 2 else -100 for j, lid in enumerate(input_ids)]
-                    num_loss_counted = sum(1 for l in labels if l != -100)
-                    
+                    num_loss_counted = sum(1 for label in labels if label != -100)
+ 
                     sample = {
                         "input_ids": input_ids,
                         "labels": labels,
@@ -1192,10 +1190,10 @@ class TestDataLoaderBatchCount:
                 epoch_batch_counts.append(batch_count)
                 
                 # check that the dataloader actually increments epoch internally
-                assert data_loader.sampler.epoch == epoch, f"internal epoch state doesn't match what we expected"
+                assert data_loader.sampler.epoch == epoch, "internal epoch state doesn't match what we expected"
             
             # All epochs should have the same number of batches
-            assert len(set(epoch_batch_counts)) == 1, f"Batch counts vary across epochs: {epoch_batch_counts}"
+            assert len(set(epoch_batch_counts)) == 1, "Batch counts vary across epochs: {epoch_batch_counts}"
             assert epoch_batch_counts[0] > 0, "Should have at least one batch per epoch"
         
         finally:
