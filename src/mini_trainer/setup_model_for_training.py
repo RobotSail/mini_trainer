@@ -424,6 +424,10 @@ def setup_training_components(
             log_rank_0("Using Adamuon optimizer")
         else:
             log_rank_0("Using Muon optimizer")
+ 
+ 
+        # for our experiments we want adamw and muon to use the same lr, verify that's happening here
+        assert adamw_learning_rate == learning_rate
 
         optimizer = OptimizerClass(
            [
@@ -449,6 +453,9 @@ def setup_training_components(
         #    ns_steps=5,
            # momentum=0.9,
         )
+
+        
+
         # Log parameter counts for Muon optimizer
         muon_param_count = sum(p.numel() for p in select_muon_params(model.named_parameters()))
         adam_param_count = sum(p.numel() for p in select_adam_params(model.named_parameters()))
