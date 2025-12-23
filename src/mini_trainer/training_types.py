@@ -70,7 +70,13 @@ class TrainingArgs:
     )
     lr_scheduler_kwargs: Optional[Dict[str, Any]] = field(default_factory=dict, metadata={"help": "Additional keyword arguments for the learning rate scheduler."})
     seed: int = field(default=42, metadata={"help": "The random seed to use for training."})
-    
+
+    # AdamW optimizer parameters
+    beta1: float = field(default=0.9, metadata={"help": "Beta1 parameter for AdamW optimizer (momentum coefficient)."})
+    beta2: float = field(default=0.95, metadata={"help": "Beta2 parameter for AdamW optimizer (RMSprop coefficient)."})
+    eps: float = field(default=1e-8, metadata={"help": "Epsilon parameter for numerical stability in AdamW optimizer."})
+    weight_decay: float = field(default=0.0, metadata={"help": "Weight decay (L2 penalty) for AdamW optimizer."})
+
     # Model configuration
     use_liger_kernels: bool = field(default=False, metadata={"help": "Whether to use Liger kernels."})
     osft: bool = field(default=False, metadata={"help": "Whether to use OSFT (Orthogonal Subspace Fine-Tuning). If enabled, you must also specify the `osft_unfreeze_rank_ratio`."})

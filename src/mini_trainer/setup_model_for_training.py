@@ -1084,6 +1084,11 @@ def setup_training_components(
     lr_scheduler: str,
     num_training_steps: Optional[int] = None,
     scheduler_kwargs: Optional[Dict[str, Any]] = None,
+    # AdamW optimizer parameters
+    beta1: float = 0.9,
+    beta2: float = 0.95,
+    eps: float = 1e-8,
+    weight_decay: float = 0.0,
 ) -> tuple[torch.nn.Module, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
     """
     Set up training components including model wrapping, optimizer, and learning rate scheduler.
@@ -1137,8 +1142,9 @@ def setup_training_components(
     optimizer = torch.optim.AdamW(
         trainable_params,
         lr=learning_rate,
-        betas=(0.9, 0.95),
-        weight_decay=0.0,
+        betas=(beta1, beta2),
+        eps=eps,
+        weight_decay=weight_decay,
     )
     optimizer = osft_utils.optim_wrapper(optimizer, model)
     # Prepare scheduler kwargs

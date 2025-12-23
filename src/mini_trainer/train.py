@@ -941,6 +941,13 @@ def main(
     lr_scheduler: Annotated[str, Option(help="Learning rate scheduler type")] = "constant_with_warmup",
     lr_scheduler_kwargs: Annotated[str, Option(help="JSON string of scheduler-specific kwargs")] = "{}",
     seed: Annotated[int, Option(help="Random seed for reproducibility")] = 67,
+
+    # AdamW optimizer parameters
+    beta1: Annotated[float, Option(help="AdamW beta1 parameter (momentum coefficient)")] = 0.9,
+    beta2: Annotated[float, Option(help="AdamW beta2 parameter (RMSprop coefficient)")] = 0.95,
+    eps: Annotated[float, Option(help="AdamW epsilon for numerical stability")] = 1e-8,
+    weight_decay: Annotated[float, Option(help="AdamW weight decay (L2 penalty)")] = 0.0,
+
     use_liger_kernels: Annotated[bool, Option(help="Whether to use Liger kernels")] = False,
 
     osft: Annotated[bool, Option(help="Enable OSFT (Orthogonal Subspace Fine-Tuning)")] = False,
@@ -1171,6 +1178,11 @@ def main(
         lr_scheduler=lr_scheduler,
         num_training_steps=num_training_steps,
         scheduler_kwargs=scheduler_kwargs_dict,
+        # AdamW optimizer parameters
+        beta1=beta1,
+        beta2=beta2,
+        eps=eps,
+        weight_decay=weight_decay,
    )
     
     train(
