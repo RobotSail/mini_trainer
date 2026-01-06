@@ -23,6 +23,7 @@ Key Features:
   to fill a minibatch by using dummy samples, ensuring all ranks process the
   same number of minibatches.
 """
+
 from deprecated import deprecated
 import os
 
@@ -35,13 +36,17 @@ from mini_trainer.batch_packer import batch_lengths_to_minibatches_lpt
 from mini_trainer.utils import log_rank_0
 from mini_trainer.training_types import PretrainingConfig
 
+
 def reset_minibatches(num_ranks: int):
     return [[] for _ in range(num_ranks)], np.zeros(num_ranks)
 
 
-
-@deprecated("Use batch_lengths_to_minibatches_lpt instead for better load balancing performance")
-def batch_lengths_to_minibatches(batch_lengths: list[int], max_tokens_per_rank: int, num_ranks: int, rank: int):
+@deprecated(
+    "Use batch_lengths_to_minibatches_lpt instead for better load balancing performance"
+)
+def batch_lengths_to_minibatches(
+    batch_lengths: list[int], max_tokens_per_rank: int, num_ranks: int, rank: int
+):
     """Distributes indices from a batch into minibatches across ranks.
 
     Takes a list of sequence lengths corresponding to samples in an initial batch
@@ -77,31 +82,37 @@ def batch_lengths_to_minibatches(batch_lengths: list[int], max_tokens_per_rank: 
     current_minibatches_ids, current_minibatches_loads = reset_minibatches(num_ranks)
     for sid, sample_len in enumerate(batch_lengths):
         least_full_batch_id = np.argmin(current_minibatches_loads)
-        
-        if current_minibatches_loads[least_full_batch_id] + sample_len > max_tokens_per_rank:
-            '''when the least full minibatch is full, we need to start a new minibatch'''
+
+        if (
+            current_minibatches_loads[least_full_batch_id] + sample_len
+            > max_tokens_per_rank
+        ):
+            """when the least full minibatch is full, we need to start a new minibatch"""
             minibatches_indices.append(current_minibatches_ids)
-            current_minibatches_ids, current_minibatches_loads = reset_minibatches(num_ranks)
+            current_minibatches_ids, current_minibatches_loads = reset_minibatches(
+                num_ranks
+            )
             least_full_batch_id = 0
-        
-        '''add sample to the least full minibatch'''
+
+        """add sample to the least full minibatch"""
         current_minibatches_ids[least_full_batch_id].append(sid)
         current_minibatches_loads[least_full_batch_id] += sample_len
-    
+
     if any(current_minibatches_loads):
         for i in range(num_ranks):
             if current_minibatches_loads[i] == 0:
                 current_minibatches_ids[i].append(-1)
         minibatches_indices.append(current_minibatches_ids)
-        
+
     return [m[rank] for m in minibatches_indices]
+
 
 class JsonlDataset(Dataset):
     def __init__(
         self,
         path: str | None = None,
         max_seq_len: int | None = None,
-        hf_dataset: HFDataset | None = None, 
+        hf_dataset: HFDataset | None = None,
     ):
         """
         Initializes a JsonlDataset object which we use to load and process the dataset.
@@ -134,28 +145,29 @@ class JsonlDataset(Dataset):
 
     def __getitem__(self, index: int):
         sample = self.dataset[int(index)]
-        
+
         # Determine the number of loss-counted tokens if the field is missing.
         if (loss_counted_tokens := sample.get("num_loss_counted_tokens", None)) is None:
-            
             # causal LMs shift labels to the left when calculating cross-entropy loss
             # so we must account for this shift when we calculate cross-entropy
             loss_counted_tokens = sum(
-                1 if label != -100 else 0 for label in sample["labels"][1:]  
+                1 if label != -100 else 0 for label in sample["labels"][1:]
             )
 
         item = {
-            'input_ids': torch.tensor(sample['input_ids'], dtype=torch.long),
-            'labels': torch.tensor(sample['labels'], dtype=torch.long),
-            'len': sample['len'],
-            'num_loss_counted_tokens': loss_counted_tokens,
+            "input_ids": torch.tensor(sample["input_ids"], dtype=torch.long),
+            "labels": torch.tensor(sample["labels"], dtype=torch.long),
+            "len": sample["len"],
+            "num_loss_counted_tokens": loss_counted_tokens,
         }
 
         # ensure that an attention mask exists if the sample came with one
-        if 'attention_mask' in sample:
-            item['attention_mask'] = torch.tensor(sample['attention_mask'], dtype=torch.long)
+        if "attention_mask" in sample:
+            item["attention_mask"] = torch.tensor(
+                sample["attention_mask"], dtype=torch.long
+            )
         return item
-    
+
     @classmethod
     def add_necessary_fields(cls, dataset: HFDataset) -> HFDataset:
         required_fields = ["input_ids", "labels"]
@@ -169,34 +181,34 @@ class JsonlDataset(Dataset):
                 lambda s: {
                     # causal LMs shift labels to the left when calculating cross-entropy loss
                     "num_loss_counted_tokens": sum(
-                        1 for tok in s["labels"][1:] if tok != -100 
+                        1 for tok in s["labels"][1:] if tok != -100
                     )
                 }
             )
-        
+
         return dataset
 
     @classmethod
     def filter_by_max_seq_len(cls, dataset: HFDataset, max_seq_len: int) -> HFDataset:
         dataset = dataset.filter(lambda x: x["len"] <= max_seq_len)
         return dataset
-    
+
     @classmethod
     def load_and_split(
-        cls, 
-        data_path: str, 
+        cls,
+        data_path: str,
         validation_split: float = 0.0,
         max_seq_len: int | None = None,
-        seed: int = 42
+        seed: int = 42,
     ) -> tuple["JsonlDataset", "JsonlDataset | None"]:
         """Load dataset and optionally split into train/validation sets.
-        
+
         Args:
             data_path: Path to JSONL file or HuggingFace dataset name
             validation_split: Fraction of data to use for validation (0.0 to 1.0)
             max_seq_len: Maximum sequence length (filters out longer sequences)
             seed: Random seed for reproducible splits
-            
+
         Returns:
             tuple: (train_dataset, val_dataset) where val_dataset is None if validation_split <= 0
         """
@@ -205,7 +217,7 @@ class JsonlDataset(Dataset):
             hf_dataset = load_dataset("json", data_files=data_path, split="train")
         else:
             hf_dataset = load_dataset(data_path, split="train")
-        
+
         # add necessary fields & filter by max_seq_len if specified
         hf_dataset = cls.add_necessary_fields(hf_dataset)
         if max_seq_len is not None:
@@ -217,18 +229,16 @@ class JsonlDataset(Dataset):
                     f"\033[33mFiltered out {original_size - filtered_size} samples "
                     f"(out of {original_size}) that exceed max_seq_len={max_seq_len}\033[0m"
                 )
-        
+
         val_dataset = None
         if validation_split <= 0.0:
             # default case
             train_dataset = cls(hf_dataset=hf_dataset)
             return train_dataset, val_dataset
-        
+
         # validation split case
         split_dataset = hf_dataset.train_test_split(
-            test_size=validation_split,
-            seed=seed,
-            shuffle=True
+            test_size=validation_split, seed=seed, shuffle=True
         )
         train_dataset = cls(hf_dataset=split_dataset["train"])
         val_dataset = cls(hf_dataset=split_dataset["test"])
@@ -265,7 +275,7 @@ class PretrainingBlockDataset(Dataset):
         # Concatenate all input_ids into one giant list
         all_input_ids = []
         for sample in dataset:
-            all_input_ids.extend(sample['input_ids'])
+            all_input_ids.extend(sample["input_ids"])
 
         # calculates the offset of the final block (which may be smaller than block_size)
         # so we can sample from the full list of IDs and avoid wasting data
@@ -286,61 +296,63 @@ class PretrainingBlockDataset(Dataset):
 
         log_rank_0(f"Total tokens: {total_tokens:,}")
         log_rank_0(f"Block size: {block_size}")
-        log_rank_0(f"Total blocks: {self.num_blocks:,} ({num_complete_blocks} complete, {1 if remainder else 0} partial)")
+        log_rank_0(
+            f"Total blocks: {self.num_blocks:,} ({num_complete_blocks} complete, {1 if remainder else 0} partial)"
+        )
         if remainder:
             log_rank_0(f"Partial block size: {remainder} tokens")
 
     def __len__(self):
         return self.num_blocks
-    
+
     @classmethod
-    def from_jsonl_file(cls, data_path: str, block_size: int, pad_token_id: int) -> "PretrainingBlockDataset":
+    def from_jsonl_file(
+        cls, data_path: str, block_size: int, pad_token_id: int
+    ) -> "PretrainingBlockDataset":
         """Load a dataset from a JSONL file and create a PretrainingBlockDataset."""
         dataset = load_dataset("json", data_files=data_path, split="train")
         return cls(dataset, block_size, pad_token_id)
 
     @classmethod
     def load_and_split(
-        cls, 
-        data_path: str, 
-        block_size: int, 
+        cls,
+        data_path: str,
+        block_size: int,
         pad_token_id: int,
         validation_split: float = 0.0,
-        seed: int = 42
+        seed: int = 42,
     ) -> tuple["PretrainingBlockDataset", "PretrainingBlockDataset | None"]:
         """
         Load a dataset from a JSONL file and create a PretrainingBlockDataset,
         optionally splitting it into train and validation sets.
-        
+
         Args:
             data_path: Path to JSONL file with tokenized documents
             block_size: Size of each block in tokens
             validation_split: Fraction of data to use for validation (0.0 to 1.0)
             seed: Random seed for splitting
-            
+
         Returns:
             Tuple of (train_dataset, val_dataset). val_dataset is None if validation_split is 0.
         """
         if not (0.0 <= validation_split < 1.0):
-            raise ValueError(f"validation_split must be in [0.0, 1.0), got {validation_split}")
-        
+            raise ValueError(
+                f"validation_split must be in [0.0, 1.0), got {validation_split}"
+            )
+
         dataset = load_dataset("json", data_files=data_path, split="train")
-        
+
         if validation_split == 0.0:
             train_dataset = cls(dataset, block_size, pad_token_id)
             return train_dataset, None
-        
+
         # Split the dataset
-        split_dataset = dataset.train_test_split(
-            test_size=validation_split,
-            seed=seed
-        )
-        
+        split_dataset = dataset.train_test_split(test_size=validation_split, seed=seed)
+
         # create and return the datasets
         train_dataset = cls(split_dataset["train"], block_size, pad_token_id)
         val_dataset = cls(split_dataset["test"], block_size, pad_token_id)
         return train_dataset, val_dataset
-
 
     def __getitem__(self, idx: int):
         """
@@ -354,7 +366,7 @@ class PretrainingBlockDataset(Dataset):
         start = idx * self.block_size
         end = start + self.block_size
 
-        is_last_block = (idx == self.num_blocks - 1)
+        is_last_block = idx == self.num_blocks - 1
         is_partial = is_last_block and (len(self.all_input_ids) % self.block_size != 0)
         if is_partial:
             # partial block: get actual tokens and pad the rest
@@ -370,13 +382,12 @@ class PretrainingBlockDataset(Dataset):
             input_ids = self.all_input_ids[start:end]
             labels = list(input_ids)  # Create explicit copy to avoid reference issues
             num_loss_counted = self.block_size - 1
- 
 
         return {
-            'input_ids': torch.tensor(input_ids, dtype=torch.long),
-            'labels': torch.tensor(labels, dtype=torch.long),
-            'len': self.block_size,
-            'num_loss_counted_tokens': num_loss_counted,
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "labels": torch.tensor(labels, dtype=torch.long),
+            "len": self.block_size,
+            "num_loss_counted_tokens": num_loss_counted,
         }
 
 
@@ -384,6 +395,7 @@ class EpochSampler(Sampler):
     """
     Here we redefine RandomSampler so we can have a consistent signature with InfiniteSampler
     """
+
     def __init__(self, len_data: int, seed: int = 67, epoch: int = 0):
         self.len_data = len_data
         self.seed = seed
@@ -400,7 +412,7 @@ class EpochSampler(Sampler):
         g = torch.Generator()
         g.manual_seed(self.seed + self._epoch)
         samples = torch.randperm(self.len_data, generator=g).tolist()
-        return samples 
+        return samples
 
     def __iter__(self):
         samples = self.generate_samples()
@@ -458,9 +470,9 @@ def mb_collate_fn(minibatch, batch_num_loss_counted_tokens):
         total_len += item_len
         # sample_loss_counted_tokens = (item["labels"] != -100).sum().item()
         num_loss_counted_tokens += item["num_loss_counted_tokens"]
-        
-        '''dummy samples don't have labels != -100 and should not count'''
-        num_samples += 1 if item["num_loss_counted_tokens"] > 0 else 0 
+
+        """dummy samples don't have labels != -100 and should not count"""
+        num_samples += 1 if item["num_loss_counted_tokens"] > 0 else 0
 
     # print(
     #     f"\033[96m total length: {total_len} "
@@ -477,7 +489,9 @@ def mb_collate_fn(minibatch, batch_num_loss_counted_tokens):
     }
 
 
-def padded_mb_collate_fn(minibatch: list[dict], batch_num_loss_counted_tokens: int, pad_token_id: int) -> dict:
+def padded_mb_collate_fn(
+    minibatch: list[dict], batch_num_loss_counted_tokens: int, pad_token_id: int
+) -> dict:
     """Collates a list of samples into a padded batch for standard attention.
 
     This function takes a minibatch (list of dataset samples) and creates padded
@@ -557,7 +571,8 @@ def padded_mb_collate_fn(minibatch: list[dict], batch_num_loss_counted_tokens: i
         "num_samples": num_samples,
         "batch_num_loss_counted_tokens": batch_num_loss_counted_tokens,
     }
-    
+
+
 class MaxTokensPerRankCollator:
     """A collate function for PyTorch DataLoader for distributed training.
 
@@ -582,22 +597,39 @@ class MaxTokensPerRankCollator:
         dummy_sample (dict, optional): A sample used for padding when a rank
             has no real samples assigned in a minibatch.
     """
-    def __init__(self, max_tokens_per_rank: int, rank: int=None, world_size: int=None, dummy_sample=None):
+
+    def __init__(
+        self,
+        max_tokens_per_rank: int,
+        rank: int = None,
+        world_size: int = None,
+        dummy_sample=None,
+    ):
         self.max_tokens_per_rank = max_tokens_per_rank
 
         if rank is None:
-            self.global_rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+            self.global_rank = (
+                dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+            )
         else:
             self.global_rank = rank
         if world_size is None:
-            self.world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
+            self.world_size = (
+                dist.get_world_size()
+                if dist.is_available() and dist.is_initialized()
+                else 1
+            )
         else:
             self.world_size = world_size
         if dummy_sample is None:
-            dummy_sample = {'input_ids': torch.tensor([15, 14, 13, 12, 11], dtype=torch.long),
-                            'labels': torch.tensor([-100, -100, -100, -100, -100], dtype=torch.long),
-                            'len': 5,
-                            'num_loss_counted_tokens': 0}
+            dummy_sample = {
+                "input_ids": torch.tensor([15, 14, 13, 12, 11], dtype=torch.long),
+                "labels": torch.tensor(
+                    [-100, -100, -100, -100, -100], dtype=torch.long
+                ),
+                "len": 5,
+                "num_loss_counted_tokens": 0,
+            }
         self.dummy_sample = dummy_sample
 
     def __call__(self, batch: list[dict]):
@@ -610,9 +642,11 @@ class MaxTokensPerRankCollator:
             A list where each element is a dictionary representing a collated minibatch
             (output of `mb_collate_fn`) ready for processing by the current rank.
         """
-        batch_ = [b for b in batch if b['len'] <= self.max_tokens_per_rank]
+        batch_ = [b for b in batch if b["len"] <= self.max_tokens_per_rank]
         if len(batch_) < len(batch):
-            log_rank_0(f"\033[38;5;196mremoved {len(batch) - len(batch_)} samples from batch because they are longer than the max tokens per gpu\033[0m")
+            log_rank_0(
+                f"\033[38;5;196mremoved {len(batch) - len(batch_)} samples from batch because they are longer than the max tokens per gpu\033[0m"
+            )
         # Use filtered batch for lengths and loss counts
         batch_lengths = [sample["len"] for sample in batch_]
         batch_num_loss_counted_tokens = sum(
@@ -673,12 +707,16 @@ def get_data_loader(
     """
     # Validate parameters
     if validation_split < 0.0 or validation_split >= 1.0:
-        raise ValueError(f"validation_split must be between 0 and 1 (exclusive of 1), got {validation_split}")
-    
+        raise ValueError(
+            f"validation_split must be between 0 and 1 (exclusive of 1), got {validation_split}"
+        )
+
     # Create dataset based on mode
     if pretraining_config is not None:
         if pad_token_id is None or pad_token_id < 0:
-            raise ValueError(f"pretraining mode requires a valid non-negative pad_token_id, got: {pad_token_id=}")
+            raise ValueError(
+                f"pretraining mode requires a valid non-negative pad_token_id, got: {pad_token_id=}"
+            )
         # Pretraining mode: use PretrainingBlockDataset
         train_dataset, val_dataset = PretrainingBlockDataset.load_and_split(
             data_path=data_path,
@@ -687,9 +725,13 @@ def get_data_loader(
             validation_split=validation_split,
             seed=seed,
         )
-        log_rank_0(f"Pretraining dataset: {len(train_dataset)} blocks of size {pretraining_config.block_size}")
+        log_rank_0(
+            f"Pretraining dataset: {len(train_dataset)} blocks of size {pretraining_config.block_size}"
+        )
         if val_dataset is not None:
-            log_rank_0(f"Validation dataset: {len(val_dataset)} blocks of size {pretraining_config.block_size}")
+            log_rank_0(
+                f"Validation dataset: {len(val_dataset)} blocks of size {pretraining_config.block_size}"
+            )
         else:
             log_rank_0("No validation dataset")
     else:
@@ -698,61 +740,67 @@ def get_data_loader(
             data_path=data_path,
             validation_split=validation_split,
             max_seq_len=max_seq_len,
-            seed=seed
+            seed=seed,
         )
         if val_dataset is not None:
-            log_rank_0(f"Dataset split: {len(train_dataset)} train, {len(val_dataset)} validation samples")
+            log_rank_0(
+                f"Dataset split: {len(train_dataset)} train, {len(val_dataset)} validation samples"
+            )
         else:
             log_rank_0(f"Dataset split: {len(train_dataset)} train")
 
-    
     # Create collate function
     collate_fn = MaxTokensPerRankCollator(
-        max_tokens_per_gpu, 
-        rank=rank, 
-        world_size=world_size, 
+        max_tokens_per_gpu,
+        rank=rank,
+        world_size=world_size,
         dummy_sample=dummy_sample,
     )
-    
+
     # Create train data loader
     train_sampler = EpochSampler(len(train_dataset), seed=seed)
     train_loader = DataLoader(
-        train_dataset, 
-        batch_size, 
+        train_dataset,
+        batch_size,
         sampler=train_sampler,
         collate_fn=collate_fn,
         num_workers=num_workers,
         drop_last=False,
     )
-    
+
     # Create validation data loader if needed
     val_loader = None
     if val_dataset is not None:
         val_sampler = SequentialSampler(val_dataset)
         val_loader = DataLoader(
-            val_dataset, 
-            batch_size, 
+            val_dataset,
+            batch_size,
             sampler=val_sampler,
             collate_fn=collate_fn,
             num_workers=num_workers,
             drop_last=False,
         )
-    
+
     return train_loader, val_loader
 
+
 if __name__ == "__main__":
-    data_loader, _ = get_data_loader(data_path="test.jsonl",
-                                     batch_size=40,
-                                     max_tokens_per_gpu=5000,
-                                     seed=37,
-                                     rank=0,
-                                     world_size=2)
-    data_loader2, _ = get_data_loader(data_path="test.jsonl",
-                                      batch_size=26,
-                                      max_tokens_per_gpu=5000,
-                                      seed=37,
-                                      rank=1,
-                                      world_size=2)
+    data_loader, _ = get_data_loader(
+        data_path="test.jsonl",
+        batch_size=40,
+        max_tokens_per_gpu=5000,
+        seed=37,
+        rank=0,
+        world_size=2,
+    )
+    data_loader2, _ = get_data_loader(
+        data_path="test.jsonl",
+        batch_size=26,
+        max_tokens_per_gpu=5000,
+        seed=37,
+        rank=1,
+        world_size=2,
+    )
     data_loader = iter(data_loader)
     data_loader2 = iter(data_loader2)
     batch = next(data_loader)

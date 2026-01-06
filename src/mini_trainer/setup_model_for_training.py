@@ -11,10 +11,22 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.checkpoint.state_dict import set_model_state_dict, StateDictOptions
+from torch.distributed.checkpoint.state_dict import (
+    set_model_state_dict,
+    StateDictOptions,
+)
 from transformers import AutoTokenizer, AutoConfig, Mxfp4Config
-from mini_trainer.utils import get_model_class_from_config, log_rank_0, patch_target_module
-from mini_trainer.osft_utils import OSFTModel, _build_osft_kwargs, create_osft_model_class, _set_osft_dtypes
+from mini_trainer.utils import (
+    get_model_class_from_config,
+    log_rank_0,
+    patch_target_module,
+)
+from mini_trainer.osft_utils import (
+    OSFTModel,
+    _build_osft_kwargs,
+    create_osft_model_class,
+    _set_osft_dtypes,
+)
 from mini_trainer.gpt_oss_utils import freeze_router_params, is_gpt_oss_model
 import mini_trainer.osft_utils as osft_utils
 from mini_trainer.fsdp2_lazy_init import (
@@ -88,11 +100,11 @@ class ModelInitializationContext:
         state_dict: State dict from rank 0 (None on other ranks)
         train_dtype: Training dtype for SFT models
     """
+
     is_sft: bool = False
     is_osft: bool = False
     state_dict: Optional[Dict[str, torch.Tensor]] = None
     train_dtype: Optional[torch.dtype] = None
-
 
 
 def _sanitize_meta_attribute_aliases(model: torch.nn.Module) -> int:
@@ -110,12 +122,21 @@ def _sanitize_meta_attribute_aliases(model: torch.nn.Module) -> int:
 
     # best-effort local target device per rank
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    default_device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
+    default_device = (
+        torch.device("cuda", local_rank)
+        if torch.cuda.is_available()
+        else torch.device("cpu")
+    )
 
     def _is_osft_owned_attribute(module: torch.nn.Module, name: str) -> bool:
         if name.startswith("osft_") or name in {"U_low", "S_low", "V_low", "rank_high"}:
             return True
-        return hasattr(module, "osft_params") and name in {"U_low", "S_low", "V_low", "rank_high"}
+        return hasattr(module, "osft_params") and name in {
+            "U_low",
+            "S_low",
+            "V_low",
+            "rank_high",
+        }
 
     for module in model.modules():
         # collect available candidates from this module
@@ -167,15 +188,15 @@ def _sanitize_meta_attribute_aliases(model: torch.nn.Module) -> int:
                 try:
                     # check if model has expected dtype (e.g., from OSFT)
                     expected_dtype = None
-                    if hasattr(model, 'output_dtype'):
+                    if hasattr(model, "output_dtype"):
                         expected_dtype = model.output_dtype
-                    elif hasattr(model, 'dtype'):
+                    elif hasattr(model, "dtype"):
                         expected_dtype = model.dtype
-                    
+
                     fixed = candidate.detach().clone()
                     if expected_dtype and fixed.dtype != expected_dtype:
                         fixed = fixed.to(dtype=expected_dtype)
-                    
+
                     module.__dict__[attr_name] = fixed
                     repaired += 1
                 except Exception:
@@ -185,7 +206,9 @@ def _sanitize_meta_attribute_aliases(model: torch.nn.Module) -> int:
             # CPU → move to module-local device (only for non-param/buffer attributes)
             if value.device.type == "cpu" and target_device.type != "cpu":
                 try:
-                    module.__dict__[attr_name] = value.to(device=target_device, dtype=value.dtype)
+                    module.__dict__[attr_name] = value.to(
+                        device=target_device, dtype=value.dtype
+                    )
                     repaired += 1
                 except Exception:
                     # leave as-is if movement is unsafe
@@ -194,7 +217,9 @@ def _sanitize_meta_attribute_aliases(model: torch.nn.Module) -> int:
     return repaired
 
 
-def _get_module_by_name(model: torch.nn.Module, name: str) -> tuple[Optional[torch.nn.Module], Optional[str]]:
+def _get_module_by_name(
+    model: torch.nn.Module, name: str
+) -> tuple[Optional[torch.nn.Module], Optional[str]]:
     """
     Helper to traverse and retrieve a module and its attribute by name.
 
@@ -221,7 +246,7 @@ def _get_module_by_name(model: torch.nn.Module, name: str) -> tuple[Optional[tor
 def _materialize_meta_buffers(
     model: torch.nn.Module,
     buffer_dict: Dict[str, torch.Tensor],
-    expected_dtype: Optional[torch.dtype] = None
+    expected_dtype: Optional[torch.dtype] = None,
 ) -> int:
     """
     Materialize buffers from CPU/other device to the model, replacing meta device buffers.
@@ -251,7 +276,9 @@ def _materialize_meta_buffers(
             curr_buff = getattr(mod, attr, None)
             if curr_buff is not None and curr_buff.device.type == "meta":
                 # Determine target dtype
-                target_dtype = expected_dtype if expected_dtype is not None else curr_buff.dtype
+                target_dtype = (
+                    expected_dtype if expected_dtype is not None else curr_buff.dtype
+                )
 
                 # Convert dtype if needed
                 if buf_data.dtype != target_dtype:
@@ -270,6 +297,7 @@ def _materialize_meta_buffers(
 # Generic distributed model loading abstractions for SFT/OSFT integration
 # ==============================================================================
 
+
 def _synchronize_state_dict_fsdp2(
     model,
     state_dict: dict[str, torch.Tensor],
@@ -277,25 +305,27 @@ def _synchronize_state_dict_fsdp2(
 ):
     """
     Generic state dict synchronization for FSDP2-wrapped models.
-    
+
     Broadcasts state dict from rank 0 to all other ranks after FSDP2 sharding.
-    
+
     Args:
         model: FSDP2-wrapped model
         state_dict: Full state dict (only populated on rank 0, None/empty on others)
         strict: Whether to enforce strict state dict loading
     """
-    
+
     if not dist.is_available() or not dist.is_initialized():
-        raise RuntimeError("_synchronize_state_dict_fsdp2 requires torch.distributed to be initialized")
-    
+        raise RuntimeError(
+            "_synchronize_state_dict_fsdp2 requires torch.distributed to be initialized"
+        )
+
     # prepare state dict for rank 0
     final_state_dict = {}
     if dist.get_rank() == 0:
         if state_dict is None or len(state_dict) == 0:
             raise ValueError("Rank 0 must provide a non-empty state dict")
         final_state_dict = state_dict
-    
+
     # broadcast to all ranks
     log_rank_0("📤 Broadcasting state dict to all ranks...")
     set_model_state_dict(
@@ -305,7 +335,7 @@ def _synchronize_state_dict_fsdp2(
             full_state_dict=True,
             broadcast_from_rank0=True,
             strict=strict,
-        )
+        ),
     )
     log_rank_0("✅ State dict synchronized across all ranks")
 
@@ -336,18 +366,22 @@ def prepare_model_for_fsdp2(model: torch.nn.Module) -> ModelInitializationContex
         log_rank_0("🔧 [Phase 1] Detected SFT lazy initialization")
 
         # Extract state dict from rank 0
-        context.state_dict = getattr(model, '_fsdp2_pending_state_dict', None)
+        context.state_dict = getattr(model, "_fsdp2_pending_state_dict", None)
         if dist.get_rank() == 0:
             if context.state_dict is None or len(context.state_dict) == 0:
-                raise RuntimeError("Rank 0 must have a non-empty state dict for SFT lazy init")
+                raise RuntimeError(
+                    "Rank 0 must have a non-empty state dict for SFT lazy init"
+                )
             log_rank_0("📦 [SFT] Rank 0 has state dict for lazy init")
         else:
             if context.state_dict is not None and len(context.state_dict) > 0:
-                raise RuntimeError("Non-rank 0 should not have state dict for SFT lazy init")
+                raise RuntimeError(
+                    "Non-rank 0 should not have state dict for SFT lazy init"
+                )
 
         # Extract training dtype and buffer dict
-        context.train_dtype = getattr(model, '_fsdp2_train_dtype', None)
-        buffer_dict = getattr(model, '_fsdp2_pending_buffers', None)
+        context.train_dtype = getattr(model, "_fsdp2_train_dtype", None)
+        buffer_dict = getattr(model, "_fsdp2_pending_buffers", None)
 
         # Materialize buffers before FSDP2 wrapping
         if buffer_dict:
@@ -369,17 +403,23 @@ def prepare_model_for_fsdp2(model: torch.nn.Module) -> ModelInitializationContex
         context.state_dict = model.eject_og_state_dict()
         if dist.get_rank() == 0:
             if context.state_dict is None or len(context.state_dict) == 0:
-                raise RuntimeError("Rank 0 must have a non-empty state dict for OSFT lazy init")
+                raise RuntimeError(
+                    "Rank 0 must have a non-empty state dict for OSFT lazy init"
+                )
             log_rank_0("📦 [OSFT] Rank 0 has original state dict")
         else:
             if context.state_dict is not None and len(context.state_dict) > 0:
-                raise RuntimeError("Non-rank 0 should not have state dict for OSFT lazy init")
+                raise RuntimeError(
+                    "Non-rank 0 should not have state dict for OSFT lazy init"
+                )
 
         log_rank_0("✅ [Phase 1] OSFT preparation complete")
         return context
 
     # No lazy initialization detected
-    log_rank_0("ℹ️  [Phase 1] No lazy initialization detected, proceeding with standard path")
+    log_rank_0(
+        "ℹ️  [Phase 1] No lazy initialization detected, proceeding with standard path"
+    )
     return context
 
 
@@ -409,7 +449,7 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     )
 
     # Disable HuggingFace cache if present
-    if hasattr(model, 'config'):
+    if hasattr(model, "config"):
         try:
             model.config.use_cache = False
         except Exception as e:
@@ -430,7 +470,9 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
         )
 
     # Apply activation checkpointing to each block
-    log_rank_0(f"🔄 [Phase 2] Applying activation checkpointing to {len(layers)} blocks")
+    log_rank_0(
+        f"🔄 [Phase 2] Applying activation checkpointing to {len(layers)} blocks"
+    )
     for idx, block in enumerate(layers):
         # preserve_rng_state needs to be true so that the backward pass can be accurate
         layers[idx] = ptd_checkpoint_wrapper(block, preserve_rng_state=True)
@@ -466,8 +508,7 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
 
 
 def finalize_model_initialization(
-    model: torch.nn.Module,
-    context: ModelInitializationContext
+    model: torch.nn.Module, context: ModelInitializationContext
 ) -> torch.nn.Module:
     """
     Phase 3: Finalize model initialization by distributing weights.
@@ -492,7 +533,9 @@ def finalize_model_initialization(
         # Convert dtypes on rank 0 before broadcasting
         # (set_model_state_dict doesn't auto-cast like load_state_dict)
         if dist.get_rank() == 0 and context.state_dict:
-            expected_dtype = context.train_dtype if context.train_dtype else model.config.torch_dtype
+            expected_dtype = (
+                context.train_dtype if context.train_dtype else model.config.torch_dtype
+            )
             converted_state_dict = {}
             conversions = 0
 
@@ -504,7 +547,9 @@ def finalize_model_initialization(
                     converted_state_dict[key] = value
 
             if conversions > 0:
-                log_rank_0(f"🔧 [SFT] Converted {conversions} parameters to {expected_dtype}")
+                log_rank_0(
+                    f"🔧 [SFT] Converted {conversions} parameters to {expected_dtype}"
+                )
             context.state_dict = converted_state_dict
 
         # Broadcast state dict to all ranks
@@ -532,7 +577,9 @@ def finalize_model_initialization(
 
         # Step 1: Synchronize non-OSFT parameters across ranks
         log_rank_0("🔄 [OSFT] Distributing non-OSFT parameters")
-        model.post_fsdp2_wrap_synchronize_state_dict_across_procs(model, context.state_dict)
+        model.post_fsdp2_wrap_synchronize_state_dict_across_procs(
+            model, context.state_dict
+        )
         log_rank_0("   ✓ Non-OSFT parameters distributed")
 
         # Step 2: Compute distributed SVD and distribute OSFT parameters
@@ -546,7 +593,9 @@ def finalize_model_initialization(
     else:
         if _distributed_initialized():
             raise ValueError("invalid model type, expected SFT or OSFT model")
-        log_rank_0("ℹ️  [Phase 3] Non-distributed initialization detected, skipping distributed finalization logic")
+        log_rank_0(
+            "ℹ️  [Phase 3] Non-distributed initialization detected, skipping distributed finalization logic"
+        )
 
     if context.is_sft:
         set_fsdp2_lazy_init_mode(model, None)
@@ -554,7 +603,9 @@ def finalize_model_initialization(
     # Sanitize meta tensor attributes (common to all paths)
     fixed_generic = _sanitize_meta_attribute_aliases(model)
     if fixed_generic:
-        path_type = "SFT" if context.is_sft else ("OSFT" if context.is_osft else "Standard")
+        path_type = (
+            "SFT" if context.is_sft else ("OSFT" if context.is_osft else "Standard")
+        )
         log_rank_0(f"🧩 [{path_type}] Sanitized {fixed_generic} meta tensor attributes")
 
     return model
@@ -591,9 +642,9 @@ def align_model_and_tokenizer(model, tokenizer):
     # Step 2: Sync all special tokens from tokenizer to model.config
     # This ensures model.config always reflects tokenizer's special tokens
     special_tokens = {
-        'pad': ('pad_token_id', 'Syncing model pad token id'),
-        'bos': ('bos_token_id', 'Syncing model bos token id'),
-        'eos': ('eos_token_id', 'Syncing model eos token id')
+        "pad": ("pad_token_id", "Syncing model pad token id"),
+        "bos": ("bos_token_id", "Syncing model bos token id"),
+        "eos": ("eos_token_id", "Syncing model eos token id"),
     }
 
     for token_type, (token_attr, message) in special_tokens.items():
@@ -602,15 +653,15 @@ def align_model_and_tokenizer(model, tokenizer):
 
         # Always sync tokenizer -> model.config when tokenizer has a valid value
         if tokenizer_token is not None and model_token != tokenizer_token:
-            log_rank_0(
-                f"{message}: {model_token} -> {tokenizer_token}"
-            )
+            log_rank_0(f"{message}: {model_token} -> {tokenizer_token}")
             setattr(model.config, token_attr, tokenizer_token)
 
     return model
 
 
-def get_model_save_dtype(save_dtype: str | torch.dtype | None, model_name_or_path: str) -> torch.dtype:
+def get_model_save_dtype(
+    save_dtype: str | torch.dtype | None, model_name_or_path: str
+) -> torch.dtype:
     """
     Given an HF model reference and an optional user-provided save_dtype, returns the PyTorch data type that it should
     be saved in.
@@ -638,40 +689,49 @@ def get_model_save_dtype(save_dtype: str | torch.dtype | None, model_name_or_pat
         "bfloat16": torch.bfloat16,
     }
     default_dtype = torch.bfloat16
-    
+
     # FSDP2 requires us to load the model in FP32 to begin with for the
-    # correct mixed-precision settings. So to circumvent this, we load the 
-    # original model's config separately 
+    # correct mixed-precision settings. So to circumvent this, we load the
+    # original model's config separately
     original_config = AutoConfig.from_pretrained(model_name_or_path)
     original_dtype = getattr(original_config, "torch_dtype", None)
-    
+
     # HF models return a torch.dtype from this field, but docs mark it as an optional string
     if original_dtype is not None and isinstance(original_dtype, str):
         original_dtype = dtype_map[original_dtype]
 
     # this handles the case when save_dtype > original_dtype > bf16
     if not original_dtype and not save_dtype:
-        log_rank_0(f"⚠️ Model does not have a setting for `torch_dtype` and not `save_dtype` was provided, falling back to '{default_dtype}'")
+        log_rank_0(
+            f"⚠️ Model does not have a setting for `torch_dtype` and not `save_dtype` was provided, falling back to '{default_dtype}'"
+        )
         return default_dtype
 
     # handles the case save_dtype > original_dtype
     if not save_dtype:
         return original_dtype
-    
+
     # by now we know that we are going to use a custom data type, so we just validate
     if not isinstance(save_dtype, (str, torch.dtype)):
-        raise ValueError(f"error: could not recognize '{save_dtype}' as a supported dtype for saving model checkpoints")
- 
+        raise ValueError(
+            f"error: could not recognize '{save_dtype}' as a supported dtype for saving model checkpoints"
+        )
+
     # convert dtype to a str
     if isinstance(save_dtype, str):
         if save_dtype not in dtype_map:
-            raise ValueError(f"error: could not recognize '{save_dtype}' as a supported dtype for saving model checkpoints")
+            raise ValueError(
+                f"error: could not recognize '{save_dtype}' as a supported dtype for saving model checkpoints"
+            )
         save_dtype = dtype_map[save_dtype]
-    
+
     # alert the user when the dtype differs
     if original_dtype and original_dtype != save_dtype:
-        log_rank_0(f"⚠️ Model's original dtype is '{original_dtype}', but new checkpoints will be saved as '{save_dtype}'. ⚠️")
+        log_rank_0(
+            f"⚠️ Model's original dtype is '{original_dtype}', but new checkpoints will be saved as '{save_dtype}'. ⚠️"
+        )
     return save_dtype
+
 
 def setup_osft_model_distributed(
     model_name_or_path: str,
@@ -685,14 +745,14 @@ def setup_osft_model_distributed(
 ):
     """
     Initialize an OSFT model for distributed training with memory-efficient loading.
-    
+
     This function uses the FSDP2 lazy initialization path where:
     - Rank 0 loads the full model to CPU
     - All other ranks create meta device models
     - State dict is broadcast after FSDP2 sharding
-    
+
     This requires torch.distributed to be initialized.
-    
+
     Args:
         model_name_or_path: HuggingFace model name or path
         base_model_args: Base arguments for model loading
@@ -702,7 +762,7 @@ def setup_osft_model_distributed(
         osft_target_patterns: Patterns for selecting OSFT target parameters
         osft_upcast_dtype: Dtype for OSFT computations
         osft_output_dtype: Dtype for OSFT outputs
-        
+
     Returns:
         OSFT model ready for FSDP2 wrapping
     """
@@ -715,10 +775,8 @@ def setup_osft_model_distributed(
 
     osft_kwargs = _build_osft_kwargs(osft_rank_ratio, osft_target_patterns)
 
-
     # Determine the actual model class and config
     actual_model_class = get_model_class_from_config(model_name_or_path)
-
 
     # Create OSFT model class and load model
     osft_cls = create_osft_model_class(actual_model_class)
@@ -735,12 +793,10 @@ def setup_osft_model_distributed(
 
     model_load_args["lazy_init_tokenizer_align_fn"] = _lazy_align
 
-
     log_rank_0("loading OSFT model")
     model: OSFTModel = osft_cls.from_pretrained(
         **model_load_args,
     )
-    
 
     # only global rank 0 should have this state dict
     if dist.get_rank() == 0:
@@ -753,7 +809,7 @@ def setup_osft_model_distributed(
             raise RuntimeError(
                 f"Rank {dist.get_rank()}: Expected model._lazy_init_pending=True and model._lazy_init_og_state_dict to be None"
             )
-    
+
     # wait for all ranks to reach this point -- if an exception occurs
     # then it will be easy to trace
     dist.barrier()
@@ -813,7 +869,7 @@ def setup_sft_model_distributed(
                 buffer_dict = dict(cpu_model.named_buffers())  # Extract all buffers
         finally:
             # Clean up immediately to free memory
-            if 'cpu_model' in locals():
+            if "cpu_model" in locals():
                 del cpu_model
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -845,8 +901,6 @@ def setup_sft_model_distributed(
     return model
 
 
-
-
 def setup_model(
     model_name_or_path: str,
     osft: bool = False,
@@ -863,30 +917,37 @@ def setup_model(
         "pretrained_model_name_or_path": model_name_or_path,
         "torch_dtype": train_dtype,  # Ensure models are loaded in the training dtype
     }
-    
+
     # Get model config to check for GPT-OSS and set appropriate configurations
     model_config = AutoConfig.from_pretrained(model_name_or_path)
     is_gpt_oss = is_gpt_oss_model(model_config)
-    
+
     # Set up quantization config for GPT-OSS models
     if is_gpt_oss:
         try:
             # Try to specify the target dtype for dequantization
             quantization_config = Mxfp4Config(dequantize=True)
             # If the config supports dtype specification, use it
-            if hasattr(quantization_config, 'torch_dtype'):
+            if hasattr(quantization_config, "torch_dtype"):
                 quantization_config.torch_dtype = train_dtype
             # Pass quantization_config to from_pretrained
             base_model_args["quantization_config"] = quantization_config
-            log_rank_0("🎯 Detected GPT-OSS model - applying dequantization for training")
+            log_rank_0(
+                "🎯 Detected GPT-OSS model - applying dequantization for training"
+            )
         except ImportError:
-            log_rank_0("⚠️ GPT-OSS model detected but Mxfp4Config not available - using default config")
-    
+            log_rank_0(
+                "⚠️ GPT-OSS model detected but Mxfp4Config not available - using default config"
+            )
+
     # Check if flash_attn is available and set appropriate attention implementation
     try:
         import flash_attn as _  # noqa: F401
+
         if is_gpt_oss:
-            base_model_args["attn_implementation"] = "kernels-community/vllm-flash-attn3"
+            base_model_args["attn_implementation"] = (
+                "kernels-community/vllm-flash-attn3"
+            )
             log_rank_0("Set attention implementation to vllm-flash-attn3 for GPT-OSS")
         else:
             base_model_args["attn_implementation"] = "flash_attention_2"
@@ -899,7 +960,7 @@ def setup_model(
 
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
 
-    # patch both loss functions, since models will use the regular HF 
+    # patch both loss functions, since models will use the regular HF
     # cross-entropy functions when in eval mode
     from mini_trainer.none_reduction_losses import (
         hf_fixed_cross_entropy_none_reduction,
@@ -907,7 +968,7 @@ def setup_model(
     )
     from transformers import AutoModelForCausalLM
 
-    # We patch HF loss unconditionally, since its usage will reappear in other places. 
+    # We patch HF loss unconditionally, since its usage will reappear in other places.
     # For example: when liger is being used and we switch the model into eval mode, it still uses the
     # HF CE loss instead of the Liger Fused Cross-entropy
     patch_target_module(
@@ -915,13 +976,15 @@ def setup_model(
         hf_fixed_cross_entropy_none_reduction,
     )
     ModelClass = AutoModelForCausalLM
-    
+
     # ensures liger is available when requested
     if use_liger_kernels:
         try:
             from liger_kernel.transformers import AutoLigerKernelForCausalLM
         except ImportError as e:
-            raise ImportError("Tried to use liger kernels, but they are not installed. Please make sure you have installed the necessary cuda dependencies, or disable liger kernels.") from e
+            raise ImportError(
+                "Tried to use liger kernels, but they are not installed. Please make sure you have installed the necessary cuda dependencies, or disable liger kernels."
+            ) from e
         else:
             """need to patch the loss function to not reduce, so we can reduce across all GPUs"""
             patch_target_module(
@@ -945,21 +1008,25 @@ def setup_model(
             # non-distributed path: direct loading
             model = ModelClass.from_pretrained(**base_model_args)
             return align_model_and_tokenizer(model, tokenizer)
-    
+
     def load_osft_model():
         """Load a model with OSFT (Orthogonal Subspace Fine-Tuning) support."""
         log_rank_0("loading OSFT model")
         # If osft_output_dtype is not specified, use train_dtype for consistency
-        effective_osft_output_dtype = osft_output_dtype if osft_output_dtype is not None else train_dtype
+        effective_osft_output_dtype = (
+            osft_output_dtype if osft_output_dtype is not None else train_dtype
+        )
 
         # We monkey-patch the HF model class OSFT will wrap ahead of time so that liger can be properly loaded.
         # This is necessary because OSFT has to set up the model in a very specfic way which is incompatible with the
         # simple load path for SFT.
-        _apply_liger_kernels_if_requested(use_liger_kernels, model_config, base_model_args)
+        _apply_liger_kernels_if_requested(
+            use_liger_kernels, model_config, base_model_args
+        )
 
         # Since OSFT requires modifying the base model architecture, we have to write our own
         # model loading logic to prevent wasteful memory usage on CPU and GPU.
-        # 
+        #
         # The general loading procedure works like this:
         # 1. the model's state dict is loaded into CPU memory by rank 0, we refer to this as the OG state dict.
         # 2. every process (including rank 0) initializes the model onto the meta device (no data gets loaded, only metadata)
@@ -969,16 +1036,16 @@ def setup_model(
         #    so each rank only needs to load the pieces FSDP2 assigned to them, avoiding large memory spikes.
         # 6. Now the OG state dict only contains the params that need conversion into OSFT weights. Rank 0
         #    distributes the computation across the world by assigining each process a set of weights to compute SVD
-        #    on. 
+        #    on.
         # 7. Once all processes complete SVD computation, their results are sent back to the global rank 0 process.
         # 8. Rank 0 places the results of the global SVD computation into a partial state dict which it then
-        #    distributes into the OSFT model just like in step 5. 
+        #    distributes into the OSFT model just like in step 5.
         # 9. Finally, all processes have a complete shard of the OSFT model and are able to start training.
-        # 
+        #
         # Something that's particularly annoying with HF Transformers is some models (Phi3) will sometimes store buffers
         # as direct tensor attributes on modules but not register them on the model. To handle these cases, we have to do some special
         # processing on our end in order to populate them with their original data if they're set as meta devices.
-        
+
         model = None
         if dist.is_available() and dist.is_initialized():
             model = setup_osft_model_distributed(
@@ -995,7 +1062,7 @@ def setup_model(
             # non-distributed path: direct OSFT model creation
             actual_model_class = get_model_class_from_config(model_name_or_path)
             osft_cls = create_osft_model_class(actual_model_class)
-            
+
             # prepare kwargs for OSFT loading
             osft_kwargs = _build_osft_kwargs(osft_rank_ratio, osft_target_patterns)
             model = osft_cls.from_pretrained(
@@ -1011,14 +1078,14 @@ def setup_model(
         # capture impossible state
         if not model:
             raise RuntimeError("model is still None after OSFT model loading")
- 
+
         # final configuration
         model = align_model_and_tokenizer(model, tokenizer)
         _set_osft_dtypes(model, osft_upcast_dtype, effective_osft_output_dtype)
 
         log_rank_0("OSFT model loaded successfully")
         return model
-    
+
     # Choose whether to apply orthogonal subspace learning (OSL) based on `osft` flag
     # OSL enables continual fine-tuning by constraining updates to low-rank directions orthogonal to critical knowledge that is to be preserved
     model = load_osft_model() if osft else load_standard_model()
@@ -1026,12 +1093,14 @@ def setup_model(
     # here we handle configuring the save_dtype
     model.config.torch_dtype = get_model_save_dtype(save_dtype, model_name_or_path)
     if not model.config.torch_dtype:
-        raise ValueError("error: model does not have a `torch_dtype` setting, cannot save model in this dtype")
+        raise ValueError(
+            "error: model does not have a `torch_dtype` setting, cannot save model in this dtype"
+        )
 
     # Freeze GPT-OSS router parameters BEFORE FSDP2 setup to avoid uniformity issues
     if is_gpt_oss:
         freeze_router_params(model)
-    
+
     # Convert all trainable parameters to specified training dtype
     log_rank_0(f"🔧 Converting trainable parameters to {train_dtype} for training")
     converted_count = 0
@@ -1048,11 +1117,11 @@ def setup_model(
     class_name = model.__class__.__name__
     if class_name.endswith("WithOSFT"):
         class_name = class_name[:-8]  # Remove "WithOSFT"
-    
+
     # List of supported architectures
     if class_name not in [
         "MistralForCausalLM",
-        "GPTDolomiteForCausalLM", 
+        "GPTDolomiteForCausalLM",
         "LlamaForCausalLM",
         "Starcoder2ForCausalLM",
         "GemmaForCausalLM",
@@ -1076,7 +1145,6 @@ def setup_model(
     return model
 
 
-
 def setup_training_components(
     model: torch.nn.Module,
     learning_rate: float,
@@ -1089,7 +1157,9 @@ def setup_training_components(
     beta2: float = 0.95,
     eps: float = 1e-8,
     weight_decay: float = 0.0,
-) -> tuple[torch.nn.Module, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
+) -> tuple[
+    torch.nn.Module, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler
+]:
     """
     Set up training components including model wrapping, optimizer, and learning rate scheduler.
 
@@ -1137,7 +1207,9 @@ def setup_training_components(
     total_params = sum(1 for _ in model.parameters())
     trainable_count = len(trainable_params)
     if total_params != trainable_count:
-        log_rank_0(f"📊 Using {trainable_count}/{total_params} trainable parameters in optimizer")
+        log_rank_0(
+            f"📊 Using {trainable_count}/{total_params} trainable parameters in optimizer"
+        )
 
     optimizer = torch.optim.AdamW(
         trainable_params,

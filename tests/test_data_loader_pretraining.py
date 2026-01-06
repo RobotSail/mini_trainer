@@ -27,14 +27,13 @@ class TestGetDataLoaderPretraining:
     def temp_pretraining_file(self):
         """Create temp pretraining JSONL file with 10 docs, 500 tokens total."""
         data = [
-            {"input_ids": list(range(i, i + 50)), "len": 50}
-            for i in range(0, 500, 50)
+            {"input_ids": list(range(i, i + 50)), "len": 50} for i in range(0, 500, 50)
         ]
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             for item in data:
                 json.dump(item, f)
-                f.write('\n')
+                f.write("\n")
             temp_path = f.name
 
         yield temp_path
@@ -48,24 +47,22 @@ class TestGetDataLoaderPretraining:
                 "input_ids": list(range(i, i + 50)),
                 "labels": list(range(i, i + 50)),
                 "len": 50,
-                "num_loss_counted_tokens": 49
+                "num_loss_counted_tokens": 49,
             }
             for i in range(0, 500, 50)
         ]
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             for item in data:
                 json.dump(item, f)
-                f.write('\n')
+                f.write("\n")
             temp_path = f.name
 
         yield temp_path
         os.unlink(temp_path)
 
     def test_pretraining_mode_creates_block_dataset(
-        self,
-        temp_pretraining_file,
-        pretraining_config
+        self, temp_pretraining_file, pretraining_config
     ):
         """Verify PretrainingBlockDataset is used in pretraining mode."""
         train_loader, val_loader = get_data_loader(
@@ -84,9 +81,7 @@ class TestGetDataLoaderPretraining:
         assert dataset.block_size == 128
 
     def test_pretraining_mode_returns_no_val_loader(
-        self,
-        temp_pretraining_file,
-        pretraining_config
+        self, temp_pretraining_file, pretraining_config
     ):
         """Verify validation loader is None in pretraining mode."""
         train_loader, val_loader = get_data_loader(
@@ -100,12 +95,12 @@ class TestGetDataLoaderPretraining:
         assert val_loader is None
 
     def test_validation_split_with_pretraining_raises_error(
-        self,
-        temp_pretraining_file,
-        pretraining_config
+        self, temp_pretraining_file, pretraining_config
     ):
         """Validate mutual exclusivity of validation_split and pretraining."""
-        with pytest.raises(ValueError, match="validation_split is not supported in pretraining mode"):
+        with pytest.raises(
+            ValueError, match="validation_split is not supported in pretraining mode"
+        ):
             get_data_loader(
                 data_path=temp_pretraining_file,
                 batch_size=4,
@@ -116,9 +111,7 @@ class TestGetDataLoaderPretraining:
             )
 
     def test_pretraining_blocks_are_batched_correctly(
-        self,
-        temp_pretraining_file,
-        pretraining_config
+        self, temp_pretraining_file, pretraining_config
     ):
         """Verify batching works with pretraining blocks."""
         train_loader, _ = get_data_loader(
@@ -136,22 +129,20 @@ class TestGetDataLoaderPretraining:
                 break
 
             # Verify batch structure
-            assert 'input_ids' in batch
-            assert 'labels' in batch
-            assert 'len' in batch
+            assert "input_ids" in batch
+            assert "labels" in batch
+            assert "len" in batch
 
             # Verify tensors
-            assert isinstance(batch['input_ids'], torch.Tensor)
-            assert isinstance(batch['labels'], torch.Tensor)
+            assert isinstance(batch["input_ids"], torch.Tensor)
+            assert isinstance(batch["labels"], torch.Tensor)
 
             batch_count += 1
 
         assert batch_count > 0  # Ensure we got some batches
 
     def test_pretraining_mode_respects_max_tokens_per_gpu(
-        self,
-        temp_pretraining_file,
-        pretraining_config
+        self, temp_pretraining_file, pretraining_config
     ):
         """Verify collator works with pretraining dataset."""
         train_loader, _ = get_data_loader(
@@ -165,17 +156,14 @@ class TestGetDataLoaderPretraining:
         # Check that batches respect max_tokens
         for batch in train_loader:
             # Each block is 128 tokens, so max 1 block per GPU should fit in 200 tokens
-            total_tokens = batch['input_ids'].numel()
+            total_tokens = batch["input_ids"].numel()
             # Allow some flexibility for batch structure
             assert total_tokens <= 200 * 10  # batch_size * max_tokens (upper bound)
             break  # Just check first batch
 
-    @patch('mini_trainer.sampler.log_rank_0')
+    @patch("mini_trainer.sampler.log_rank_0")
     def test_pretraining_logging_output(
-        self,
-        mock_log,
-        temp_pretraining_file,
-        pretraining_config
+        self, mock_log, temp_pretraining_file, pretraining_config
     ):
         """Verify informative logs are produced."""
         get_data_loader(
@@ -191,14 +179,13 @@ class TestGetDataLoaderPretraining:
 
         # Check that it logged about pretraining dataset
         call_args_list = [str(call) for call in mock_log.call_args_list]
-        log_messages = ' '.join(call_args_list)
+        log_messages = " ".join(call_args_list)
 
         # Should mention blocks and/or pretraining
-        assert 'block' in log_messages.lower() or 'pretraining' in log_messages.lower()
+        assert "block" in log_messages.lower() or "pretraining" in log_messages.lower()
 
     def test_instruction_tuning_mode_without_pretraining_config(
-        self,
-        temp_instruction_tuning_file
+        self, temp_instruction_tuning_file
     ):
         """Verify instruction tuning mode still works (no pretraining_config)."""
         train_loader, val_loader = get_data_loader(
@@ -214,10 +201,7 @@ class TestGetDataLoaderPretraining:
         assert val_loader is None  # No validation split requested
 
     def test_instruction_tuning_to_pretraining_switch(
-        self,
-        temp_pretraining_file,
-        temp_instruction_tuning_file,
-        pretraining_config
+        self, temp_pretraining_file, temp_instruction_tuning_file, pretraining_config
     ):
         """Verify clean switching between modes."""
         # First: Instruction tuning mode
@@ -264,16 +248,13 @@ class TestGetDataLoaderPretraining:
         for doc in documents:
             input_ids = tokenizer.encode(doc, add_special_tokens=True)
             input_ids.append(tokenizer.eos_token_id)
-            tokenized_docs.append({
-                "input_ids": input_ids,
-                "len": len(input_ids)
-            })
+            tokenized_docs.append({"input_ids": input_ids, "len": len(input_ids)})
 
         # Write to temp file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             for item in tokenized_docs:
                 json.dump(item, f)
-                f.write('\n')
+                f.write("\n")
             temp_path = f.name
 
         try:
@@ -294,13 +275,13 @@ class TestGetDataLoaderPretraining:
             # Get a batch
             for batch in train_loader:
                 # Verify structure
-                assert 'input_ids' in batch
-                assert 'labels' in batch
+                assert "input_ids" in batch
+                assert "labels" in batch
 
                 # Verify token IDs are valid for GPT2 (< vocab_size)
                 vocab_size = tokenizer.vocab_size
-                assert torch.all(batch['input_ids'] < vocab_size)
-                assert torch.all(batch['input_ids'] >= 0)
+                assert torch.all(batch["input_ids"] < vocab_size)
+                assert torch.all(batch["input_ids"] >= 0)
 
                 break  # Just check first batch
 
@@ -315,14 +296,13 @@ class TestGetDataLoaderValidation:
     def temp_no_labels_file(self):
         """Create file without labels field (pretraining data)."""
         data = [
-            {"input_ids": list(range(i, i + 50)), "len": 50}
-            for i in range(0, 100, 50)
+            {"input_ids": list(range(i, i + 50)), "len": 50} for i in range(0, 100, 50)
         ]
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             for item in data:
                 json.dump(item, f)
-                f.write('\n')
+                f.write("\n")
             temp_path = f.name
 
         yield temp_path

@@ -17,7 +17,6 @@ from transformers.models.auto import MODEL_FOR_CAUSAL_LM_MAPPING
 _CONTROL_PROCESS_GROUP = None
 
 
-
 def get_control_process_group():
     """
     Lazily create a CPU-friendly (Gloo) process group for control traffic.
@@ -25,7 +24,9 @@ def get_control_process_group():
     global _CONTROL_PROCESS_GROUP
     if _CONTROL_PROCESS_GROUP is None:
         if not dist.is_initialized():
-            raise RuntimeError("Distributed process group must be initialized before creating control group")
+            raise RuntimeError(
+                "Distributed process group must be initialized before creating control group"
+            )
         ranks = list(range(dist.get_world_size()))
         _CONTROL_PROCESS_GROUP = dist.new_group(ranks=ranks, backend="gloo")
     return _CONTROL_PROCESS_GROUP
@@ -58,14 +59,16 @@ def setup_logger(level="DEBUG"):
         level=level, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()]
     )
 
+
 def get_node_rank() -> int:
     # If torchrun was given --node_rank, this is usually exported:
-    if 'NODE_RANK' in os.environ:
+    if "NODE_RANK" in os.environ:
         return int(os.environ["NODE_RANK"])
-    
+
     # rank assignment is contiguous per node: rank = node_rank * nproc_per_node + local_rank
     # torchrun exports LOCAL_WORLD_SIZE == nproc_per_node
     return int(os.environ["RANK"]) // int(os.environ["LOCAL_WORLD_SIZE"])
+
 
 def patch_target_module(
     to_patch: str,
@@ -152,6 +155,7 @@ def get_model_class_from_config(model_path):
     if config_class not in mapping:
         raise ValueError(f"Model class {config_class} not found in mapping {mapping}")
     return mapping[config_class]
+
 
 def destroy_distributed_environment():
     # wait for checkpoints to show up, once training is complete we tear it down

@@ -29,10 +29,10 @@ class TestPretrainingBlockDataset:
     @pytest.fixture
     def temp_pretraining_jsonl(self, sample_pretraining_data):
         """Create temporary JSONL file with pretraining data."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             for item in sample_pretraining_data:
                 json.dump(item, f)
-                f.write('\n')
+                f.write("\n")
             temp_path = f.name
 
         yield temp_path
@@ -79,17 +79,17 @@ class TestPretrainingBlockDataset:
 
         # Block 0: tokens [1, 2, 3, 4, 5]
         block_0 = dataset[0]
-        assert block_0['input_ids'].tolist() == [1, 2, 3, 4, 5]
-        assert block_0['labels'].tolist() == [1, 2, 3, 4, 5]
-        assert block_0['len'] == 5
-        assert block_0['num_loss_counted_tokens'] == 4
+        assert block_0["input_ids"].tolist() == [1, 2, 3, 4, 5]
+        assert block_0["labels"].tolist() == [1, 2, 3, 4, 5]
+        assert block_0["len"] == 5
+        assert block_0["num_loss_counted_tokens"] == 4
 
         # Block 1: tokens [6, 7, 8, 9, 10]
         block_1 = dataset[1]
-        assert block_1['input_ids'].tolist() == [6, 7, 8, 9, 10]
-        assert block_1['labels'].tolist() == [6, 7, 8, 9, 10]
-        assert block_1['len'] == 5
-        assert block_1['num_loss_counted_tokens'] == 4
+        assert block_1["input_ids"].tolist() == [6, 7, 8, 9, 10]
+        assert block_1["labels"].tolist() == [6, 7, 8, 9, 10]
+        assert block_1["len"] == 5
+        assert block_1["num_loss_counted_tokens"] == 4
 
     def test_labels_equal_input_ids(self, temp_pretraining_jsonl):
         """Verify pretraining has no masking (labels == input_ids)."""
@@ -97,17 +97,19 @@ class TestPretrainingBlockDataset:
 
         for i in range(len(dataset)):
             block = dataset[i]
-            assert torch.equal(block['input_ids'], block['labels'])
+            assert torch.equal(block["input_ids"], block["labels"])
 
     def test_num_loss_counted_tokens_calculation(self, temp_pretraining_jsonl):
         """Verify num_loss_counted_tokens is always block_size - 1."""
         # Test with different block sizes
         for block_size in [5, 10, 14]:
-            dataset = PretrainingBlockDataset(temp_pretraining_jsonl, block_size=block_size)
+            dataset = PretrainingBlockDataset(
+                temp_pretraining_jsonl, block_size=block_size
+            )
 
             if len(dataset) > 0:
                 block = dataset[0]
-                assert block['num_loss_counted_tokens'] == block_size - 1
+                assert block["num_loss_counted_tokens"] == block_size - 1
 
     def test_index_out_of_range(self, temp_pretraining_jsonl):
         """Test error handling for out-of-range indices."""
@@ -131,10 +133,10 @@ class TestPretrainingBlockDataset:
             {"tokens": [1, 2, 3], "len": 3},  # Wrong field name
         ]
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             for item in wrong_data:
                 json.dump(item, f)
-                f.write('\n')
+                f.write("\n")
             temp_path = f.name
 
         try:
@@ -150,10 +152,10 @@ class TestPretrainingBlockDataset:
             {"input_ids": list(range(1, 16)), "len": 15},
         ]
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             for item in data:
                 json.dump(item, f)
-                f.write('\n')
+                f.write("\n")
             temp_path = f.name
 
         try:
@@ -168,7 +170,9 @@ class TestPretrainingBlockDataset:
                 block = dataset[i]
                 expected_start = i * 5 + 1
                 expected_end = (i + 1) * 5 + 1
-                assert block['input_ids'].tolist() == list(range(expected_start, expected_end))
+                assert block["input_ids"].tolist() == list(
+                    range(expected_start, expected_end)
+                )
         finally:
             os.unlink(temp_path)
 
@@ -179,10 +183,10 @@ class TestPretrainingBlockDataset:
             {"input_ids": [1, 2, 3], "len": 3},
         ]
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             for item in data:
                 json.dump(item, f)
-                f.write('\n')
+                f.write("\n")
             temp_path = f.name
 
         try:
@@ -198,14 +202,13 @@ class TestPretrainingBlockDataset:
         """Performance check with many documents."""
         # Create 100 documents with 50 tokens each → 5000 total tokens
         data = [
-            {"input_ids": list(range(i, i + 50)), "len": 50}
-            for i in range(0, 5000, 50)
+            {"input_ids": list(range(i, i + 50)), "len": 50} for i in range(0, 5000, 50)
         ]
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             for item in data:
                 json.dump(item, f)
-                f.write('\n')
+                f.write("\n")
             temp_path = f.name
 
         try:
@@ -219,8 +222,8 @@ class TestPretrainingBlockDataset:
             # Verify we can access all blocks
             for i in range(len(dataset)):
                 block = dataset[i]
-                assert block['input_ids'].shape[0] == 512
-                assert block['len'] == 512
+                assert block["input_ids"].shape[0] == 512
+                assert block["len"] == 512
         finally:
             os.unlink(temp_path)
 
@@ -231,8 +234,8 @@ class TestPretrainingBlockDataset:
         block = dataset[0]
 
         # Both input_ids and labels should be torch.long
-        assert block['input_ids'].dtype == torch.long
-        assert block['labels'].dtype == torch.long
+        assert block["input_ids"].dtype == torch.long
+        assert block["labels"].dtype == torch.long
 
     def test_block_structure_consistency(self, temp_pretraining_jsonl):
         """Verify all blocks have consistent structure."""
@@ -242,20 +245,20 @@ class TestPretrainingBlockDataset:
             block = dataset[i]
 
             # Check all required fields exist
-            assert 'input_ids' in block
-            assert 'labels' in block
-            assert 'len' in block
-            assert 'num_loss_counted_tokens' in block
+            assert "input_ids" in block
+            assert "labels" in block
+            assert "len" in block
+            assert "num_loss_counted_tokens" in block
 
             # Check types
-            assert isinstance(block['input_ids'], torch.Tensor)
-            assert isinstance(block['labels'], torch.Tensor)
-            assert isinstance(block['len'], int)
-            assert isinstance(block['num_loss_counted_tokens'], int)
+            assert isinstance(block["input_ids"], torch.Tensor)
+            assert isinstance(block["labels"], torch.Tensor)
+            assert isinstance(block["len"], int)
+            assert isinstance(block["num_loss_counted_tokens"], int)
 
             # Check values
-            assert block['len'] == 5
-            assert block['num_loss_counted_tokens'] == 4
+            assert block["len"] == 5
+            assert block["num_loss_counted_tokens"] == 4
 
     def test_can_accept_hf_dataset_directly(self, mock_hf_dataset):
         """Test that PretrainingBlockDataset can accept HF Dataset object."""
@@ -267,13 +270,13 @@ class TestPretrainingBlockDataset:
 
         # Verify it works the same as with file path
         block = dataset[0]
-        assert block['input_ids'].tolist() == [1, 2, 3, 4, 5]
+        assert block["input_ids"].tolist() == [1, 2, 3, 4, 5]
 
     def test_empty_dataset_edge_case(self):
         """Test handling of empty dataset."""
         data = []  # Empty
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             # Write empty file
             temp_path = f.name
 
