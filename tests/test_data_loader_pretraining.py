@@ -4,14 +4,14 @@
 import json
 import os
 import tempfile
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 # Third Party
 import pytest
 import torch
 
 # First Party
-from mini_trainer.sampler import get_data_loader, PretrainingBlockDataset, JsonlDataset
+from mini_trainer.sampler import get_data_loader, PretrainingBlockDataset
 from mini_trainer.training_types import PretrainingConfig
 
 

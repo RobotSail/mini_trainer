@@ -274,8 +274,6 @@ class TestPretrainingBlockDataset:
 
     def test_empty_dataset_edge_case(self):
         """Test handling of empty dataset."""
-        data = []  # Empty
-
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             # Write empty file
             temp_path = f.name
