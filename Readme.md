@@ -27,7 +27,7 @@
 - 🚫 **Padding-Free** - Leverages Flash Attention for efficient computation without padding overhead
 - ♾️ **Infinite Sampling** - Continuous data streaming without manual epoch configuration
 - 🔬 **Orthogonal Subspace Fine-Tuning (OSFT)** - Advanced continual learning technique for parameter-efficient training
-- 📚 **Continual Pretraining** - Document-style pretraining with configurable block sizes on pre-tokenized `input_ids`
+- 📚 **Pretraining Mode** - Document-style pretraining with configurable block sizes on pre-tokenized `input_ids`
 - 📊 **Flexible Logging** - JSONL metrics logging with optional Weights & Biases integration
 
 ---
@@ -123,7 +123,7 @@ torchrun --nnodes=1 --nproc-per-node=8 -m mini_trainer.train \
 - `--use-liger-kernels` - Enable memory-efficient Liger kernels
 - `--osft` - Enable Orthogonal Subspace Fine-Tuning mode
 - `--osft-unfreeze-rank-ratio` - Ratio of model parameters to train with OSFT (0.0-1.0)
-- `--block-size` - Enables document-style continual pretraining with the given block length
+- `--block-size` - Enables pretraining mode with the given block length
 
 For the complete list of arguments and advanced configuration options, see [`src/mini_trainer/api_train.py`](src/mini_trainer/api_train.py).
 
@@ -150,9 +150,9 @@ Each line should contain:
 
 **Mini Trainer does not include data processing utilities.** For tokenization and data preparation, please use the **[instructlab-training](https://github.com/instructlab/training)** APIs, which provide robust data processing pipelines compatible with Mini Trainer's input format.
 
-### 🧱 Continual Pretraining
+### 🧱 Pretraining Mode
 
-Mini Trainer now supports continual pretraining on tokenized document corpora. Pass a `--block-size` to enable the document pipeline (the input JSONL is expected to have an `input_ids` column):
+Mini Trainer supports pretraining on tokenized document corpora. Pass a `--block-size` to enable the document pipeline (the input JSONL is expected to have an `input_ids` column):
 
 ```bash
 torchrun --nnodes=1 --nproc-per-node=4 -m mini_trainer.train \
@@ -164,7 +164,7 @@ torchrun --nnodes=1 --nproc-per-node=4 -m mini_trainer.train \
     --block-size 512
 ```
 
-- `--block-size` (required) turns on continual pretraining and defines the token length for each block.
+- `--block-size` (required) enables pretraining mode and defines the token length for each block.
 
 Programmatic usage mirrors the CLI via `PretrainingConfig`:
 
