@@ -305,6 +305,7 @@ class TestSetupTrainingComponents:
             mock_wrapped_model.parameters(),
             lr=1e-5,
             betas=(0.9, 0.95),
+            eps=1e-8,
             weight_decay=0.0,
         )
 

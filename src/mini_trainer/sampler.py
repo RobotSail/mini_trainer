@@ -256,7 +256,7 @@ class PretrainingBlockDataset(Dataset):
     def __init__(self, dataset: HFDataset, block_size: int, pad_token_id: int):
         """
         Args:
-            data_path: Path to JSONL file with tokenized documents
+            dataset: HuggingFace dataset with tokenized documents (must have 'input_ids' column)
             block_size: Size of each block in tokens
             pad_token_id: Token ID to use for padding the last block
         """
@@ -280,24 +280,22 @@ class PretrainingBlockDataset(Dataset):
         # calculates the offset of the final block (which may be smaller than block_size)
         # so we can sample from the full list of IDs and avoid wasting data
         total_tokens = len(all_input_ids)
-        num_complete_blocks = total_tokens // block_size
-        remainder = total_tokens % block_size
+        num_full_blocks, remainder = divmod(total_tokens, block_size)
 
         # include partial block if there is one
         last_block_len = block_size
         if remainder > 0:
-            num_complete_blocks += 1
             last_block_len = remainder
 
         # store information needed to sample from the dataset in `block` strides
-        self.num_blocks = num_complete_blocks
+        self.num_blocks = num_full_blocks + (1 if remainder else 0)
         self.last_block_len = last_block_len
         self.all_input_ids = all_input_ids  # keep all tokens
 
         log_rank_0(f"Total tokens: {total_tokens:,}")
         log_rank_0(f"Block size: {block_size}")
         log_rank_0(
-            f"Total blocks: {self.num_blocks:,} ({num_complete_blocks} complete, {1 if remainder else 0} partial)"
+            f"Total blocks: {self.num_blocks:,} ({num_full_blocks} complete, {1 if remainder else 0} partial)"
         )
         if remainder:
             log_rank_0(f"Partial block size: {remainder} tokens")

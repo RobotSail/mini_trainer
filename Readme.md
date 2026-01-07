@@ -27,7 +27,7 @@
 - 🚫 **Padding-Free** - Leverages Flash Attention for efficient computation without padding overhead
 - ♾️ **Infinite Sampling** - Continuous data streaming without manual epoch configuration
 - 🔬 **Orthogonal Subspace Fine-Tuning (OSFT)** - Advanced continual learning technique for parameter-efficient training
-- 📚 **Continual Pretraining** - Document-style pretraining with configurable block sizes and column names
+- 📚 **Continual Pretraining** - Document-style pretraining with configurable block sizes on pre-tokenized `input_ids`
 - 📊 **Flexible Logging** - JSONL metrics logging with optional Weights & Biases integration
 
 ---
@@ -150,9 +150,9 @@ Each line should contain:
 
 **Mini Trainer does not include data processing utilities.** For tokenization and data preparation, please use the **[instructlab-training](https://github.com/instructlab/training)** APIs, which provide robust data processing pipelines compatible with Mini Trainer's input format.
 
-### 🧱 Continual Pretraining on Raw Documents
+### 🧱 Continual Pretraining
 
-Mini Trainer now supports continual pretraining on raw document corpora. Pass a `--block-size` to enable the document pipeline and optionally specify the column name containing your text:
+Mini Trainer now supports continual pretraining on tokenized document corpora. Pass a `--block-size` to enable the document pipeline (the input JSONL is expected to have an `input_ids` column):
 
 ```bash
 torchrun --nnodes=1 --nproc-per-node=4 -m mini_trainer.train \

@@ -74,7 +74,7 @@ class TestGetDataLoaderPretraining:
         )
 
         # Get dataset from loader
-        dataset = train_loader.dataset.dataset  # Unwrap from IterableWrapper if needed
+        dataset = train_loader.dataset
 
         # Should be PretrainingBlockDataset
         assert isinstance(dataset, PretrainingBlockDataset)
@@ -94,21 +94,24 @@ class TestGetDataLoaderPretraining:
 
         assert val_loader is None
 
-    def test_validation_split_with_pretraining_raises_error(
+    def test_validation_split_with_pretraining_works(
         self, temp_pretraining_file, pretraining_config
     ):
-        """Validate mutual exclusivity of validation_split and pretraining."""
-        with pytest.raises(
-            ValueError, match="validation_split is not supported in pretraining mode"
-        ):
-            get_data_loader(
-                data_path=temp_pretraining_file,
-                batch_size=4,
-                max_tokens_per_gpu=200,
-                seed=42,
-                validation_split=0.1,  # Should conflict
-                pretraining_config=pretraining_config,
-            )
+        """Validate that validation_split works with pretraining mode."""
+        train_loader, val_loader = get_data_loader(
+            data_path=temp_pretraining_file,
+            batch_size=4,
+            max_tokens_per_gpu=200,
+            seed=42,
+            validation_split=0.1,
+            pretraining_config=pretraining_config,
+        )
+        # Both loaders should be created
+        assert train_loader is not None
+        assert val_loader is not None
+        # Both datasets should be PretrainingBlockDataset
+        assert isinstance(train_loader.dataset, PretrainingBlockDataset)
+        assert isinstance(val_loader.dataset, PretrainingBlockDataset)
 
     def test_pretraining_blocks_are_batched_correctly(
         self, temp_pretraining_file, pretraining_config
@@ -128,14 +131,18 @@ class TestGetDataLoaderPretraining:
             if batch_count >= 2:  # Just check first 2 batches
                 break
 
-            # Verify batch structure
-            assert "input_ids" in batch
-            assert "labels" in batch
-            assert "len" in batch
+            # batch is a list of minibatches from the collator
+            assert isinstance(batch, list)
+            assert len(batch) > 0
 
-            # Verify tensors
-            assert isinstance(batch["input_ids"], torch.Tensor)
-            assert isinstance(batch["labels"], torch.Tensor)
+            for minibatch in batch:
+                # Verify minibatch structure
+                assert "input_ids" in minibatch
+                assert "labels" in minibatch
+
+                # Verify tensors
+                assert isinstance(minibatch["input_ids"], torch.Tensor)
+                assert isinstance(minibatch["labels"], torch.Tensor)
 
             batch_count += 1
 
@@ -155,10 +162,12 @@ class TestGetDataLoaderPretraining:
 
         # Check that batches respect max_tokens
         for batch in train_loader:
-            # Each block is 128 tokens, so max 1 block per GPU should fit in 200 tokens
-            total_tokens = batch["input_ids"].numel()
-            # Allow some flexibility for batch structure
-            assert total_tokens <= 200 * 10  # batch_size * max_tokens (upper bound)
+            # batch is a list of minibatches
+            for minibatch in batch:
+                # Each block is 128 tokens, so max 1-2 blocks per GPU should fit in 200 tokens
+                total_tokens = minibatch["input_ids"].numel()
+                # Allow some flexibility for batch structure
+                assert total_tokens <= 200 * 10  # batch_size * max_tokens (upper bound)
             break  # Just check first batch
 
     @patch("mini_trainer.sampler.log_rank_0")
@@ -274,14 +283,16 @@ class TestGetDataLoaderPretraining:
 
             # Get a batch
             for batch in train_loader:
-                # Verify structure
-                assert "input_ids" in batch
-                assert "labels" in batch
+                # batch is a list of minibatches
+                for minibatch in batch:
+                    # Verify structure
+                    assert "input_ids" in minibatch
+                    assert "labels" in minibatch
 
-                # Verify token IDs are valid for GPT2 (< vocab_size)
-                vocab_size = tokenizer.vocab_size
-                assert torch.all(batch["input_ids"] < vocab_size)
-                assert torch.all(batch["input_ids"] >= 0)
+                    # Verify token IDs are valid for GPT2 (< vocab_size)
+                    vocab_size = tokenizer.vocab_size
+                    assert torch.all(minibatch["input_ids"] < vocab_size)
+                    assert torch.all(minibatch["input_ids"] >= 0)
 
                 break  # Just check first batch
 
@@ -311,7 +322,7 @@ class TestGetDataLoaderValidation:
     def test_instruction_tuning_requires_labels_field(self, temp_no_labels_file):
         """Verify instruction tuning mode validates labels field exists."""
         # Trying to use data without labels in instruction tuning mode should fail
-        with pytest.raises(ValueError, match="requires 'labels' field"):
+        with pytest.raises(ValueError, match="must contain 'labels' field"):
             get_data_loader(
                 data_path=temp_no_labels_file,
                 batch_size=4,
