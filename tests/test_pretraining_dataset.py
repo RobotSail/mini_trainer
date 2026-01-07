@@ -162,7 +162,9 @@ class TestPretrainingBlockDataset:
 
         try:
             with pytest.raises(ValueError, match="must have 'input_ids' field"):
-                PretrainingBlockDataset.from_jsonl_file(temp_path, block_size=5, pad_token_id=0)
+                PretrainingBlockDataset.from_jsonl_file(
+                    temp_path, block_size=5, pad_token_id=0
+                )
         finally:
             os.unlink(temp_path)
 
@@ -224,7 +226,18 @@ class TestPretrainingBlockDataset:
             # Block should be padded
             block = dataset[0]
             assert block["input_ids"].tolist() == [1, 2, 3, 0, 0, 0, 0, 0, 0, 0]
-            assert block["labels"].tolist() == [1, 2, 3, -100, -100, -100, -100, -100, -100, -100]
+            assert block["labels"].tolist() == [
+                1,
+                2,
+                3,
+                -100,
+                -100,
+                -100,
+                -100,
+                -100,
+                -100,
+                -100,
+            ]
             assert block["num_loss_counted_tokens"] == 2  # 3 - 1 for causal shift
         finally:
             os.unlink(temp_path)
@@ -310,9 +323,6 @@ class TestPretrainingBlockDataset:
 
     def test_empty_dataset_edge_case(self):
         """Test handling of empty dataset."""
-        empty_data = []
-        hf_dataset = HFDataset.from_list(empty_data) if empty_data else None
-
         # Empty dataset should not be created - expect an error or empty result
         # Since load_dataset with empty file may behave differently,
         # test with a dataset that has no input_ids
