@@ -1152,11 +1152,13 @@ def setup_training_components(
     lr_scheduler: str,
     num_training_steps: Optional[int] = None,
     scheduler_kwargs: Optional[Dict[str, Any]] = None,
-    # AdamW optimizer parameters
+    # Optimizer parameters
+    optimizer_type: str = "adamw",
     beta1: float = 0.9,
     beta2: float = 0.95,
     eps: float = 1e-8,
     weight_decay: float = 0.0,
+    muon_lr: Optional[float] = None,
 ) -> tuple[
     torch.nn.Module, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler
 ]:
@@ -1175,6 +1177,12 @@ def setup_training_components(
         lr_scheduler: Type of learning rate scheduler to use
         num_training_steps: Total number of training steps (required for some schedulers)
         scheduler_kwargs: Additional scheduler-specific keyword arguments
+        optimizer_type: Type of optimizer to use ("adamw" or "muon")
+        beta1: Adam beta1 parameter (momentum coefficient)
+        beta2: Adam beta2 parameter (RMSprop coefficient)
+        eps: Adam epsilon for numerical stability
+        weight_decay: Weight decay (L2 penalty)
+        muon_lr: Learning rate for Muon parameters (if None, uses learning_rate)
 
     Returns:
         Tuple of (wrapped_model, optimizer, lr_scheduler)
@@ -1199,24 +1207,26 @@ def setup_training_components(
     log_rank_0("=" * 80)
     log_rank_0("Using FSDP2 wrapper")
 
-    # Filter parameters to only include those that require gradients
-    # This handles cases where some parameters (e.g., frozen router params) have requires_grad=False
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-
     # Count trainable parameters for logging
     total_params = sum(1 for _ in model.parameters())
-    trainable_count = len(trainable_params)
+    trainable_count = sum(1 for p in model.parameters() if p.requires_grad)
     if total_params != trainable_count:
         log_rank_0(
             f"📊 Using {trainable_count}/{total_params} trainable parameters in optimizer"
         )
 
-    optimizer = torch.optim.AdamW(
-        trainable_params,
+    # Create optimizer using the factory function
+    from mini_trainer.optimizers import create_optimizer
+
+    optimizer = create_optimizer(
+        model=model,
+        optimizer_type=optimizer_type,
         lr=learning_rate,
-        betas=(beta1, beta2),
+        beta1=beta1,
+        beta2=beta2,
         eps=eps,
         weight_decay=weight_decay,
+        muon_lr=muon_lr,
     )
     optimizer = osft_utils.optim_wrapper(optimizer, model)
     # Prepare scheduler kwargs

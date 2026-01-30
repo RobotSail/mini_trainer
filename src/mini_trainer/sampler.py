@@ -166,6 +166,9 @@ class JsonlDataset(Dataset):
             item["attention_mask"] = torch.tensor(
                 sample["attention_mask"], dtype=torch.long
             )
+        # load ref_logprobs if present (for KL divergence tracking)
+        if "ref_logprobs" in sample:
+            item["ref_logprobs"] = torch.tensor(sample["ref_logprobs"], dtype=torch.float)
         return item
 
     @classmethod
@@ -477,7 +480,7 @@ def mb_collate_fn(minibatch, batch_num_loss_counted_tokens):
     #     f"num_loss_counted_tokens: {num_loss_counted_tokens}\033[0m"
     # )
 
-    return {
+    collated = {
         "input_ids": torch.tensor([input_ids], dtype=torch.long),
         "labels": torch.tensor([labels], dtype=torch.long),
         "position_ids": torch.tensor([position_ids], dtype=torch.long),
@@ -485,6 +488,15 @@ def mb_collate_fn(minibatch, batch_num_loss_counted_tokens):
         "num_samples": num_samples,
         "batch_num_loss_counted_tokens": batch_num_loss_counted_tokens,
     }
+
+    # Handle ref_logprobs if present (for KL divergence tracking)
+    if minibatch and "ref_logprobs" in minibatch[0]:
+        ref_logprobs = []
+        for item in minibatch:
+            ref_logprobs.extend(item["ref_logprobs"].tolist())
+        collated["ref_logprobs"] = torch.tensor([ref_logprobs], dtype=torch.float)
+
+    return collated
 
 
 def padded_mb_collate_fn(
@@ -560,7 +572,7 @@ def padded_mb_collate_fn(
         num_loss_counted_tokens += item["num_loss_counted_tokens"]
         num_samples += 1 if item["num_loss_counted_tokens"] > 0 else 0
 
-    return {
+    collated = {
         "input_ids": torch.tensor(padded_input_ids, dtype=torch.long),
         "labels": torch.tensor(padded_labels, dtype=torch.long),
         "attention_mask": torch.tensor(attention_masks, dtype=torch.long),
@@ -569,6 +581,20 @@ def padded_mb_collate_fn(
         "num_samples": num_samples,
         "batch_num_loss_counted_tokens": batch_num_loss_counted_tokens,
     }
+
+    # Handle ref_logprobs if present (for KL divergence tracking)
+    if minibatch and "ref_logprobs" in minibatch[0]:
+        padded_ref_logprobs = []
+        for item in minibatch:
+            item_len = len(item["ref_logprobs"])
+            pad_len = max_len - item_len
+            ref_lp = item["ref_logprobs"]
+            if isinstance(ref_lp, torch.Tensor):
+                ref_lp = ref_lp.tolist()
+            padded_ref_logprobs.append(ref_lp + [0.0] * pad_len)
+        collated["ref_logprobs"] = torch.tensor(padded_ref_logprobs, dtype=torch.float)
+
+    return collated
 
 
 class MaxTokensPerRankCollator:

@@ -16,6 +16,8 @@ from . import api_train
 from . import batch_metrics
 from . import batch_packer
 from . import none_reduction_losses
+from . import optimizers
+from . import ref_logprob_precompute
 from . import sampler
 from . import setup_model_for_training
 from . import osft_utils
@@ -25,12 +27,16 @@ from . import utils
 # Export main API functions for convenience
 from .api_train import run_training
 from .training_types import TorchrunArgs, TrainingArgs, TrainingMode, PretrainingConfig
+from .optimizers import create_optimizer, create_fsdp2_muon_optimizer
+from .ref_logprob_precompute import precompute_reference_logprobs, dataset_has_ref_logprobs
 
 __all__ = [
     "api_train",
     "batch_metrics",
     "batch_packer",
     "none_reduction_losses",
+    "optimizers",
+    "ref_logprob_precompute",
     "sampler",
     "setup_model_for_training",
     "osft_utils",
@@ -42,4 +48,8 @@ __all__ = [
     "TrainingArgs",
     "TrainingMode",
     "PretrainingConfig",
+    "create_optimizer",
+    "create_fsdp2_muon_optimizer",
+    "precompute_reference_logprobs",
+    "dataset_has_ref_logprobs",
 ]

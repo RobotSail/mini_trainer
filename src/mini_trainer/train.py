@@ -27,8 +27,57 @@ from mini_trainer.utils import (
     set_seed,
 )
 from mini_trainer.training_types import TrainingMode, PretrainingConfig
+import torch.nn.functional as F
 
-SaveType = Literal["min_samples", "epoch", "final", "best_val_loss"]
+SaveType = Literal["min_samples", "epoch", "final", "best_val_loss", "steps", "tokens"]
+
+
+def compute_kl_divergence(
+    model_logits: torch.Tensor,
+    ref_logprobs: torch.Tensor,
+    labels: torch.Tensor,
+) -> float:
+    """
+    Compute KL divergence between current model and reference logprobs.
+
+    Uses approximation: D_KL ≈ exp(log_diff) - log_diff - 1
+    where log_diff = log(p_ref) - log(p_new)
+
+    Args:
+        model_logits: Logits from the current model [B, T, V]
+        ref_logprobs: Pre-computed reference model logprobs [B, T]
+        labels: Labels tensor [B, T], -100 for masked positions
+
+    Returns:
+        float: Average KL divergence over valid tokens
+    """
+    # Compute new model logprobs
+    new_log_probs = F.log_softmax(model_logits.float(), dim=-1)
+
+    # Gather logprobs for actual tokens (shift for causal LM)
+    # For position i, logits[i] predicts token at position i+1
+    shift_labels = labels[:, 1:]  # (B, T-1)
+    shift_logprobs = new_log_probs[:, :-1, :]  # (B, T-1, V)
+
+    # Clamp labels to valid range for gathering (replace -100 with 0)
+    gather_labels = shift_labels.clamp(min=0).unsqueeze(-1)  # (B, T-1, 1)
+    new_gathered = shift_logprobs.gather(dim=-1, index=gather_labels).squeeze(-1)  # (B, T-1)
+
+    # Align with ref_logprobs (pad front with 0)
+    new_logprobs_aligned = F.pad(new_gathered, (1, 0), value=0.0)  # (B, T)
+
+    # Mask for valid positions (labels != -100, and not position 0 which has no ref)
+    valid_mask = (labels != -100) & (ref_logprobs != 0.0)
+
+    # KL approximation with numerical stability
+    log_diff = (ref_logprobs - new_logprobs_aligned).clamp(-20, 20)
+    dkl_approx = (log_diff.exp() - log_diff - 1).clamp(min=0, max=100)
+
+    # Average over valid tokens
+    if valid_mask.sum() > 0:
+        kl_div = (dkl_approx * valid_mask.float()).sum() / valid_mask.sum()
+        return kl_div.item()
+    return 0.0
 
 app = Typer(
     pretty_exceptions_enable=False,  # disable rich exception formatting
@@ -554,6 +603,8 @@ class Checkpointer:
         val_loss_improvement_threshold: float = 0.0,
         checkpoint_at_epoch: bool = False,
         checkpoint_at_final: bool = False,
+        save_every_steps: int | None = None,
+        save_every_n_tokens: int | None = None,
     ):
         """
         Initialize the checkpointer.
@@ -564,10 +615,14 @@ class Checkpointer:
             val_loss_improvement_threshold: Minimum improvement needed to save (default: any improvement)
             checkpoint_at_epoch: Whether epoch-based checkpointing is enabled
             checkpoint_at_final: Whether we should save at the end of training
+            save_every_steps: Save checkpoint every N optimizer steps (None or 0 = disabled)
+            save_every_n_tokens: Save checkpoint every N loss-counted tokens (None or 0 = disabled)
         """
         self.min_samples_per_checkpoint = min_samples_per_checkpoint
         self.save_best_val_loss = save_best_val_loss
         self.val_loss_improvement_threshold = val_loss_improvement_threshold
+        self.save_every_steps = save_every_steps
+        self.save_every_n_tokens = save_every_n_tokens
 
         # NOTE(osilkin): It feels like maybe a mistake to place the checkpointing settings here,
         # but it cleans up the training loop 🤷
@@ -577,7 +632,13 @@ class Checkpointer:
         # State tracking
         self.last_saved_samples = 0
         self.last_frequency_saved_samples = 0
+        self.last_saved_step = 0
         self.best_val_loss: float | None = None
+        self.tokens_since_checkpoint = 0  # Resetting counter for token-based checkpointing
+
+    def accumulate_tokens(self, tokens: int):
+        """Add tokens to the resetting counter for token-based checkpointing."""
+        self.tokens_since_checkpoint += tokens
 
     def should_save_checkpoint(
         self,
@@ -586,6 +647,7 @@ class Checkpointer:
         end_of_epoch: bool = False,
         end_of_training: bool = False,
         val_loss: float | None = None,
+        current_step: int = 0,
     ) -> bool:
         """
         Determine if a checkpoint should be saved based on the save type and current state.
@@ -596,6 +658,7 @@ class Checkpointer:
             end_of_epoch: Whether we're at the end of an epoch
             end_of_training: Whether training is ending
             val_loss: Current validation loss (if available)
+            current_step: Current optimizer step (for step-based checkpointing)
 
         Returns:
             True if a checkpoint should be saved, False otherwise
@@ -607,6 +670,15 @@ class Checkpointer:
                     and accumulated_samples
                     >= self.last_frequency_saved_samples
                     + self.min_samples_per_checkpoint
+                )
+
+            case "steps":
+                if not self.save_every_steps or self.save_every_steps <= 0:
+                    return False
+                # Check if we've passed another checkpoint interval
+                return (
+                    current_step > 0
+                    and current_step >= self.last_saved_step + self.save_every_steps
                 )
 
             case "epoch":
@@ -639,6 +711,11 @@ class Checkpointer:
                 improvement = self.best_val_loss - val_loss
                 return improvement > self.val_loss_improvement_threshold
 
+            case "tokens":
+                if not self.save_every_n_tokens or self.save_every_n_tokens <= 0:
+                    return False
+                return self.tokens_since_checkpoint >= self.save_every_n_tokens
+
             case _:
                 raise ValueError(f"Unknown save type: {save_type}")
 
@@ -647,6 +724,7 @@ class Checkpointer:
         save_type: SaveType,
         accumulated_samples: int,
         val_loss: float | None = None,
+        current_step: int = 0,
     ):
         """
         Record that a checkpoint was saved and update internal state.
@@ -655,6 +733,7 @@ class Checkpointer:
             save_type: The type of checkpoint that was saved
             accumulated_samples: Total samples processed when the save occurred
             val_loss: Validation loss at time of save (if applicable)
+            current_step: Current optimizer step (for step-based checkpointing)
         """
         # Always update the general save tracker
         self.last_saved_samples = accumulated_samples
@@ -662,9 +741,14 @@ class Checkpointer:
         # Update type-specific state
         if save_type == "min_samples":
             self.last_frequency_saved_samples = accumulated_samples
+        elif save_type == "steps":
+            self.last_saved_step = current_step
         elif save_type == "best_val_loss" and val_loss is not None:
             self.best_val_loss = val_loss
             log_rank_0(f"New best validation loss: {val_loss:.6f}")
+        elif save_type == "tokens":
+            # Reset counter, preserving overflow (same as GRPO implementation)
+            self.tokens_since_checkpoint = self.tokens_since_checkpoint - self.save_every_n_tokens
 
 
 def train(
@@ -681,12 +765,23 @@ def train(
     max_tokens: int = 0,
     checkpoint_at_epoch: bool = False,
     save_final_checkpoint: bool = False,
+    save_every_steps: int | None = None,
+    save_every_n_tokens: int | None = None,
     train_dtype: torch.dtype = torch.float32,
     save_best_val_loss: bool = False,
     val_loss_improvement_threshold: float = 0.0,
     use_wandb: bool = False,
     val_data_loader: torch.utils.data.DataLoader | None = None,
     validation_frequency: int | None = None,
+    # GSM8K evaluation parameters
+    gsm8k_eval_dataset=None,
+    gsm8k_eval_frequency: int | None = None,
+    gsm8k_max_new_tokens: int = 512,
+    gsm8k_temperature: float = 0.0,
+    tokenizer=None,
+    # vLLM-based GSM8K evaluation
+    gsm8k_use_vllm: bool = False,
+    gsm8k_vllm_gpu_memory_utilization: float = 0.8,
 ):
     """
     Runs the model training loop.
@@ -757,11 +852,43 @@ def train(
         val_loss_improvement_threshold=val_loss_improvement_threshold,
         checkpoint_at_epoch=checkpoint_at_epoch,
         checkpoint_at_final=save_final_checkpoint,
+        save_every_steps=save_every_steps,
+        save_every_n_tokens=save_every_n_tokens,
     )
 
     device = next(model.parameters()).device
     epoch = 0
     last_validation_loss = None  # Track the most recent validation loss
+    kl_tracking_logged = False  # One-time log for KL tracking status
+
+    # Helper function for vLLM-based GSM8K evaluation after checkpoint saves
+    def run_vllm_gsm8k_eval(checkpoint_path: str) -> dict | None:
+        """Run vLLM-based GSM8K evaluation on a saved checkpoint."""
+        if not gsm8k_use_vllm or gsm8k_eval_dataset is None:
+            return None
+
+        # vLLM eval only runs on rank 0
+        global_rank = dist.get_rank() if dist.is_initialized() else 0
+        if global_rank != 0:
+            dist.barrier()  # Wait for rank 0 to finish evaluation
+            return None
+
+        from mini_trainer.gsm8k_eval import evaluate_gsm8k_vllm
+
+        try:
+            metrics = evaluate_gsm8k_vllm(
+                checkpoint_path=checkpoint_path,
+                eval_dataset=gsm8k_eval_dataset,
+                max_new_tokens=gsm8k_max_new_tokens,
+                temperature=gsm8k_temperature,
+                gpu_memory_utilization=gsm8k_vllm_gpu_memory_utilization,
+            )
+            dist.barrier()  # Signal other ranks that evaluation is complete
+            return metrics
+        except Exception as e:
+            log_rank_0(f"vLLM GSM8K evaluation failed: {e}")
+            dist.barrier()  # Signal other ranks that evaluation is complete
+            return None
 
     # main training loop
     while not reached_stop_condition(
@@ -800,6 +927,20 @@ def train(
 
                 output = model(**model_inputs)
 
+                # Compute KL divergence if ref_logprobs available
+                kl_div = 0.0
+                if "ref_logprobs" in mb:
+                    if not kl_tracking_logged:
+                        log_rank_0("KL divergence tracking enabled - ref_logprobs found in dataset")
+                        kl_tracking_logged = True
+                    kl_div = compute_kl_divergence(
+                        model_logits=output.logits,
+                        ref_logprobs=mb["ref_logprobs"].to(device),
+                        labels=mb["labels"].to(device),
+                    )
+                elif step == 0 and grad_accum == 0 and not kl_tracking_logged:
+                    log_rank_0("Note: ref_logprobs not found in dataset - KL divergence will be 0.0")
+
                 # GPT-OSS: add auxiliary loss if present, otherwise use standard loss
                 loss = output.loss.float().sum()
                 if hasattr(output, "aux_loss") and output.aux_loss is not None:
@@ -821,6 +962,7 @@ def train(
                     # each rank's gradient contributes 1/8 to the backward
                     loss_backward=loss.detach().item() / world_size,
                     time_per_minibatch=time.time() - mb_start_time,
+                    kl_divergence=kl_div,
                 )
             step += 1
             # sum the metrics from all processes
@@ -832,6 +974,7 @@ def train(
             total_tokens_processed += (
                 batch_num_loss_counted_tokens  # Track tokens for TOKEN mode
             )
+            checkpointer.accumulate_tokens(batch_num_loss_counted_tokens)
 
             # capture the LR that we'll use when taking a training step
             current_lr = lr_scheduler.get_last_lr()[0]
@@ -869,6 +1012,7 @@ def train(
                 else 0.0,
                 "peak_memory_usage_GB": float(torch.cuda.max_memory_allocated() / 1e9),
                 "val_loss": last_validation_loss,
+                "kl_divergence": bm.get("kl_divergence", 0.0) / max(grad_accum + 1, 1),
             }
             # Add validation metrics if it's time to validate
             if (
@@ -881,6 +1025,28 @@ def train(
                     last_validation_loss = val_metrics["val_loss"]
                     print(f"Validation loss: {last_validation_loss}")
                 batch_metrics.update(val_metrics)
+
+            # GSM8K task evaluation if configured (HuggingFace generate-based, not vLLM)
+            # When using vLLM, evaluation happens after checkpoint saves instead
+            if (
+                gsm8k_eval_dataset is not None
+                and gsm8k_eval_frequency is not None
+                and step % gsm8k_eval_frequency == 0
+                and tokenizer is not None
+                and not gsm8k_use_vllm  # Skip if using vLLM (runs after checkpoint saves)
+            ):
+                from mini_trainer.gsm8k_eval import evaluate_gsm8k
+
+                gsm8k_metrics = evaluate_gsm8k(
+                    model=model,
+                    tokenizer=tokenizer,
+                    eval_dataset=gsm8k_eval_dataset,
+                    device=device,
+                    max_new_tokens=gsm8k_max_new_tokens,
+                    temperature=gsm8k_temperature,
+                )
+                if gsm8k_metrics:
+                    batch_metrics.update(gsm8k_metrics)
 
             # Log metrics (progress info is printed by the logger)
             if is_local_main_process:
@@ -896,6 +1062,50 @@ def train(
                     model, total_samples_accumulated, output_dir, model_name_or_path
                 )
                 checkpointer.record_save("min_samples", total_samples_accumulated)
+                # Run vLLM GSM8K evaluation on the saved checkpoint
+                checkpoint_path = str(Path(output_dir) / "hf_format" / f"samples_{total_samples_accumulated}")
+                vllm_metrics = run_vllm_gsm8k_eval(checkpoint_path)
+                if vllm_metrics and is_local_main_process:
+                    metric_logger.log_sync(vllm_metrics)
+
+            # step-based saving
+            if checkpointer.should_save_checkpoint(
+                save_type="steps",
+                accumulated_samples=total_samples_accumulated,
+                current_step=step,
+            ):
+                save_model(
+                    model,
+                    total_samples_accumulated,
+                    output_dir,
+                    model_name_or_path,
+                    suffix=f"step_{step}",
+                )
+                checkpointer.record_save("steps", total_samples_accumulated, current_step=step)
+                # Run vLLM GSM8K evaluation on the saved checkpoint
+                checkpoint_path = str(Path(output_dir) / "hf_format" / f"samples_{total_samples_accumulated}_step_{step}")
+                vllm_metrics = run_vllm_gsm8k_eval(checkpoint_path)
+                if vllm_metrics and is_local_main_process:
+                    metric_logger.log_sync(vllm_metrics)
+
+            # token-based saving (resetting counter with overflow preservation)
+            if checkpointer.should_save_checkpoint(
+                save_type="tokens",
+                accumulated_samples=total_samples_accumulated,
+            ):
+                save_model(
+                    model,
+                    total_samples_accumulated,
+                    output_dir,
+                    model_name_or_path,
+                    suffix=f"tokens_{total_tokens_processed}",
+                )
+                checkpointer.record_save("tokens", total_samples_accumulated)
+                # Run vLLM GSM8K evaluation on the saved checkpoint
+                checkpoint_path = str(Path(output_dir) / "hf_format" / f"samples_{total_samples_accumulated}_tokens_{total_tokens_processed}")
+                vllm_metrics = run_vllm_gsm8k_eval(checkpoint_path)
+                if vllm_metrics and is_local_main_process:
+                    metric_logger.log_sync(vllm_metrics)
 
             # Check for best validation loss saving after validation runs
             if checkpointer.should_save_checkpoint(
@@ -913,6 +1123,11 @@ def train(
                 checkpointer.record_save(
                     "best_val_loss", total_samples_accumulated, last_validation_loss
                 )
+                # Run vLLM GSM8K evaluation on the saved checkpoint
+                checkpoint_path = str(Path(output_dir) / "hf_format" / f"samples_{total_samples_accumulated}_best_val_loss")
+                vllm_metrics = run_vllm_gsm8k_eval(checkpoint_path)
+                if vllm_metrics and is_local_main_process:
+                    metric_logger.log_sync(vllm_metrics)
 
             torch.distributed.barrier()
 
@@ -940,6 +1155,11 @@ def train(
         ):
             save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
             checkpointer.record_save("epoch", total_samples_accumulated)
+            # Run vLLM GSM8K evaluation on the saved checkpoint
+            checkpoint_path = str(Path(output_dir) / "hf_format" / f"samples_{total_samples_accumulated}")
+            vllm_metrics = run_vllm_gsm8k_eval(checkpoint_path)
+            if vllm_metrics and is_local_main_process:
+                metric_logger.log_sync(vllm_metrics)
 
     torch.distributed.barrier()
     # save one last time if we haven't yet
@@ -950,6 +1170,11 @@ def train(
     ):
         save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
         checkpointer.record_save("final", total_samples_accumulated)
+        # Run vLLM GSM8K evaluation on the saved checkpoint
+        checkpoint_path = str(Path(output_dir) / "hf_format" / f"samples_{total_samples_accumulated}")
+        vllm_metrics = run_vllm_gsm8k_eval(checkpoint_path)
+        if vllm_metrics and is_local_main_process:
+            metric_logger.log_sync(vllm_metrics)
 
 
 def calculate_num_training_steps(
@@ -1043,6 +1268,21 @@ def main(
     weight_decay: Annotated[
         float, Option(help="AdamW weight decay (L2 penalty)")
     ] = 0.0,
+    optimizer_type: Annotated[
+        str,
+        Option(
+            "-O",
+            "--optimizer",
+            help="Optimizer type: 'adamw' (default) or 'muon'. Muon requires muon-fsdp2 or PyTorch >= 2.9",
+        ),
+    ] = "adamw",
+    muon_lr: Annotated[
+        float | None,
+        Option(
+            "--muon-lr",
+            help="Learning rate for Muon parameters (2D+ hidden weights). If not set, uses --learning-rate",
+        ),
+    ] = None,
     use_liger_kernels: Annotated[
         bool, Option(help="Whether to use Liger kernels")
     ] = False,
@@ -1118,6 +1358,21 @@ def main(
     save_final_checkpoint: Annotated[
         bool, Option(help="Whether to save a final checkpoint when training ends")
     ] = False,
+    save_every_steps: Annotated[
+        int | None,
+        Option(
+            "--save-every-steps",
+            help="Save checkpoint every N optimizer steps (0 or None = disabled)",
+        ),
+    ] = None,
+    save_every_n_tokens: Annotated[
+        int | None,
+        Option(
+            "--save-every-n-tokens",
+            help="Save checkpoint every N loss-counted tokens (0 or None = disabled). "
+                 "Uses resetting counter with overflow preservation.",
+        ),
+    ] = None,
     save_dtype: Annotated[
         str | None,
         Option(
@@ -1165,6 +1420,64 @@ def main(
     wandb_entity: Annotated[
         str | None, Option(help="Weights & Biases entity/team name")
     ] = None,
+    # KL divergence tracking
+    compute_kl: Annotated[
+        bool,
+        Option(
+            "--compute-kl",
+            help="Enable KL divergence tracking against base model. If ref_logprobs not in dataset, they will be precomputed before training.",
+        ),
+    ] = False,
+    # GSM8K evaluation parameters
+    gsm8k_eval_path: Annotated[
+        str | None,
+        Option(
+            "--gsm8k-eval-path",
+            help="Path to GSM8K evaluation dataset (JSONL with 'messages' and 'answer' fields)",
+        ),
+    ] = None,
+    gsm8k_eval_frequency: Annotated[
+        int | None,
+        Option(
+            "--gsm8k-eval-frequency",
+            help="Frequency of GSM8K evaluation (in steps). Required when gsm8k_eval_path is provided.",
+        ),
+    ] = None,
+    gsm8k_max_new_tokens: Annotated[
+        int,
+        Option(
+            "--gsm8k-max-new-tokens",
+            help="Maximum tokens to generate during GSM8K evaluation",
+        ),
+    ] = 512,
+    gsm8k_temperature: Annotated[
+        float,
+        Option(
+            "--gsm8k-temperature",
+            help="Sampling temperature for GSM8K evaluation (0.0 = greedy)",
+        ),
+    ] = 0.0,
+    gsm8k_eval_samples: Annotated[
+        int | None,
+        Option(
+            "--gsm8k-eval-samples",
+            help="Number of samples to use for GSM8K evaluation (None = all)",
+        ),
+    ] = None,
+    gsm8k_use_vllm: Annotated[
+        bool,
+        Option(
+            "--gsm8k-use-vllm",
+            help="Use vLLM for fast batched GSM8K evaluation. Runs after checkpoint saves.",
+        ),
+    ] = False,
+    gsm8k_vllm_gpu_memory_utilization: Annotated[
+        float,
+        Option(
+            "--gsm8k-vllm-gpu-memory-utilization",
+            help="Fraction of GPU memory for vLLM KV cache (default: 0.8)",
+        ),
+    ] = 0.8,
 ):
     # Reproducibility: align with HF Trainer seeding behavior
     set_seed(seed)
@@ -1214,6 +1527,14 @@ def main(
             "validation_frequency must be provided and positive when validation_split > 0"
         )
 
+    # GSM8K evaluation validation
+    if gsm8k_eval_path is not None and (
+        gsm8k_eval_frequency is None or gsm8k_eval_frequency <= 0
+    ):
+        raise ValueError(
+            "gsm8k_eval_frequency must be provided and positive when gsm8k_eval_path is set"
+        )
+
     # Convert string dtypes to torch dtypes
     osft_upcast_dtype_torch = parse_dtype(osft_upcast_dtype)
     osft_output_dtype_torch = parse_dtype(osft_output_dtype)
@@ -1244,6 +1565,8 @@ def main(
             "osft_upcast_dtype": osft_upcast_dtype,
             "osft_output_dtype": osft_output_dtype,
             "osft_memory_efficient_init": osft_memory_efficient_init,
+            "optimizer_type": optimizer_type,
+            "muon_lr": muon_lr,
             "output_dir": output_dir,
             "min_samples_per_checkpoint": min_samples_per_checkpoint,
             "save_dtype": save_dtype,
@@ -1254,6 +1577,7 @@ def main(
             "max_tokens": max_tokens,
             "checkpoint_at_epoch": checkpoint_at_epoch,
             "save_final_checkpoint": save_final_checkpoint,
+            "save_every_steps": save_every_steps,
             "validation_split": validation_split,
             "validation_frequency": validation_frequency,
             "save_best_val_loss": save_best_val_loss,
@@ -1261,6 +1585,14 @@ def main(
             "wandb_project": wandb_project,
             "wandb_run_name": wandb_run_name,
             "wandb_entity": wandb_entity,
+            "compute_kl": compute_kl,
+            "gsm8k_eval_path": gsm8k_eval_path,
+            "gsm8k_eval_frequency": gsm8k_eval_frequency,
+            "gsm8k_max_new_tokens": gsm8k_max_new_tokens,
+            "gsm8k_temperature": gsm8k_temperature,
+            "gsm8k_eval_samples": gsm8k_eval_samples,
+            "gsm8k_use_vllm": gsm8k_use_vllm,
+            "gsm8k_vllm_gpu_memory_utilization": gsm8k_vllm_gpu_memory_utilization,
             "LOCAL_RANK": local_rank,
             "GLOBAL_RANK": global_rank,
             "NODE_RANK": node_rank,
@@ -1330,6 +1662,34 @@ def main(
         pretraining_config = PretrainingConfig(block_size=block_size)
         log_rank_0(f"Pretraining mode enabled with block_size={block_size}")
 
+    # Auto-compute ref_logprobs if KL tracking enabled and not present in dataset
+    if compute_kl:
+        log_rank_0(f"KL divergence tracking requested. Checking dataset: {data_path}")
+        from mini_trainer.ref_logprob_precompute import (
+            precompute_reference_logprobs,
+            dataset_has_ref_logprobs,
+        )
+
+        if not dataset_has_ref_logprobs(data_path):
+            # Only rank 0 does the precomputation
+            if global_rank == 0:
+                log_rank_0("Computing reference logprobs for KL divergence tracking...")
+                # Create output path for enriched dataset
+                ref_data_path = data_path.replace(".jsonl", "_with_ref_logprobs.jsonl")
+                precompute_reference_logprobs(
+                    model_path=model_name_or_path,
+                    data_path=data_path,
+                    output_path=ref_data_path,
+                )
+                log_rank_0(f"Reference logprobs saved to {ref_data_path}")
+            # Barrier to wait for rank 0 to finish precomputation
+            dist.barrier()
+            # Update data_path for all ranks to use enriched dataset
+            data_path = data_path.replace(".jsonl", "_with_ref_logprobs.jsonl")
+            log_rank_0(f"Using enriched dataset with ref_logprobs: {data_path}")
+        else:
+            log_rank_0("Dataset already contains ref_logprobs - skipping precomputation")
+
     # grab the data loader prior to the model so we can extract the dataset length
     # and use this for calculating the number of training steps in the data loader
     data_loader, val_data_loader = get_data_loader(
@@ -1352,6 +1712,20 @@ def main(
         log_rank_0("No validation split - using all data for training")
         log_rank_0(f"Training data loader length: {len(data_loader)}")
 
+    # Load tokenizer for generation (needed for GSM8K eval)
+    tokenizer = None
+    gsm8k_eval_dataset = None
+    if gsm8k_eval_path:
+        from transformers import AutoTokenizer
+        from mini_trainer.gsm8k_eval import load_gsm8k_eval_dataset
+
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+        gsm8k_eval_dataset = load_gsm8k_eval_dataset(
+            data_path=gsm8k_eval_path,
+            max_samples=gsm8k_eval_samples,
+        )
+        log_rank_0(f"Loaded GSM8K evaluation dataset with {len(gsm8k_eval_dataset)} samples")
+
     # Calculate number of training steps based on training mode
     num_training_steps = calculate_num_training_steps(
         training_mode=training_mode,
@@ -1369,11 +1743,13 @@ def main(
         lr_scheduler=lr_scheduler,
         num_training_steps=num_training_steps,
         scheduler_kwargs=scheduler_kwargs_dict,
-        # AdamW optimizer parameters
+        # Optimizer parameters
+        optimizer_type=optimizer_type,
         beta1=beta1,
         beta2=beta2,
         eps=eps,
         weight_decay=weight_decay,
+        muon_lr=muon_lr,
     )
 
     train(
@@ -1390,12 +1766,22 @@ def main(
         max_tokens=max_tokens,
         checkpoint_at_epoch=checkpoint_at_epoch,
         save_final_checkpoint=save_final_checkpoint,
+        save_every_steps=save_every_steps,
+        save_every_n_tokens=save_every_n_tokens,
         train_dtype=train_dtype_torch,
         save_best_val_loss=save_best_val_loss,
         val_loss_improvement_threshold=val_loss_improvement_threshold,
         use_wandb=use_wandb,
         val_data_loader=val_data_loader,
         validation_frequency=validation_frequency,
+        # GSM8K evaluation parameters
+        gsm8k_eval_dataset=gsm8k_eval_dataset,
+        gsm8k_eval_frequency=gsm8k_eval_frequency,
+        gsm8k_max_new_tokens=gsm8k_max_new_tokens,
+        gsm8k_temperature=gsm8k_temperature,
+        tokenizer=tokenizer,
+        gsm8k_use_vllm=gsm8k_use_vllm,
+        gsm8k_vllm_gpu_memory_utilization=gsm8k_vllm_gpu_memory_utilization,
     )
 
     # once done, tear down distributed environment

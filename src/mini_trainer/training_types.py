@@ -9,6 +9,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Dict, Any, Literal
 
+# Type alias for optimizer selection
+OptimizerType = Literal["adamw", "muon"]
+
 
 class TrainingMode(str, Enum):
     """Training mode determines the stopping criterion for training."""
@@ -118,6 +121,30 @@ class TrainingArgs:
         default=0.0, metadata={"help": "Weight decay (L2 penalty) for AdamW optimizer."}
     )
 
+    # Optimizer type selection
+    optimizer_type: OptimizerType = field(
+        default="adamw",
+        metadata={
+            "help": (
+                "Optimizer type to use for training. Options:\n"
+                "  - 'adamw': Standard AdamW optimizer (default)\n"
+                "  - 'muon': Muon optimizer (requires muon-fsdp2 or PyTorch >= 2.9)\n"
+                "Muon applies Newton-Schulz orthogonalization to 2D+ hidden weights, "
+                "while using AdamW for embeddings, heads, and 1D parameters."
+            )
+        },
+    )
+    muon_lr: float | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Learning rate for Muon parameters (2D+ hidden weights). "
+                "If not specified, uses the same value as learning_rate. "
+                "Only used when optimizer_type='muon'."
+            )
+        },
+    )
+
     # Model configuration
     use_liger_kernels: bool = field(
         default=False, metadata={"help": "Whether to use Liger kernels."}
@@ -169,6 +196,19 @@ class TrainingArgs:
         default=None,
         metadata={
             "help": "If provided, this must be the number of samples to process before saving a checkpoint."
+        },
+    )
+    save_every_steps: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Save checkpoint every N optimizer steps (0 or None = disabled)."
+        },
+    )
+    save_every_n_tokens: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Save checkpoint every N loss-counted tokens (0 or None = disabled). "
+                    "Uses resetting counter with overflow preservation."
         },
     )
 
@@ -256,5 +296,61 @@ class TrainingArgs:
         default=0.0,
         metadata={
             "help": "Minimum validation loss improvement required to trigger a save"
+        },
+    )
+
+    # KL divergence tracking
+    compute_kl: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Enable KL divergence tracking against the base model. "
+                "If ref_logprobs not in dataset, they will be precomputed before training."
+            )
+        },
+    )
+
+    # GSM8K task evaluation
+    gsm8k_eval_path: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Path to GSM8K evaluation dataset (JSONL with 'messages' and 'answer' fields)."
+        },
+    )
+    gsm8k_eval_frequency: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Frequency of GSM8K evaluation in steps. Required when gsm8k_eval_path is set."
+        },
+    )
+    gsm8k_max_new_tokens: int = field(
+        default=512,
+        metadata={
+            "help": "Maximum new tokens to generate during GSM8K evaluation."
+        },
+    )
+    gsm8k_temperature: float = field(
+        default=0.0,
+        metadata={
+            "help": "Sampling temperature for GSM8K evaluation (0.0 = greedy)."
+        },
+    )
+    gsm8k_eval_samples: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Number of samples to evaluate (None = all samples in eval dataset)."
+        },
+    )
+    gsm8k_use_vllm: bool = field(
+        default=False,
+        metadata={
+            "help": "Use vLLM for fast batched GSM8K evaluation. When enabled, "
+            "evaluation runs after checkpoint saves using the saved checkpoint."
+        },
+    )
+    gsm8k_vllm_gpu_memory_utilization: float = field(
+        default=0.8,
+        metadata={
+            "help": "Fraction of GPU memory for vLLM KV cache (default: 0.8)."
         },
     )

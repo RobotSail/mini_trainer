@@ -143,8 +143,13 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
             f"--max-steps={train_args.max_steps}",
             f"--max-tokens={train_args.max_tokens}",
             f"--train-dtype={train_args.train_dtype}",
+            f"--optimizer={train_args.optimizer_type}",
         ]
     )
+
+    # Add muon_lr if specified
+    if train_args.muon_lr is not None:
+        command.append(f"--muon-lr={train_args.muon_lr}")
 
     # wandb-related arguments
     if train_args.wandb_project:
@@ -203,8 +208,34 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
     if train_args.save_final_checkpoint:
         command.append("--save-final-checkpoint")
 
+    if train_args.save_every_steps is not None and train_args.save_every_steps > 0:
+        command.append(f"--save-every-steps={train_args.save_every_steps}")
+
+    if train_args.save_every_n_tokens is not None and train_args.save_every_n_tokens > 0:
+        command.append(f"--save-every-n-tokens={train_args.save_every_n_tokens}")
+
     if train_args.save_dtype:
         command.append(f"--save-dtype={train_args.save_dtype}")
+
+    # KL divergence tracking
+    if train_args.compute_kl:
+        command.append("--compute-kl")
+
+    # GSM8K evaluation parameters
+    if train_args.gsm8k_eval_path:
+        command.append(f"--gsm8k-eval-path={train_args.gsm8k_eval_path}")
+        if train_args.gsm8k_eval_frequency:
+            command.append(f"--gsm8k-eval-frequency={train_args.gsm8k_eval_frequency}")
+        if train_args.gsm8k_max_new_tokens != 512:
+            command.append(f"--gsm8k-max-new-tokens={train_args.gsm8k_max_new_tokens}")
+        if train_args.gsm8k_temperature > 0:
+            command.append(f"--gsm8k-temperature={train_args.gsm8k_temperature}")
+        if train_args.gsm8k_eval_samples:
+            command.append(f"--gsm8k-eval-samples={train_args.gsm8k_eval_samples}")
+        if train_args.gsm8k_use_vllm:
+            command.append("--gsm8k-use-vllm")
+        if train_args.gsm8k_vllm_gpu_memory_utilization != 0.8:
+            command.append(f"--gsm8k-vllm-gpu-memory-utilization={train_args.gsm8k_vllm_gpu_memory_utilization}")
 
     logger.info("Running training command as subprocess: %s", " ".join(command))
 
