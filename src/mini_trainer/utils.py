@@ -164,16 +164,53 @@ def destroy_distributed_environment():
     dist.destroy_process_group()
 
 
-def set_seed(seed: int):
+def set_seed(seed: int, deterministic: bool = True):
     """
     This function sets the seed for the random number generators in the standard library,
-    NumPy, and PyTorch.
+    NumPy, and PyTorch for reproducibility.
 
     Args:
         seed: The seed to set.
+        deterministic: If True, enables CUDA deterministic operations for full reproducibility.
+                      This may impact performance. Default is True.
     """
     # Reproducibility: align with HF Trainer seeding behavior
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+    if deterministic:
+        # Enable deterministic operations in cuDNN
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+        # Set CUBLAS workspace config for deterministic behavior
+        # This is required for certain CUDA operations to be deterministic
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+        # Enable PyTorch's deterministic algorithms mode
+        # Note: Some operations don't have deterministic implementations and will error
+        # Use warn_only=True to log warnings instead of raising errors
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        except TypeError:
+            # Older PyTorch versions don't support warn_only
+            torch.use_deterministic_algorithms(True)
+
+
+def worker_init_fn(worker_id: int, base_seed: int = 0):
+    """
+    Initialize random seeds for DataLoader workers for reproducibility.
+
+    Each worker gets a unique but deterministic seed based on worker_id and base_seed.
+    This ensures reproducibility when using multiple DataLoader workers.
+
+    Args:
+        worker_id: The worker ID (provided by DataLoader).
+        base_seed: The base seed to derive worker seeds from.
+    """
+    worker_seed = base_seed + worker_id
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)

@@ -25,7 +25,9 @@ Key Features:
 """
 
 from deprecated import deprecated
+from functools import partial
 import os
+import random
 
 import torch
 from torch.utils.data import Sampler, Dataset, DataLoader, SequentialSampler
@@ -33,6 +35,23 @@ import torch.distributed as dist
 import numpy as np
 from datasets import load_dataset, Dataset as HFDataset
 from mini_trainer.batch_packer import batch_lengths_to_minibatches_lpt
+
+
+def _worker_init_fn(worker_id: int, base_seed: int):
+    """
+    Initialize random seeds for DataLoader workers for reproducibility.
+
+    Each worker gets a unique but deterministic seed based on worker_id and base_seed.
+    This ensures reproducibility when using multiple DataLoader workers.
+
+    Args:
+        worker_id: The worker ID (provided by DataLoader).
+        base_seed: The base seed to derive worker seeds from.
+    """
+    worker_seed = base_seed + worker_id
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
 from mini_trainer.utils import log_rank_0
 from mini_trainer.training_types import PretrainingConfig
 
@@ -781,8 +800,10 @@ def get_data_loader(
         dummy_sample=dummy_sample,
     )
 
-    # Create train data loader
+    # Create train data loader with reproducible worker seeding
     train_sampler = EpochSampler(len(train_dataset), seed=seed)
+    train_generator = torch.Generator()
+    train_generator.manual_seed(seed)
     train_loader = DataLoader(
         train_dataset,
         batch_size,
@@ -790,12 +811,16 @@ def get_data_loader(
         collate_fn=collate_fn,
         num_workers=num_workers,
         drop_last=False,
+        worker_init_fn=partial(_worker_init_fn, base_seed=seed) if num_workers > 0 else None,
+        generator=train_generator,
     )
 
     # Create validation data loader if needed
     val_loader = None
     if val_dataset is not None:
         val_sampler = SequentialSampler(val_dataset)
+        val_generator = torch.Generator()
+        val_generator.manual_seed(seed + 1)  # Different seed for validation
         val_loader = DataLoader(
             val_dataset,
             batch_size,
@@ -803,6 +828,8 @@ def get_data_loader(
             collate_fn=collate_fn,
             num_workers=num_workers,
             drop_last=False,
+            worker_init_fn=partial(_worker_init_fn, base_seed=seed + 1) if num_workers > 0 else None,
+            generator=val_generator,
         )
 
     return train_loader, val_loader
