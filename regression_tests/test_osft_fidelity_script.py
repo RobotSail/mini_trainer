@@ -43,9 +43,9 @@ def load_original_model(model_name_or_path, use_liger_kernels=False):
 
 def load_osft_model(model_name_or_path, use_liger_kernels=False):
     """Load the model with distributed OSFT initialization.
-    
+
     Note: We use float64 for upcast_dtype and output_dtype to ensure accurate
-    orthogonality and rank checks. With float32 and especially bfloat16, 
+    orthogonality and rank checks. With float32 and especially bfloat16,
     numerical precision issues make it very difficult to verify orthogonality.
     As matrix size increases, even float64 may not be sufficient for perfect
     orthogonality validation.

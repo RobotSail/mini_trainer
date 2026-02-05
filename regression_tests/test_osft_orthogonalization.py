@@ -28,12 +28,14 @@ import argparse
 
 # Add mini_trainer to path
 
-from mini_trainer.setup_model_for_training import setup_model,  wrap_fsdp2
+from mini_trainer.setup_model_for_training import setup_model, wrap_fsdp2
 from mini_trainer.osft_utils import is_osft_model, cast_to_osft_model, optim_wrapper
+
 
 @dataclass
 class OrthogonalityMetrics:
     """Stores metrics for a single orthogonality check."""
+
     param_name: str
     check_type: str  # 'U_grad', 'V_grad', 'U_param', 'V_param'
     max_angle_diff: float  # in degrees
@@ -42,52 +44,55 @@ class OrthogonalityMetrics:
 
 class OrthogonalityTracker:
     """Tracks orthogonality metrics across training steps."""
-    
+
     def __init__(self, margin_deg: float = 1.0):
         self.margin_deg = margin_deg
         self.metrics: Dict[str, Dict[str, OrthogonalityMetrics]] = {}
         self.total_checks = 0
         self.failed_checks = 0
-        
-    def update(self, param_name: str, check_type: str, max_angle_diff: float, step: int):
+
+    def update(
+        self, param_name: str, check_type: str, max_angle_diff: float, step: int
+    ):
         """Update tracker with new measurement."""
         self.total_checks += 1
-        
+
         if max_angle_diff > self.margin_deg:
             self.failed_checks += 1
-            print(f"⚠️  ORTHOGONALITY VIOLATION: {param_name} ({check_type}) - "
-                  f"Angle difference: {max_angle_diff:.4f}° (limit: {self.margin_deg}°) at step {step}")
-        
+            print(
+                f"⚠️  ORTHOGONALITY VIOLATION: {param_name} ({check_type}) - "
+                f"Angle difference: {max_angle_diff:.4f}° (limit: {self.margin_deg}°) at step {step}"
+            )
+
         key = f"{param_name}:{check_type}"
-        
+
         if key not in self.metrics:
             self.metrics[key] = {
-                'param_name': param_name,
-                'check_type': check_type,
-                'max_angle_diff': max_angle_diff,
-                'step': step
+                "param_name": param_name,
+                "check_type": check_type,
+                "max_angle_diff": max_angle_diff,
+                "step": step,
             }
         else:
             # Update if this is worse
-            if max_angle_diff > self.metrics[key]['max_angle_diff']:
-                self.metrics[key]['max_angle_diff'] = max_angle_diff
-                self.metrics[key]['step'] = step
+            if max_angle_diff > self.metrics[key]["max_angle_diff"]:
+                self.metrics[key]["max_angle_diff"] = max_angle_diff
+                self.metrics[key]["step"] = step
+
     def get_top_violations(self, n: int = 5) -> List[Dict]:
         """Get top N worst violations."""
         sorted_metrics = sorted(
-            self.metrics.values(),
-            key=lambda x: x['max_angle_diff'],
-            reverse=True
+            self.metrics.values(), key=lambda x: x["max_angle_diff"], reverse=True
         )
         return sorted_metrics[:n]
-    
+
     def is_successful(self) -> bool:
         """Check if all measurements passed."""
         for metric in self.metrics.values():
-            if metric['max_angle_diff'] > self.margin_deg:
+            if metric["max_angle_diff"] > self.margin_deg:
                 return False
         return True
-    
+
     def get_summary(self) -> str:
         """Generate summary report."""
         lines = []
@@ -96,33 +101,39 @@ class OrthogonalityTracker:
         lines.append("=" * 100)
         lines.append(f"Total checks performed: {self.total_checks}")
         lines.append(f"Failed checks (>{self.margin_deg}°): {self.failed_checks}")
-        lines.append(f"Pass rate: {100 * (1 - self.failed_checks / max(self.total_checks, 1)):.2f}%")
+        lines.append(
+            f"Pass rate: {100 * (1 - self.failed_checks / max(self.total_checks, 1)):.2f}%"
+        )
         lines.append("")
-        
+
         if self.is_successful():
             lines.append("✅ RESULT: PASSED - All orthogonality constraints satisfied!")
         else:
             lines.append("❌ RESULT: FAILED - Orthogonality violations detected!")
-        
+
         lines.append("")
         lines.append("Top 5 Largest Angle Deviations:")
         lines.append("-" * 100)
-        lines.append(f"{'Rank':<6}{'Parameter':<40}{'Check Type':<15}{'Max Diff (°)':<15}{'Step':<10}")
+        lines.append(
+            f"{'Rank':<6}{'Parameter':<40}{'Check Type':<15}{'Max Diff (°)':<15}{'Step':<10}"
+        )
         lines.append("-" * 100)
-        
+
         for i, metric in enumerate(self.get_top_violations(5), 1):
             lines.append(
                 f"{i:<6}{metric['param_name']:<40}{metric['check_type']:<15}"
                 f"{metric['max_angle_diff']:<15.4f}{metric['step']:<10}"
             )
-        
+
         lines.append("=" * 100)
         return "\n".join(lines)
 
 
 def get_osft_params(model):
     """Extract only OSFT parameters from model."""
-    return [p for n, p in model.named_parameters() if 'osft_params' in n]  # just select only osft params for now
+    return [
+        p for n, p in model.named_parameters() if "osft_params" in n
+    ]  # just select only osft params for now
 
 
 def convert_to_rad(deg: float) -> float:
@@ -130,7 +141,9 @@ def convert_to_rad(deg: float) -> float:
     return deg / 180 * math.pi
 
 
-def compute_angle_differences(A: torch.Tensor, B: torch.Tensor = None, top_n: int = 5) -> List[float]:
+def compute_angle_differences(
+    A: torch.Tensor, B: torch.Tensor = None, top_n: int = 5
+) -> List[float]:
     """
     Compute angle differences between matrices A and B, returning the top N worst deviations from orthogonality.
 
@@ -200,7 +213,9 @@ def compute_angle_differences(A: torch.Tensor, B: torch.Tensor = None, top_n: in
         return []
 
 
-def check_gradient_orthogonality(model, module, step: int, tracker: OrthogonalityTracker):
+def check_gradient_orthogonality(
+    model, module, step: int, tracker: OrthogonalityTracker
+):
     """
     Check if gradients of U_low and V_low are orthogonal to U_high and V_high.
 
@@ -213,42 +228,47 @@ def check_gradient_orthogonality(model, module, step: int, tracker: Orthogonalit
     svd_dict = model.get_svd_dict_for_module(module)
     if svd_dict["U_low"].grad is None or svd_dict["V_low"].grad is None:
         return
-    
+
     U_high = svd_dict["U_high"]
     V_high = svd_dict["V_high"]
     U_low = svd_dict["U_low"]
     V_low = svd_dict["V_low"]
-    
+
     # get the safe_name for tracking
     safe_name = module.osft_params.safe_name
 
     # we need to pull the gradients out before casting these variables to full_tensor,
     # since `.full_tensor` doesn't return a tensor with the .grad attribute populated
-    dU_low = U_low.grad.full_tensor() if hasattr(U_low.grad, 'full_tensor') else U_low.grad
-    dV_low = V_low.grad.full_tensor() if hasattr(V_low.grad, 'full_tensor') else V_low.grad
+    dU_low = (
+        U_low.grad.full_tensor() if hasattr(U_low.grad, "full_tensor") else U_low.grad
+    )
+    dV_low = (
+        V_low.grad.full_tensor() if hasattr(V_low.grad, "full_tensor") else V_low.grad
+    )
 
-    if hasattr(U_high, 'full_tensor'):
+    if hasattr(U_high, "full_tensor"):
         U_high = U_high.full_tensor()
-    if hasattr(V_high, 'full_tensor'):
+    if hasattr(V_high, "full_tensor"):
         V_high = V_high.full_tensor()
-    if hasattr(U_low, 'full_tensor'):
+    if hasattr(U_low, "full_tensor"):
         U_low = U_low.full_tensor()
-    if hasattr(V_low, 'full_tensor'):
+    if hasattr(V_low, "full_tensor"):
         V_low = V_low.full_tensor()
 
-    
     # Check U gradient orthogonality
     u_grad_diffs = compute_angle_differences(U_high, dU_low, top_n=1)
     if u_grad_diffs:
-        tracker.update(safe_name, 'U_grad', u_grad_diffs[0], step)
-    
+        tracker.update(safe_name, "U_grad", u_grad_diffs[0], step)
+
     # Check V gradient orthogonality
     v_grad_diffs = compute_angle_differences(V_high.T, dV_low.T, top_n=1)
     if v_grad_diffs:
-        tracker.update(safe_name, 'V_grad', v_grad_diffs[0], step)
+        tracker.update(safe_name, "V_grad", v_grad_diffs[0], step)
 
 
-def check_parameter_orthogonality(model, module, step: int, tracker: OrthogonalityTracker):
+def check_parameter_orthogonality(
+    model, module, step: int, tracker: OrthogonalityTracker
+):
     """
     Check if post-update U_low and V_low are orthogonal to U_high and V_high.
 
@@ -259,39 +279,33 @@ def check_parameter_orthogonality(model, module, step: int, tracker: Orthogonali
         tracker: OrthogonalityTracker to update
     """
     svd_dict = model.get_svd_dict_for_module(module)
-    
+
     U_high = svd_dict["U_high"]
     V_high = svd_dict["V_high"]
     U_low = svd_dict["U_low"]
     V_low = svd_dict["V_low"]
-    
+
     # get the safe_name for tracking
     safe_name = module.osft_params.safe_name
 
-    if hasattr(U_high, 'full_tensor'):
+    if hasattr(U_high, "full_tensor"):
         U_high = U_high.full_tensor()
-    if hasattr(V_high, 'full_tensor'):
+    if hasattr(V_high, "full_tensor"):
         V_high = V_high.full_tensor()
-    if hasattr(U_low, 'full_tensor'):
+    if hasattr(U_low, "full_tensor"):
         U_low = U_low.full_tensor()
-    if hasattr(V_low, 'full_tensor'):
+    if hasattr(V_low, "full_tensor"):
         V_low = V_low.full_tensor()
-    
+
     # Check U parameter orthogonality
     u_param_diffs = compute_angle_differences(U_high, U_low, top_n=1)
     if u_param_diffs:
-        tracker.update(safe_name, 'U_param', u_param_diffs[0], step)
-    
+        tracker.update(safe_name, "U_param", u_param_diffs[0], step)
+
     # Check V parameter orthogonality
     v_param_diffs = compute_angle_differences(V_high.T, V_low.T, top_n=1)
     if v_param_diffs:
-        tracker.update(safe_name, 'V_param', v_param_diffs[0], step)
-    
-    
-
-
-
-
+        tracker.update(safe_name, "V_param", v_param_diffs[0], step)
 
 
 def test_osft_orthogonalization(
@@ -317,11 +331,15 @@ def test_osft_orthogonalization(
     # Initialize distributed environment
     if not dist.is_initialized():
         dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
-    
+
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
+    device = (
+        torch.device("cuda", local_rank)
+        if torch.cuda.is_available()
+        else torch.device("cpu")
+    )
 
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
@@ -343,7 +361,7 @@ def test_osft_orthogonalization(
         print(f"Loading tokenizer from {model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     vocab_size = len(tokenizer)
-    
+
     if rank == 0:
         print(f"Vocabulary size: {vocab_size}")
 
@@ -370,9 +388,9 @@ def test_osft_orthogonalization(
 
     # Wrap with FSDP2 and setup optimizer
     model = wrap_fsdp2(model)
-    
+
     optimizer = AdamW(get_osft_params(model), lr=args.lr, betas=(0.9, 0.95))
-    scheduler = get_scheduler('constant', optimizer)
+    scheduler = get_scheduler("constant", optimizer)
     optim_wrapper(optimizer, model)
 
     if rank == 0:
@@ -383,55 +401,61 @@ def test_osft_orthogonalization(
 
     # Initialize tracker
     tracker = OrthogonalityTracker(margin_deg=margin_deg)
-    
+
     model.train()
-    
+
     # Training loop
     for step in range(1, num_steps + 1):
         # Generate synthetic data
         input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
         labels = input_ids.clone()
-        
+
         # Forward pass
         outputs = model(input_ids=input_ids, labels=labels)
         loss = outputs.loss
-        
+
         # Compute loss correctly for distributed training
         summed_loss = loss.float().sum(dim=0, keepdim=False) / (labels.numel())
-        
+
         # Backward pass
         summed_loss.backward()
-        
-        
-        
+
         # Take gradient step (includes projection via optim_wrapper)
         optimizer.step()
         scheduler.step()
         # Check gradient orthogonality (before optimizer.step)
         for module in model.modules():
-            if hasattr(module, "osft_params") and \
-               hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high") and hasattr(module, "osft_V_high"):
+            if (
+                hasattr(module, "osft_params")
+                and hasattr(module, "osft_U_high")
+                and hasattr(module, "osft_S_high")
+                and hasattr(module, "osft_V_high")
+            ):
                 check_gradient_orthogonality(model, module, step, tracker)
-    
+
         # Check parameter orthogonality (after optimizer.step)
         for module in model.modules():
-            if hasattr(module, "osft_params") and \
-               hasattr(module, "osft_U_high") and hasattr(module, "osft_S_high") and hasattr(module, "osft_V_high"):
+            if (
+                hasattr(module, "osft_params")
+                and hasattr(module, "osft_U_high")
+                and hasattr(module, "osft_S_high")
+                and hasattr(module, "osft_V_high")
+            ):
                 check_parameter_orthogonality(model, module, step, tracker)
-        
+
         # Clear gradients
         optimizer.zero_grad()
-        
+
         # Progress reporting
         if rank == 0 and (step % 10 == 0 or step == 1):
             print(f"Step {step}/{num_steps} - Loss: {summed_loss.item():.4f}")
-    
+
     if rank == 0:
         print("=" * 100)
         print("Training completed!")
         print("")
         print(tracker.get_summary())
-    
+
     return tracker.is_successful()
 
 
@@ -440,7 +464,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
         description="Test OSFT gradient orthogonalization over multiple training steps",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--model",

@@ -1,4 +1,5 @@
 """Pytest configuration for GPU tests."""
+
 import pytest
 import torch
 import sys
@@ -34,6 +35,7 @@ def flash_attn_available():
     """Check if flash attention is available."""
     try:
         import flash_attn as _  # noqa: F401
+
         return True
     except ImportError:
         return False

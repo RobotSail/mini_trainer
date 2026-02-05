@@ -12,8 +12,8 @@ from .orthogonality import (
 )
 
 __all__ = [
-    'compute_angle_differences',
-    'OrthogonalityTracker',
-    'check_gradient_orthogonality',
-    'check_parameter_orthogonality',
+    "compute_angle_differences",
+    "OrthogonalityTracker",
+    "check_gradient_orthogonality",
+    "check_parameter_orthogonality",
 ]

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Wrapper for optional wandb imports that provides consistent error handling 
+Wrapper for optional wandb imports that provides consistent error handling
 across all processes when wandb is not installed.
 """
 
@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 # Try to import wandb
 try:
     import wandb
+
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 class WandbNotAvailableError(ImportError):
     """Raised when wandb functions are called but wandb is not installed."""
+
     pass
 
 
@@ -40,42 +42,38 @@ def init(
     name: Optional[str] = None,
     entity: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
-    **kwargs
+    **kwargs,
 ) -> Any:
     """
     Initialize a wandb run. Raises WandbNotAvailableError if wandb is not installed.
-    
+
     Args:
         project: Name of the project
         name: Name of the run
         entity: Entity/team name
         config: Configuration dictionary
         **kwargs: Additional arguments to pass to wandb.init
-        
+
     Returns:
         wandb.Run object if successful
-        
+
     Raises:
         WandbNotAvailableError: If wandb is not installed
     """
     check_wandb_available("initialize wandb")
     return wandb.init(
-        project=project,
-        name=name,
-        entity=entity,
-        config=config,
-        **kwargs
+        project=project, name=name, entity=entity, config=config, **kwargs
     )
 
 
 def log(data: Dict[str, Any], **kwargs) -> None:
     """
     Log data to wandb. Raises WandbNotAvailableError if wandb is not installed.
-    
+
     Args:
         data: Dictionary of data to log
         **kwargs: Additional arguments to pass to wandb.log
-        
+
     Raises:
         WandbNotAvailableError: If wandb is not installed
     """
@@ -86,11 +84,9 @@ def log(data: Dict[str, Any], **kwargs) -> None:
 def finish() -> None:
     """
     Finish the wandb run. Raises WandbNotAvailableError if wandb is not installed.
-    
+
     Raises:
         WandbNotAvailableError: If wandb is not installed
     """
     check_wandb_available("finish wandb run")
     wandb.finish()
-
-
