@@ -1,10 +1,11 @@
 """Unit tests for dtype conversion logic in train.py."""
 
-import pytest
-import torch
 import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
+import torch
 
 from mini_trainer.train import parse_dtype
 
@@ -227,18 +228,14 @@ class TestMainFunctionDtypeIntegration:
     @patch("mini_trainer.train.get_node_rank", return_value=0)
     @patch("mini_trainer.train.init_distributed_environment")
     @patch("torch.distributed.get_rank")
-    def test_main_invalid_dtype_raises_error(
-        self, mock_get_rank, mock_init_dist, mock_get_node_rank, mock_world_size
-    ):
+    def test_main_invalid_dtype_raises_error(self, mock_get_rank, mock_init_dist, mock_get_node_rank, mock_world_size):
         """Test that main function raises error for invalid dtype strings."""
         mock_get_rank.return_value = 0
 
         with tempfile.TemporaryDirectory() as tmpdir:
             from mini_trainer.train import main
 
-            with pytest.raises(
-                ValueError, match="Unsupported dtype string: 'invalid_dtype'"
-            ):
+            with pytest.raises(ValueError, match="Unsupported dtype string: 'invalid_dtype'"):
                 main(
                     model_name_or_path="test-model",
                     data_path="test.jsonl",

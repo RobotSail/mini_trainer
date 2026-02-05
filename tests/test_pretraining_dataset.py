@@ -46,9 +46,7 @@ class TestPretrainingBlockDataset:
     def test_dataset_initialization(self, temp_pretraining_jsonl):
         """Test basic initialization, block_size, and num_blocks calculation."""
         # 14 total tokens, block_size=5 → 2 complete blocks + 1 partial (4 tokens)
-        dataset = PretrainingBlockDataset.from_jsonl_file(
-            temp_pretraining_jsonl, block_size=5, pad_token_id=0
-        )
+        dataset = PretrainingBlockDataset.from_jsonl_file(temp_pretraining_jsonl, block_size=5, pad_token_id=0)
 
         assert dataset.block_size == 5
         assert dataset.num_blocks == 3  # 2 complete + 1 partial
@@ -57,9 +55,7 @@ class TestPretrainingBlockDataset:
 
     def test_concatenation_of_documents(self, temp_pretraining_jsonl):
         """Verify documents are concatenated in order."""
-        dataset = PretrainingBlockDataset.from_jsonl_file(
-            temp_pretraining_jsonl, block_size=14, pad_token_id=0
-        )
+        dataset = PretrainingBlockDataset.from_jsonl_file(temp_pretraining_jsonl, block_size=14, pad_token_id=0)
 
         # Should have all tokens concatenated
         expected = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
@@ -68,9 +64,7 @@ class TestPretrainingBlockDataset:
     def test_partial_block_is_padded(self, temp_pretraining_jsonl):
         """Verify partial blocks are padded correctly."""
         # 14 tokens, block_size=5 → 2 complete blocks + 1 partial with 4 tokens
-        dataset = PretrainingBlockDataset.from_jsonl_file(
-            temp_pretraining_jsonl, block_size=5, pad_token_id=0
-        )
+        dataset = PretrainingBlockDataset.from_jsonl_file(temp_pretraining_jsonl, block_size=5, pad_token_id=0)
 
         assert len(dataset.all_input_ids) == 14  # All tokens kept
         assert dataset.num_blocks == 3  # 2 complete + 1 partial
@@ -84,9 +78,7 @@ class TestPretrainingBlockDataset:
 
     def test_getitem_returns_correct_block(self, temp_pretraining_jsonl):
         """Test __getitem__ retrieves correct token ranges."""
-        dataset = PretrainingBlockDataset.from_jsonl_file(
-            temp_pretraining_jsonl, block_size=5, pad_token_id=0
-        )
+        dataset = PretrainingBlockDataset.from_jsonl_file(temp_pretraining_jsonl, block_size=5, pad_token_id=0)
 
         # Block 0: tokens [1, 2, 3, 4, 5]
         block_0 = dataset[0]
@@ -104,9 +96,7 @@ class TestPretrainingBlockDataset:
 
     def test_labels_equal_input_ids_for_complete_blocks(self, temp_pretraining_jsonl):
         """Verify complete blocks have labels == input_ids (no masking)."""
-        dataset = PretrainingBlockDataset.from_jsonl_file(
-            temp_pretraining_jsonl, block_size=5, pad_token_id=0
-        )
+        dataset = PretrainingBlockDataset.from_jsonl_file(temp_pretraining_jsonl, block_size=5, pad_token_id=0)
 
         # Check only complete blocks (not partial)
         for i in range(2):  # First 2 blocks are complete
@@ -115,9 +105,7 @@ class TestPretrainingBlockDataset:
 
     def test_num_loss_counted_tokens_for_complete_block(self, temp_pretraining_jsonl):
         """Verify num_loss_counted_tokens is block_size - 1 for complete blocks."""
-        dataset = PretrainingBlockDataset.from_jsonl_file(
-            temp_pretraining_jsonl, block_size=5, pad_token_id=0
-        )
+        dataset = PretrainingBlockDataset.from_jsonl_file(temp_pretraining_jsonl, block_size=5, pad_token_id=0)
 
         # Complete block should have block_size - 1 loss tokens
         block = dataset[0]
@@ -126,9 +114,7 @@ class TestPretrainingBlockDataset:
     def test_num_loss_counted_tokens_for_partial_block(self, temp_pretraining_jsonl):
         """Verify num_loss_counted_tokens for partial blocks."""
         # 14 tokens, block_size=5 → partial block has 4 tokens
-        dataset = PretrainingBlockDataset.from_jsonl_file(
-            temp_pretraining_jsonl, block_size=5, pad_token_id=0
-        )
+        dataset = PretrainingBlockDataset.from_jsonl_file(temp_pretraining_jsonl, block_size=5, pad_token_id=0)
 
         # Partial block (4 tokens) should have 4-1=3 loss tokens (causal shift)
         partial_block = dataset[2]
@@ -136,9 +122,7 @@ class TestPretrainingBlockDataset:
 
     def test_index_out_of_range(self, temp_pretraining_jsonl):
         """Test error handling for out-of-range indices."""
-        dataset = PretrainingBlockDataset.from_jsonl_file(
-            temp_pretraining_jsonl, block_size=5, pad_token_id=0
-        )
+        dataset = PretrainingBlockDataset.from_jsonl_file(temp_pretraining_jsonl, block_size=5, pad_token_id=0)
 
         # Should have 3 blocks (indices 0, 1, 2)
         assert len(dataset) == 3
@@ -162,9 +146,7 @@ class TestPretrainingBlockDataset:
 
         try:
             with pytest.raises(ValueError, match="must have 'input_ids' field"):
-                PretrainingBlockDataset.from_jsonl_file(
-                    temp_path, block_size=5, pad_token_id=0
-                )
+                PretrainingBlockDataset.from_jsonl_file(temp_path, block_size=5, pad_token_id=0)
         finally:
             os.unlink(temp_path)
 
@@ -182,9 +164,7 @@ class TestPretrainingBlockDataset:
             temp_path = f.name
 
         try:
-            dataset = PretrainingBlockDataset.from_jsonl_file(
-                temp_path, block_size=5, pad_token_id=0
-            )
+            dataset = PretrainingBlockDataset.from_jsonl_file(temp_path, block_size=5, pad_token_id=0)
 
             assert dataset.num_blocks == 3
             assert len(dataset) == 3
@@ -195,9 +175,7 @@ class TestPretrainingBlockDataset:
                 block = dataset[i]
                 expected_start = i * 5 + 1
                 expected_end = (i + 1) * 5 + 1
-                assert block["input_ids"].tolist() == list(
-                    range(expected_start, expected_end)
-                )
+                assert block["input_ids"].tolist() == list(range(expected_start, expected_end))
         finally:
             os.unlink(temp_path)
 
@@ -215,9 +193,7 @@ class TestPretrainingBlockDataset:
             temp_path = f.name
 
         try:
-            dataset = PretrainingBlockDataset.from_jsonl_file(
-                temp_path, block_size=10, pad_token_id=0
-            )
+            dataset = PretrainingBlockDataset.from_jsonl_file(temp_path, block_size=10, pad_token_id=0)
 
             assert dataset.num_blocks == 1  # One partial block
             assert len(dataset) == 1
@@ -245,9 +221,7 @@ class TestPretrainingBlockDataset:
     def test_large_dataset_concatenation(self):
         """Performance check with many documents."""
         # Create 100 documents with 50 tokens each → 5000 total tokens
-        data = [
-            {"input_ids": list(range(i, i + 50)), "len": 50} for i in range(0, 5000, 50)
-        ]
+        data = [{"input_ids": list(range(i, i + 50)), "len": 50} for i in range(0, 5000, 50)]
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             for item in data:
@@ -257,9 +231,7 @@ class TestPretrainingBlockDataset:
 
         try:
             # block_size=512 → 5000 // 512 = 9 complete blocks + 1 partial (392 tokens)
-            dataset = PretrainingBlockDataset.from_jsonl_file(
-                temp_path, block_size=512, pad_token_id=0
-            )
+            dataset = PretrainingBlockDataset.from_jsonl_file(temp_path, block_size=512, pad_token_id=0)
 
             assert dataset.num_blocks == 10  # 9 complete + 1 partial
             assert len(dataset) == 10
@@ -275,9 +247,7 @@ class TestPretrainingBlockDataset:
 
     def test_tensor_dtype_correct(self, temp_pretraining_jsonl):
         """Verify torch.long dtype for tensors."""
-        dataset = PretrainingBlockDataset.from_jsonl_file(
-            temp_pretraining_jsonl, block_size=5, pad_token_id=0
-        )
+        dataset = PretrainingBlockDataset.from_jsonl_file(temp_pretraining_jsonl, block_size=5, pad_token_id=0)
 
         block = dataset[0]
 
@@ -287,9 +257,7 @@ class TestPretrainingBlockDataset:
 
     def test_block_structure_consistency(self, temp_pretraining_jsonl):
         """Verify all blocks have consistent structure."""
-        dataset = PretrainingBlockDataset.from_jsonl_file(
-            temp_pretraining_jsonl, block_size=5, pad_token_id=0
-        )
+        dataset = PretrainingBlockDataset.from_jsonl_file(temp_pretraining_jsonl, block_size=5, pad_token_id=0)
 
         for i in range(len(dataset)):
             block = dataset[i]
@@ -338,9 +306,7 @@ class TestPretrainingBlockDataset:
             # Empty file should result in empty dataset
             # This may raise an error depending on implementation
             try:
-                dataset = PretrainingBlockDataset.from_jsonl_file(
-                    temp_path, block_size=5, pad_token_id=0
-                )
+                dataset = PretrainingBlockDataset.from_jsonl_file(temp_path, block_size=5, pad_token_id=0)
                 # If it succeeds, should have 0 blocks
                 assert dataset.num_blocks == 0
                 assert len(dataset) == 0

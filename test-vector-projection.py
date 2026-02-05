@@ -1,22 +1,16 @@
-import torch
-import torch.distributed as dist
-import torch.nn as nn
 import os
-import time
-from mini_trainer.osft_utils import create_osft_model_class, reconstruct_weight_matrix
-import typer
-import tempfile
 import random
+import tempfile
 
+import torch
+from transformers import LlamaConfig, LlamaForCausalLM
 
-from transformers import LlamaForCausalLM, LlamaConfig, LlamaTokenizerFast
+from mini_trainer.osft_utils import create_osft_model_class, reconstruct_weight_matrix
 
 
 # For individual values
 def is_effectively_zero(value, atol=1e-20, rtol=1e-12):
-    return torch.isclose(
-        value, torch.tensor(0.0, dtype=value.dtype), atol=atol, rtol=rtol
-    )
+    return torch.isclose(value, torch.tensor(0.0, dtype=value.dtype), atol=atol, rtol=rtol)
 
 
 def check_orthogonal_result(matrix, original_scale=1e-8):
@@ -34,9 +28,7 @@ def check_orthogonal_result(matrix, original_scale=1e-8):
     # Statistics
     total_elements = matrix.numel()
     zero_elements = is_zero_mask.sum().item()
-    max_non_zero = (
-        torch.abs(matrix[~is_zero_mask]).max() if (~is_zero_mask).any() else 0
-    )
+    max_non_zero = torch.abs(matrix[~is_zero_mask]).max() if (~is_zero_mask).any() else 0
 
     print(f"Elements effectively zero: {zero_elements}/{total_elements}")
     print(f"Max non-zero magnitude: {max_non_zero:.2e}")
@@ -65,7 +57,7 @@ def project_onto(B: torch.Tensor, V: torch.Tensor, top_k: int) -> torch.Tensor:
 
     That is, V is projected into a subspace of B orthogonal to the top K vectors in B.
 
-    Let $B \in \mathbb{R}^{n \times n}, V \in \mathbb{n \times m}$, and top_k < n
+    Let $B \\in \\mathbb{R}^{n \times n}, V \\in \\mathbb{n \times m}$, and top_k < n
     """
 
     # inner product,
@@ -191,13 +183,9 @@ def projection_test_template():
             # here, we have an (n x m)  matrix, where each entry i is the i-th basis vector, and each column j is the j-th column from v
             # in our case, it's one of the gradients from U_low, and each entry is the dot product between them.
             # Since this needs to be orthogonal, we would expect the subspace within top-K to be zero
-            before_proj = (
-                U_full.T @ U_low.grad.data
-            )  # map projections back into the basis vectors
+            before_proj = U_full.T @ U_low.grad.data  # map projections back into the basis vectors
             actual_projected = project_onto(U_full, U_low.grad.data, top_k=top_k)
-            after_proj = (
-                U_full.T @ actual_projected
-            )  # map projections back into the basis vectors
+            after_proj = U_full.T @ actual_projected  # map projections back into the basis vectors
 
             # --------------------------------------------------------------------------------
             # CHECKING THE GRADIENTS ARE NOT ORTHOGONAL TO HIGH COMPONENTS BEFORE PROJECTION
@@ -259,25 +247,15 @@ def projection_test_template():
             # --------------------------------------------------------------------------------
             # ensure that the gradients are not orthogonal to the right singular
             # vectors corresponding to the low singular values
-            zeroed_entries = zero_small_values(
-                after_proj[top_k:, :]
-            )  # here we check after the top_k values
+            zeroed_entries = zero_small_values(after_proj[top_k:, :])  # here we check after the top_k values
             zeros = torch.zeros_like(zeroed_entries)
             V_correct_low_value_pieces += 1 if not zeros.equal(zeroed_entries) else 0
 
     print("BEFORE VECTOR PROJECTION")
-    print(
-        f"U correct orthogonal pieces: {U_correct_orthogonal_pieces / total_checked * 100:.1f}%"
-    )
-    print(
-        f"U correct low value pieces: {U_correct_low_value_pieces / total_checked * 100:.1f}%"
-    )
-    print(
-        f"V correct orthogonal pieces: {V_correct_orthogonal_pieces / total_checked * 100:.1f}%"
-    )
-    print(
-        f"V correct low value pieces: {V_correct_low_value_pieces / total_checked * 100:.1f}%"
-    )
+    print(f"U correct orthogonal pieces: {U_correct_orthogonal_pieces / total_checked * 100:.1f}%")
+    print(f"U correct low value pieces: {U_correct_low_value_pieces / total_checked * 100:.1f}%")
+    print(f"V correct orthogonal pieces: {V_correct_orthogonal_pieces / total_checked * 100:.1f}%")
+    print(f"V correct low value pieces: {V_correct_low_value_pieces / total_checked * 100:.1f}%")
     print(f"total counted: {total_checked}")
 
     svd_lm.project_gradients()
@@ -402,25 +380,15 @@ def projection_test_template():
             # --------------------------------------------------------------------------------
             # ensure that the gradients are not orthogonal to the right singular
             # vectors corresponding to the low singular values
-            zeroed_entries = zero_small_values(
-                after_proj[top_k:, :]
-            )  # here we check after the top_k values
+            zeroed_entries = zero_small_values(after_proj[top_k:, :])  # here we check after the top_k values
             zeros = torch.zeros_like(zeroed_entries)
             V_correct_low_value_pieces += 1 if not zeros.equal(zeroed_entries) else 0
 
     print("AFTER VECTOR PROJECTION")
-    print(
-        f"U correct orthogonal pieces: {U_correct_orthogonal_pieces / total_checked * 100:.1f}%"
-    )
-    print(
-        f"U correct low value pieces: {U_correct_low_value_pieces / total_checked * 100:.1f}%"
-    )
-    print(
-        f"V correct orthogonal pieces: {V_correct_orthogonal_pieces / total_checked * 100:.1f}%"
-    )
-    print(
-        f"V correct low value pieces: {V_correct_low_value_pieces / total_checked * 100:.1f}%"
-    )
+    print(f"U correct orthogonal pieces: {U_correct_orthogonal_pieces / total_checked * 100:.1f}%")
+    print(f"U correct low value pieces: {U_correct_low_value_pieces / total_checked * 100:.1f}%")
+    print(f"V correct orthogonal pieces: {V_correct_orthogonal_pieces / total_checked * 100:.1f}%")
+    print(f"V correct low value pieces: {V_correct_low_value_pieces / total_checked * 100:.1f}%")
     print(f"total counted: {total_checked}")
 
 
@@ -547,9 +515,7 @@ if __name__ == "__main__":
             # here, we have an (n x m)  matrix, where each entry i is the i-th basis vector, and each column j is the j-th column from v
             # in our case, it's one of the gradients from U_low, and each entry is the dot product between them.
             # Since this needs to be orthogonal, we would expect the subspace within top-K to be zero
-            before_proj = (
-                U_full.T @ U_low.grad.data
-            )  # map projections back into the basis vectors
+            before_proj = U_full.T @ U_low.grad.data  # map projections back into the basis vectors
             # actual_projected = project_onto(U_full, U_low.grad.data, top_k=top_k)
             # after_proj = U_full.T @ actual_projected  # map projections back into the basis vectors
             after_proj = before_proj
@@ -615,25 +581,15 @@ if __name__ == "__main__":
             # --------------------------------------------------------------------------------
             # ensure that the gradients are not orthogonal to the right singular
             # vectors corresponding to the low singular values
-            zeroed_entries = zero_small_values(
-                after_proj[top_k:, :]
-            )  # here we check after the top_k values
+            zeroed_entries = zero_small_values(after_proj[top_k:, :])  # here we check after the top_k values
             zeros = torch.zeros_like(zeroed_entries)
             V_correct_low_value_pieces += 1 if not zeros.equal(zeroed_entries) else 0
 
     print("BEFORE VECTOR PROJECTION")
-    print(
-        f"U correct orthogonal pieces: {U_correct_orthogonal_pieces / total_checked * 100:.1f}%"
-    )
-    print(
-        f"U correct low value pieces: {U_correct_low_value_pieces / total_checked * 100:.1f}%"
-    )
-    print(
-        f"V correct orthogonal pieces: {V_correct_orthogonal_pieces / total_checked * 100:.1f}%"
-    )
-    print(
-        f"V correct low value pieces: {V_correct_low_value_pieces / total_checked * 100:.1f}%"
-    )
+    print(f"U correct orthogonal pieces: {U_correct_orthogonal_pieces / total_checked * 100:.1f}%")
+    print(f"U correct low value pieces: {U_correct_low_value_pieces / total_checked * 100:.1f}%")
+    print(f"V correct orthogonal pieces: {V_correct_orthogonal_pieces / total_checked * 100:.1f}%")
+    print(f"V correct low value pieces: {V_correct_low_value_pieces / total_checked * 100:.1f}%")
     print(f"total counted: {total_checked}")
 
     svd_lm.project_gradients()
@@ -758,23 +714,13 @@ if __name__ == "__main__":
             # --------------------------------------------------------------------------------
             # ensure that the gradients are not orthogonal to the right singular
             # vectors corresponding to the low singular values
-            zeroed_entries = zero_small_values(
-                after_proj[top_k:, :]
-            )  # here we check after the top_k values
+            zeroed_entries = zero_small_values(after_proj[top_k:, :])  # here we check after the top_k values
             zeros = torch.zeros_like(zeroed_entries)
             V_correct_low_value_pieces += 1 if not zeros.equal(zeroed_entries) else 0
 
     print("AFTER VECTOR PROJECTION")
-    print(
-        f"U correct orthogonal pieces: {U_correct_orthogonal_pieces / total_checked * 100:.1f}%"
-    )
-    print(
-        f"U correct low value pieces: {U_correct_low_value_pieces / total_checked * 100:.1f}%"
-    )
-    print(
-        f"V correct orthogonal pieces: {V_correct_orthogonal_pieces / total_checked * 100:.1f}%"
-    )
-    print(
-        f"V correct low value pieces: {V_correct_low_value_pieces / total_checked * 100:.1f}%"
-    )
+    print(f"U correct orthogonal pieces: {U_correct_orthogonal_pieces / total_checked * 100:.1f}%")
+    print(f"U correct low value pieces: {U_correct_low_value_pieces / total_checked * 100:.1f}%")
+    print(f"V correct orthogonal pieces: {V_correct_orthogonal_pieces / total_checked * 100:.1f}%")
+    print(f"V correct low value pieces: {V_correct_low_value_pieces / total_checked * 100:.1f}%")
     print(f"total counted: {total_checked}")

@@ -9,15 +9,14 @@ Single mode: Starts with max sequences at min length, then doubles sequence leng
 token budget and repeats until OOM.
 """
 
-import time
+import json
 import os
 import sys
-import json
+import time
 from pathlib import Path
-from typing import Dict, List
 
 import torch
-from typer import Typer, Option
+from typer import Option, Typer
 
 # Add parent directory to path to import from training modules
 sys.path.append(str(Path(__file__).parent.parent))
@@ -28,9 +27,7 @@ from utils import init_distributed_environment, log_rank_0
 app = Typer()
 
 
-def create_uniform_batch(
-    num_sequences: int, sequence_length: int, vocab_size: int = 32000
-) -> Dict[str, torch.Tensor]:
+def create_uniform_batch(num_sequences: int, sequence_length: int, vocab_size: int = 32000) -> dict[str, torch.Tensor]:
     """Create a batch with uniform sequence lengths in packed format."""
     total_tokens = num_sequences * sequence_length
 
@@ -54,10 +51,10 @@ def create_uniform_batch(
 def measure_iteration(
     model,
     optimizer,
-    batch: Dict[str, torch.Tensor],
+    batch: dict[str, torch.Tensor],
     num_iterations: int = 5,
     device: str = "cuda",
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Run forward/backward passes and measure performance."""
 
     # Move batch to device
@@ -108,7 +105,7 @@ def combined_experiment(
     min_length: int,
     num_iterations: int,
     device: str = "cuda",
-) -> List[Dict]:
+) -> list[dict]:
     """Combined experiment: vary budgets and sequence configurations until OOM."""
     results = []
     max_tokens = start_max_tokens
@@ -145,9 +142,7 @@ def combined_experiment(
                 batch = create_uniform_batch(num_sequences, sequence_length, vocab_size)
 
                 # Measure performance
-                metrics = measure_iteration(
-                    model, optimizer, batch, num_iterations, device
-                )
+                metrics = measure_iteration(model, optimizer, batch, num_iterations, device)
 
                 # Record result
                 result = {
@@ -174,14 +169,12 @@ def combined_experiment(
                     "status": "oom",
                 }
                 results.append(result)
-                log_rank_0(f"  ✗ Out of memory!")
+                log_rank_0("  ✗ Out of memory!")
                 torch.cuda.empty_cache()
 
                 # If we OOM on the first config of a new budget, stop entirely
                 if not budget_success:
-                    log_rank_0(
-                        f"\nStopping: OOM on first configuration of budget {max_tokens}"
-                    )
+                    log_rank_0(f"\nStopping: OOM on first configuration of budget {max_tokens}")
                     return results
 
             except Exception as e:
@@ -205,7 +198,7 @@ def combined_experiment(
 
         # Safety check: if budget gets unreasonably large, stop
         if max_tokens > 1000000:  # 1M tokens
-            log_rank_0(f"\nStopping: Budget reached safety limit of 1M tokens")
+            log_rank_0("\nStopping: Budget reached safety limit of 1M tokens")
             break
 
     return results
@@ -213,22 +206,12 @@ def combined_experiment(
 
 @app.command()
 def main(
-    model_name_or_path: str = Option(
-        "Qwen/Qwen2.5-1.5B-Instruct", help="Model name or path"
-    ),
-    start_max_tokens: int = Option(
-        60000, help="Starting maximum tokens per GPU budget"
-    ),
-    budget_increase: int = Option(
-        20000, help="Amount to increase budget each iteration"
-    ),
+    model_name_or_path: str = Option("Qwen/Qwen2.5-1.5B-Instruct", help="Model name or path"),
+    start_max_tokens: int = Option(60000, help="Starting maximum tokens per GPU budget"),
+    budget_increase: int = Option(20000, help="Amount to increase budget each iteration"),
     min_length: int = Option(512, help="Minimum sequence length"),
-    num_iterations: int = Option(
-        5, help="Number of forward/backward iterations per test"
-    ),
-    output_file: str = Option(
-        "experiment_results.json", help="Output file for results"
-    ),
+    num_iterations: int = Option(5, help="Number of forward/backward iterations per test"),
+    output_file: str = Option("experiment_results.json", help="Output file for results"),
     use_liger_kernels: bool = Option(False, help="Whether to use Liger kernels"),
     fsdp_version: str = Option("fsdp1", help="FSDP version to use: 'fsdp1' or 'fsdp2'"),
 ):
@@ -239,9 +222,7 @@ def main(
 
     # Setup model and training components
     log_rank_0("Setting up model...")
-    model = setup_model(
-        model_name_or_path=model_name_or_path, use_liger_kernels=use_liger_kernels
-    )
+    model = setup_model(model_name_or_path=model_name_or_path, use_liger_kernels=use_liger_kernels)
 
     vocab_size = model.config.vocab_size
     log_rank_0(f"Model vocab size: {vocab_size}")
@@ -262,7 +243,7 @@ def main(
     model.train()
 
     # Run combined experiment
-    log_rank_0(f"\nRunning combined experiment...")
+    log_rank_0("\nRunning combined experiment...")
     log_rank_0(f"Starting budget: {start_max_tokens} tokens")
     log_rank_0(f"Budget increase: {budget_increase} tokens")
     log_rank_0(f"Min length: {min_length}")
@@ -320,9 +301,7 @@ def main(
             print(f"  Successful: {len(successful)}, OOM: {len(oom)}")
 
             if successful:
-                print(
-                    f"  {'Sequences':<10} {'Length':<10} {'Tokens':<12} {'Memory (GB)':<12} {'Tokens/sec':<12}"
-                )
+                print(f"  {'Sequences':<10} {'Length':<10} {'Tokens':<12} {'Memory (GB)':<12} {'Tokens/sec':<12}")
                 print("  " + "-" * 60)
                 for r in successful:
                     print(

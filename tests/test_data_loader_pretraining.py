@@ -11,7 +11,7 @@ import pytest
 import torch
 
 # First Party
-from mini_trainer.sampler import get_data_loader, PretrainingBlockDataset
+from mini_trainer.sampler import PretrainingBlockDataset, get_data_loader
 from mini_trainer.training_types import PretrainingConfig
 
 
@@ -26,9 +26,7 @@ class TestGetDataLoaderPretraining:
     @pytest.fixture
     def temp_pretraining_file(self):
         """Create temp pretraining JSONL file with 10 docs, 500 tokens total."""
-        data = [
-            {"input_ids": list(range(i, i + 50)), "len": 50} for i in range(0, 500, 50)
-        ]
+        data = [{"input_ids": list(range(i, i + 50)), "len": 50} for i in range(0, 500, 50)]
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             for item in data:
@@ -61,9 +59,7 @@ class TestGetDataLoaderPretraining:
         yield temp_path
         os.unlink(temp_path)
 
-    def test_pretraining_mode_creates_block_dataset(
-        self, temp_pretraining_file, pretraining_config
-    ):
+    def test_pretraining_mode_creates_block_dataset(self, temp_pretraining_file, pretraining_config):
         """Verify PretrainingBlockDataset is used in pretraining mode."""
         train_loader, val_loader = get_data_loader(
             data_path=temp_pretraining_file,
@@ -80,9 +76,7 @@ class TestGetDataLoaderPretraining:
         assert isinstance(dataset, PretrainingBlockDataset)
         assert dataset.block_size == 128
 
-    def test_pretraining_mode_returns_no_val_loader(
-        self, temp_pretraining_file, pretraining_config
-    ):
+    def test_pretraining_mode_returns_no_val_loader(self, temp_pretraining_file, pretraining_config):
         """Verify validation loader is None in pretraining mode."""
         train_loader, val_loader = get_data_loader(
             data_path=temp_pretraining_file,
@@ -94,9 +88,7 @@ class TestGetDataLoaderPretraining:
 
         assert val_loader is None
 
-    def test_validation_split_with_pretraining_works(
-        self, temp_pretraining_file, pretraining_config
-    ):
+    def test_validation_split_with_pretraining_works(self, temp_pretraining_file, pretraining_config):
         """Validate that validation_split works with pretraining mode."""
         train_loader, val_loader = get_data_loader(
             data_path=temp_pretraining_file,
@@ -113,9 +105,7 @@ class TestGetDataLoaderPretraining:
         assert isinstance(train_loader.dataset, PretrainingBlockDataset)
         assert isinstance(val_loader.dataset, PretrainingBlockDataset)
 
-    def test_pretraining_blocks_are_batched_correctly(
-        self, temp_pretraining_file, pretraining_config
-    ):
+    def test_pretraining_blocks_are_batched_correctly(self, temp_pretraining_file, pretraining_config):
         """Verify batching works with pretraining blocks."""
         train_loader, _ = get_data_loader(
             data_path=temp_pretraining_file,
@@ -148,9 +138,7 @@ class TestGetDataLoaderPretraining:
 
         assert batch_count > 0  # Ensure we got some batches
 
-    def test_pretraining_mode_respects_max_tokens_per_gpu(
-        self, temp_pretraining_file, pretraining_config
-    ):
+    def test_pretraining_mode_respects_max_tokens_per_gpu(self, temp_pretraining_file, pretraining_config):
         """Verify collator works with pretraining dataset."""
         train_loader, _ = get_data_loader(
             data_path=temp_pretraining_file,
@@ -171,9 +159,7 @@ class TestGetDataLoaderPretraining:
             break  # Just check first batch
 
     @patch("mini_trainer.sampler.log_rank_0")
-    def test_pretraining_logging_output(
-        self, mock_log, temp_pretraining_file, pretraining_config
-    ):
+    def test_pretraining_logging_output(self, mock_log, temp_pretraining_file, pretraining_config):
         """Verify informative logs are produced."""
         get_data_loader(
             data_path=temp_pretraining_file,
@@ -193,9 +179,7 @@ class TestGetDataLoaderPretraining:
         # Should mention blocks and/or pretraining
         assert "block" in log_messages.lower() or "pretraining" in log_messages.lower()
 
-    def test_instruction_tuning_mode_without_pretraining_config(
-        self, temp_instruction_tuning_file
-    ):
+    def test_instruction_tuning_mode_without_pretraining_config(self, temp_instruction_tuning_file):
         """Verify instruction tuning mode still works (no pretraining_config)."""
         train_loader, val_loader = get_data_loader(
             data_path=temp_instruction_tuning_file,
@@ -306,9 +290,7 @@ class TestGetDataLoaderValidation:
     @pytest.fixture
     def temp_no_labels_file(self):
         """Create file without labels field (pretraining data)."""
-        data = [
-            {"input_ids": list(range(i, i + 50)), "len": 50} for i in range(0, 100, 50)
-        ]
+        data = [{"input_ids": list(range(i, i + 50)), "len": 50} for i in range(0, 100, 50)]
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             for item in data:

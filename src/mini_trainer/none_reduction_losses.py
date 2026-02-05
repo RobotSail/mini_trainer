@@ -1,15 +1,14 @@
 import torch
 import torch.nn as nn
-from typing import Optional
 
 
 def liger_fixed_fused_linear_cross_entropy_none_reduction(
     hidden_states: torch.Tensor,
     lm_head_weight: torch.Tensor,
     target: torch.Tensor,
-    num_items_in_batch: Optional[int] = None,
+    num_items_in_batch: int | None = None,
     ignore_index: int = -100,
-    final_logit_softcapping: Optional[float] = None,
+    final_logit_softcapping: float | None = None,
     **kwargs,
 ):
     import liger_kernel.transformers.functional as F
@@ -30,12 +29,10 @@ def liger_fixed_fused_linear_cross_entropy_none_reduction(
 def hf_fixed_cross_entropy_none_reduction(
     source: torch.Tensor,
     target: torch.Tensor,
-    num_items_in_batch: Optional[int] = None,
+    num_items_in_batch: int | None = None,
     ignore_index: int = -100,
     **kwargs,
 ) -> torch.Tensor:
     # torch.distributed.breakpoint()
-    loss = nn.functional.cross_entropy(
-        source, target, ignore_index=ignore_index, reduction="none"
-    )
+    loss = nn.functional.cross_entropy(source, target, ignore_index=ignore_index, reduction="none")
     return loss

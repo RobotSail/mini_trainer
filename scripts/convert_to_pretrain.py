@@ -6,6 +6,7 @@ In pretraining mode, all tokens are unmasked (no distinction between user/assist
 
 import json
 from pathlib import Path
+
 import typer
 
 app = typer.Typer()
@@ -42,9 +43,7 @@ def convert_conversation_to_pretrain(sample: dict) -> dict:
 @app.command()
 def convert(
     input_file: str = typer.Option(..., "--input-file", help="Input JSONL file path"),
-    output_file: str = typer.Option(
-        ..., "--output-file", help="Output JSONL file path"
-    ),
+    output_file: str = typer.Option(..., "--output-file", help="Output JSONL file path"),
 ):
     """Convert conversation data to pretraining format."""
 
@@ -64,7 +63,7 @@ def convert(
     typer.echo(f"Converting {input_path} to pretraining format...")
 
     with (
-        open(input_path, "r", encoding="utf-8") as infile,
+        open(input_path, encoding="utf-8") as infile,
         open(output_path, "w", encoding="utf-8") as outfile,
     ):
         for line_num, line in enumerate(infile, 1):
@@ -94,14 +93,14 @@ def convert(
                 error_count += 1
                 continue
 
-    typer.echo(f"✅ Conversion complete!")
+    typer.echo("✅ Conversion complete!")
     typer.echo(f"📊 Converted: {converted_count} samples")
     typer.echo(f"❌ Errors: {error_count} samples")
     typer.echo(f"💾 Output saved to: {output_path}")
 
     # Show sample of converted data
-    typer.echo(f"\n📝 Sample converted data:")
-    with open(output_path, "r", encoding="utf-8") as f:
+    typer.echo("\n📝 Sample converted data:")
+    with open(output_path, encoding="utf-8") as f:
         first_line = f.readline()
         sample_data = json.loads(first_line)
         content_preview = sample_data["messages"][0]["content"][:300] + "..."

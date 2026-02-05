@@ -24,29 +24,29 @@ Key Features:
   same number of minibatches.
 """
 
-from deprecated import deprecated
 import os
 
-import torch
-from torch.utils.data import Sampler, Dataset, DataLoader, SequentialSampler
-import torch.distributed as dist
 import numpy as np
-from datasets import load_dataset, Dataset as HFDataset
+import torch
+import torch.distributed as dist
+from datasets import (
+    Dataset as HFDataset,
+    load_dataset,
+)
+from deprecated import deprecated
+from torch.utils.data import DataLoader, Dataset, Sampler, SequentialSampler
+
 from mini_trainer.batch_packer import batch_lengths_to_minibatches_lpt
-from mini_trainer.utils import log_rank_0
 from mini_trainer.training_types import PretrainingConfig
+from mini_trainer.utils import log_rank_0
 
 
 def reset_minibatches(num_ranks: int):
     return [[] for _ in range(num_ranks)], np.zeros(num_ranks)
 
 
-@deprecated(
-    "Use batch_lengths_to_minibatches_lpt instead for better load balancing performance"
-)
-def batch_lengths_to_minibatches(
-    batch_lengths: list[int], max_tokens_per_rank: int, num_ranks: int, rank: int
-):
+@deprecated("Use batch_lengths_to_minibatches_lpt instead for better load balancing performance")
+def batch_lengths_to_minibatches(batch_lengths: list[int], max_tokens_per_rank: int, num_ranks: int, rank: int):
     """Distributes indices from a batch into minibatches across ranks.
 
     Takes a list of sequence lengths corresponding to samples in an initial batch
@@ -83,15 +83,10 @@ def batch_lengths_to_minibatches(
     for sid, sample_len in enumerate(batch_lengths):
         least_full_batch_id = np.argmin(current_minibatches_loads)
 
-        if (
-            current_minibatches_loads[least_full_batch_id] + sample_len
-            > max_tokens_per_rank
-        ):
+        if current_minibatches_loads[least_full_batch_id] + sample_len > max_tokens_per_rank:
             """when the least full minibatch is full, we need to start a new minibatch"""
             minibatches_indices.append(current_minibatches_ids)
-            current_minibatches_ids, current_minibatches_loads = reset_minibatches(
-                num_ranks
-            )
+            current_minibatches_ids, current_minibatches_loads = reset_minibatches(num_ranks)
             least_full_batch_id = 0
 
         """add sample to the least full minibatch"""
@@ -150,9 +145,7 @@ class JsonlDataset(Dataset):
         if (loss_counted_tokens := sample.get("num_loss_counted_tokens", None)) is None:
             # causal LMs shift labels to the left when calculating cross-entropy loss
             # so we must account for this shift when we calculate cross-entropy
-            loss_counted_tokens = sum(
-                1 if label != -100 else 0 for label in sample["labels"][1:]
-            )
+            loss_counted_tokens = sum(1 if label != -100 else 0 for label in sample["labels"][1:])
 
         item = {
             "input_ids": torch.tensor(sample["input_ids"], dtype=torch.long),
@@ -163,9 +156,7 @@ class JsonlDataset(Dataset):
 
         # ensure that an attention mask exists if the sample came with one
         if "attention_mask" in sample:
-            item["attention_mask"] = torch.tensor(
-                sample["attention_mask"], dtype=torch.long
-            )
+            item["attention_mask"] = torch.tensor(sample["attention_mask"], dtype=torch.long)
         return item
 
     @classmethod
@@ -180,9 +171,7 @@ class JsonlDataset(Dataset):
             dataset = dataset.map(
                 lambda s: {
                     # causal LMs shift labels to the left when calculating cross-entropy loss
-                    "num_loss_counted_tokens": sum(
-                        1 for tok in s["labels"][1:] if tok != -100
-                    )
+                    "num_loss_counted_tokens": sum(1 for tok in s["labels"][1:] if tok != -100)
                 }
             )
 
@@ -237,9 +226,7 @@ class JsonlDataset(Dataset):
             return train_dataset, val_dataset
 
         # validation split case
-        split_dataset = hf_dataset.train_test_split(
-            test_size=validation_split, seed=seed, shuffle=True
-        )
+        split_dataset = hf_dataset.train_test_split(test_size=validation_split, seed=seed, shuffle=True)
         train_dataset = cls(hf_dataset=split_dataset["train"])
         val_dataset = cls(hf_dataset=split_dataset["test"])
         return train_dataset, val_dataset
@@ -294,9 +281,7 @@ class PretrainingBlockDataset(Dataset):
 
         log_rank_0(f"Total tokens: {total_tokens:,}")
         log_rank_0(f"Block size: {block_size}")
-        log_rank_0(
-            f"Total blocks: {self.num_blocks:,} ({num_full_blocks} complete, {1 if remainder else 0} partial)"
-        )
+        log_rank_0(f"Total blocks: {self.num_blocks:,} ({num_full_blocks} complete, {1 if remainder else 0} partial)")
         if remainder:
             log_rank_0(f"Partial block size: {remainder} tokens")
 
@@ -304,9 +289,7 @@ class PretrainingBlockDataset(Dataset):
         return self.num_blocks
 
     @classmethod
-    def from_jsonl_file(
-        cls, data_path: str, block_size: int, pad_token_id: int
-    ) -> "PretrainingBlockDataset":
+    def from_jsonl_file(cls, data_path: str, block_size: int, pad_token_id: int) -> "PretrainingBlockDataset":
         """Load a dataset from a JSONL file and create a PretrainingBlockDataset."""
         dataset = load_dataset("json", data_files=data_path, split="train")
         return cls(dataset, block_size, pad_token_id)
@@ -334,9 +317,7 @@ class PretrainingBlockDataset(Dataset):
             Tuple of (train_dataset, val_dataset). val_dataset is None if validation_split is 0.
         """
         if not (0.0 <= validation_split < 1.0):
-            raise ValueError(
-                f"validation_split must be in [0.0, 1.0), got {validation_split}"
-            )
+            raise ValueError(f"validation_split must be in [0.0, 1.0), got {validation_split}")
 
         dataset = load_dataset("json", data_files=data_path, split="train")
 
@@ -487,9 +468,7 @@ def mb_collate_fn(minibatch, batch_num_loss_counted_tokens):
     }
 
 
-def padded_mb_collate_fn(
-    minibatch: list[dict], batch_num_loss_counted_tokens: int, pad_token_id: int
-) -> dict:
+def padded_mb_collate_fn(minibatch: list[dict], batch_num_loss_counted_tokens: int, pad_token_id: int) -> dict:
     """Collates a list of samples into a padded batch for standard attention.
 
     This function takes a minibatch (list of dataset samples) and creates padded
@@ -606,25 +585,17 @@ class MaxTokensPerRankCollator:
         self.max_tokens_per_rank = max_tokens_per_rank
 
         if rank is None:
-            self.global_rank = (
-                dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
-            )
+            self.global_rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
         else:
             self.global_rank = rank
         if world_size is None:
-            self.world_size = (
-                dist.get_world_size()
-                if dist.is_available() and dist.is_initialized()
-                else 1
-            )
+            self.world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
         else:
             self.world_size = world_size
         if dummy_sample is None:
             dummy_sample = {
                 "input_ids": torch.tensor([15, 14, 13, 12, 11], dtype=torch.long),
-                "labels": torch.tensor(
-                    [-100, -100, -100, -100, -100], dtype=torch.long
-                ),
+                "labels": torch.tensor([-100, -100, -100, -100, -100], dtype=torch.long),
                 "len": 5,
                 "num_loss_counted_tokens": 0,
             }
@@ -647,9 +618,7 @@ class MaxTokensPerRankCollator:
             )
         # Use filtered batch for lengths and loss counts
         batch_lengths = [sample["len"] for sample in batch_]
-        batch_num_loss_counted_tokens = sum(
-            [sample["num_loss_counted_tokens"] for sample in batch_]
-        )
+        batch_num_loss_counted_tokens = sum([sample["num_loss_counted_tokens"] for sample in batch_])
         all_minibatches_indices = batch_lengths_to_minibatches_lpt(
             batch_lengths, self.max_tokens_per_rank, self.world_size, self.global_rank
         )
@@ -705,16 +674,12 @@ def get_data_loader(
     """
     # Validate parameters
     if validation_split < 0.0 or validation_split >= 1.0:
-        raise ValueError(
-            f"validation_split must be between 0 and 1 (exclusive of 1), got {validation_split}"
-        )
+        raise ValueError(f"validation_split must be between 0 and 1 (exclusive of 1), got {validation_split}")
 
     # Create dataset based on mode
     if pretraining_config is not None:
         if pad_token_id is None or pad_token_id < 0:
-            raise ValueError(
-                f"pretraining mode requires a valid non-negative pad_token_id, got: {pad_token_id=}"
-            )
+            raise ValueError(f"pretraining mode requires a valid non-negative pad_token_id, got: {pad_token_id=}")
         # Pretraining mode: use PretrainingBlockDataset
         train_dataset, val_dataset = PretrainingBlockDataset.load_and_split(
             data_path=data_path,
@@ -723,13 +688,9 @@ def get_data_loader(
             validation_split=validation_split,
             seed=seed,
         )
-        log_rank_0(
-            f"Pretraining dataset: {len(train_dataset)} blocks of size {pretraining_config.block_size}"
-        )
+        log_rank_0(f"Pretraining dataset: {len(train_dataset)} blocks of size {pretraining_config.block_size}")
         if val_dataset is not None:
-            log_rank_0(
-                f"Validation dataset: {len(val_dataset)} blocks of size {pretraining_config.block_size}"
-            )
+            log_rank_0(f"Validation dataset: {len(val_dataset)} blocks of size {pretraining_config.block_size}")
         else:
             log_rank_0("No validation dataset")
     else:
@@ -741,9 +702,7 @@ def get_data_loader(
             seed=seed,
         )
         if val_dataset is not None:
-            log_rank_0(
-                f"Dataset split: {len(train_dataset)} train, {len(val_dataset)} validation samples"
-            )
+            log_rank_0(f"Dataset split: {len(train_dataset)} train, {len(val_dataset)} validation samples")
         else:
             log_rank_0(f"Dataset split: {len(train_dataset)} train")
 

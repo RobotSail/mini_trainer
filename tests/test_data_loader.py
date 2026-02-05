@@ -5,26 +5,27 @@ Tests the JsonlDataset and MaxTokensPerRankCollator
 to ensure correct data loading, sampling, and batching behavior.
 """
 
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
 import tempfile
-import torch
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pytest
-from unittest.mock import MagicMock, patch
+import torch
 from torch.utils.data import DataLoader
 
 from mini_trainer.sampler import (
+    EpochSampler,
     JsonlDataset,
     MaxTokensPerRankCollator,
     get_data_loader,
     mb_collate_fn,
     reset_minibatches,
-    EpochSampler,
 )
 
 
@@ -226,9 +227,7 @@ class TestMaxTokensPerRankCollator:
     @patch("mini_trainer.sampler.dist.is_available", return_value=True)
     @patch("mini_trainer.sampler.dist.get_rank", return_value=0)
     @patch("mini_trainer.sampler.dist.get_world_size", return_value=2)
-    def test_collator_initialization(
-        self, mock_world_size, mock_rank, mock_available, mock_initialized
-    ):
+    def test_collator_initialization(self, mock_world_size, mock_rank, mock_available, mock_initialized):
         """Test collator initialization with distributed settings."""
         collator = MaxTokensPerRankCollator(max_tokens_per_rank=1000)
 
@@ -246,9 +245,7 @@ class TestMaxTokensPerRankCollator:
             "num_loss_counted_tokens": 0,
         }
 
-        collator = MaxTokensPerRankCollator(
-            max_tokens_per_rank=1000, rank=0, world_size=2, dummy_sample=dummy
-        )
+        collator = MaxTokensPerRankCollator(max_tokens_per_rank=1000, rank=0, world_size=2, dummy_sample=dummy)
 
         assert collator.dummy_sample == dummy
 
@@ -267,9 +264,7 @@ class TestMaxTokensPerRankCollator:
             }
         )
 
-        collator = MaxTokensPerRankCollator(
-            max_tokens_per_rank=1000, rank=0, world_size=2
-        )
+        collator = MaxTokensPerRankCollator(max_tokens_per_rank=1000, rank=0, world_size=2)
 
         collator(sample_batch)
 
@@ -290,9 +285,7 @@ class TestMaxTokensPerRankCollator:
         """Test that collator returns properly formatted minibatches."""
         mock_batch_fn.return_value = [[0, 1], [2, -1]]  # Two minibatches
 
-        collator = MaxTokensPerRankCollator(
-            max_tokens_per_rank=500, rank=0, world_size=2
-        )
+        collator = MaxTokensPerRankCollator(max_tokens_per_rank=500, rank=0, world_size=2)
 
         result = collator(sample_batch)
 
@@ -380,9 +373,7 @@ class TestGetDataLoader:
 
         batch = next(loader_it)
         microbatch = batch[0]
-        assert (
-            microbatch["num_samples"] == 2
-        )  # we now expect the last 2 samples to be here
+        assert microbatch["num_samples"] == 2  # we now expect the last 2 samples to be here
 
         # now we should have seen all samples, but we need to increment the epoch
         assert loader.sampler.epoch == 0
@@ -492,9 +483,7 @@ class TestGetDataLoader:
         # so now the next batch should have 1 sample on each rank
         batch = next(loader_it)
         microbatch = batch[0]
-        assert (
-            microbatch["num_samples"] == expected_leftover_samples // mock_world_size()
-        )
+        assert microbatch["num_samples"] == expected_leftover_samples // mock_world_size()
         assert loader.sampler.epoch == 0
 
     @patch("mini_trainer.sampler.dist.is_initialized", return_value=True)
@@ -546,9 +535,7 @@ class TestGetDataLoader:
 
         # this will burn up most of the samples
         minibatch = batch[0]
-        assert (
-            minibatch["num_samples"] == (expected_batch_size // mock_world_size()) + 1
-        )
+        assert minibatch["num_samples"] == (expected_batch_size // mock_world_size()) + 1
 
         # now there should be 1 batch left, it will most likely be on the first rank
         batch = next(loader_it)
@@ -624,9 +611,7 @@ class TestGetDataLoader:
         temp_data_file,
     ):
         """Test that data loader can be iterated."""
-        loader, _ = get_data_loader(
-            data_path=temp_data_file, batch_size=2, max_tokens_per_gpu=500, seed=42
-        )
+        loader, _ = get_data_loader(data_path=temp_data_file, batch_size=2, max_tokens_per_gpu=500, seed=42)
 
         # Get an iterator and fetch one batch
         data_iter = iter(loader)
@@ -700,12 +685,8 @@ class TestGetDataLoader:
         val_samples2 = get_samples(val_loader2)
 
         # assert identical splits
-        assert train_samples1 == train_samples2, (
-            "Train datasets should be identical with same seed"
-        )
-        assert val_samples1 == val_samples2, (
-            "Validation datasets should be identical with same seed"
-        )
+        assert train_samples1 == train_samples2, "Train datasets should be identical with same seed"
+        assert val_samples1 == val_samples2, "Validation datasets should be identical with same seed"
 
     def test_no_validation_split_returns_none(self, temp_data_file):
         """Test that validation_split=0 returns None for validation loader."""
@@ -735,9 +716,7 @@ class TestGetDataLoader:
             (0.7, 3, 7),  # 70% validation
         ],
     )
-    def test_validation_split_with_different_ratios(
-        self, temp_data_file, val_split, expected_train, expected_val
-    ):
+    def test_validation_split_with_different_ratios(self, temp_data_file, val_split, expected_train, expected_val):
         """Test validation split with different ratios to ensure correct splitting."""
         train_loader, val_loader = get_data_loader(
             data_path=temp_data_file,
@@ -749,9 +728,7 @@ class TestGetDataLoader:
             world_size=1,
         )
 
-        assert len(train_loader.dataset) == expected_train, (
-            f"Failed for split {val_split}"
-        )
+        assert len(train_loader.dataset) == expected_train, f"Failed for split {val_split}"
         assert len(val_loader.dataset) == expected_val, f"Failed for split {val_split}"
 
         # Verify no overlap between train and val data
@@ -765,9 +742,7 @@ class TestGetDataLoader:
         # Create a temporary file with unique samples
         data = [
             {
-                "input_ids": list(
-                    range(i * 10, (i + 1) * 10)
-                ),  # Each sample has different input_ids
+                "input_ids": list(range(i * 10, (i + 1) * 10)),  # Each sample has different input_ids
                 "labels": list(range(i * 10, (i + 1) * 10)),
                 "len": 10,
                 "num_loss_counted_tokens": 10,
@@ -813,9 +788,7 @@ class TestGetDataLoader:
 
             assert len(train_set) == 7  # 70% of 10 samples
             assert len(val_set) == 3  # 30% of 10 samples
-            assert train_set.isdisjoint(val_set), (
-                "Train and validation sets should not overlap"
-            )
+            assert train_set.isdisjoint(val_set), "Train and validation sets should not overlap"
 
             # Verify each set contains unique samples
             assert len(train_samples) == 7, "Should have 7 train samples total"
@@ -865,18 +838,12 @@ class TestGetDataLoader:
                     world_size=1,
                 )
 
-                assert len(train_loader.dataset) == expected_train, (
-                    f"Failed for split {val_split} with 11 samples"
-                )
-                assert len(val_loader.dataset) == expected_val, (
-                    f"Failed for split {val_split} with 11 samples"
-                )
+                assert len(train_loader.dataset) == expected_train, f"Failed for split {val_split} with 11 samples"
+                assert len(val_loader.dataset) == expected_val, f"Failed for split {val_split} with 11 samples"
 
                 # verify total is still 11
                 total_samples = len(train_loader.dataset) + len(val_loader.dataset)
-                assert total_samples == 11, (
-                    f"Total samples mismatch for split {val_split} with 11 samples"
-                )
+                assert total_samples == 11, f"Total samples mismatch for split {val_split} with 11 samples"
         finally:
             os.unlink(temp_path)
 
@@ -999,15 +966,11 @@ class TestGetDataLoader:
             # verify that samples in the datasets have correct lengths by checking the dataset directly
             for i in range(len(train_loader.dataset)):
                 sample = train_loader.dataset[i]
-                assert sample["len"] <= 50, (
-                    f"Train sample {i} has len {sample['len']} > 50"
-                )
+                assert sample["len"] <= 50, f"Train sample {i} has len {sample['len']} > 50"
 
             for i in range(len(val_loader.dataset)):
                 sample = val_loader.dataset[i]
-                assert sample["len"] <= 50, (
-                    f"Val sample {i} has len {sample['len']} > 50"
-                )
+                assert sample["len"] <= 50, f"Val sample {i} has len {sample['len']} > 50"
         finally:
             os.unlink(temp_path)
 
@@ -1174,9 +1137,7 @@ class TestEpochTracking:
         """Test that DataLoader with EpochSampler reports correct length."""
         dataset = MagicMock()
         dataset.__len__ = MagicMock(return_value=100)
-        dataset.__getitem__ = MagicMock(
-            side_effect=lambda x: {"input_ids": [1], "labels": [1]}
-        )
+        dataset.__getitem__ = MagicMock(side_effect=lambda x: {"input_ids": [1], "labels": [1]})
 
         sampler = EpochSampler(len(dataset))
         loader = DataLoader(dataset, batch_size=10, sampler=sampler)
@@ -1201,9 +1162,7 @@ class TestDataLoaderBatchCount:
         """Create temporary test data file."""
 
         def _create(num_samples=10):
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".jsonl", delete=False
-            ) as f:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
                 for i in range(num_samples):
                     # Create varying length sequences to test token counting
                     seq_length = 10 + (i % 5) * 5  # Lengths: 10, 15, 20, 25, 30
@@ -1227,17 +1186,13 @@ class TestDataLoaderBatchCount:
     @patch("torch.distributed.is_initialized", return_value=False)
     @patch("torch.distributed.get_rank", return_value=0)
     @patch("torch.distributed.get_world_size", return_value=1)
-    def test_count_batches_finite_sampler(
-        self, mock_world_size, mock_rank, mock_is_init, create_test_data
-    ):
+    def test_count_batches_finite_sampler(self, mock_world_size, mock_rank, mock_is_init, create_test_data):
         """Test counting batches with finite sampler."""
         data_path = create_test_data(num_samples=20)
 
         try:
             # Create data loader with finite sampler
-            data_loader, _ = get_data_loader(
-                data_path=data_path, batch_size=4, max_tokens_per_gpu=1000, seed=42
-            )
+            data_loader, _ = get_data_loader(data_path=data_path, batch_size=4, max_tokens_per_gpu=1000, seed=42)
 
             # Count batches by iterating through the data loader
             batch_count = 0
@@ -1259,16 +1214,12 @@ class TestDataLoaderBatchCount:
     @patch("torch.distributed.is_initialized", return_value=False)
     @patch("torch.distributed.get_rank", return_value=0)
     @patch("torch.distributed.get_world_size", return_value=1)
-    def test_count_batches_with_epoch(
-        self, mock_world_size, mock_rank, mock_is_init, create_test_data
-    ):
+    def test_count_batches_with_epoch(self, mock_world_size, mock_rank, mock_is_init, create_test_data):
         """Test that batch count is consistent across epochs."""
         data_path = create_test_data(num_samples=10)
 
         try:
-            data_loader, _ = get_data_loader(
-                data_path=data_path, batch_size=2, max_tokens_per_gpu=1000, seed=42
-            )
+            data_loader, _ = get_data_loader(data_path=data_path, batch_size=2, max_tokens_per_gpu=1000, seed=42)
 
             # Count batches for multiple epochs
             epoch_batch_counts = []
@@ -1280,14 +1231,10 @@ class TestDataLoaderBatchCount:
                 epoch_batch_counts.append(batch_count)
 
                 # check that the dataloader actually increments epoch internally
-                assert data_loader.sampler.epoch == epoch, (
-                    "internal epoch state doesn't match what we expected"
-                )
+                assert data_loader.sampler.epoch == epoch, "internal epoch state doesn't match what we expected"
 
             # All epochs should have the same number of batches
-            assert len(set(epoch_batch_counts)) == 1, (
-                "Batch counts vary across epochs: {epoch_batch_counts}"
-            )
+            assert len(set(epoch_batch_counts)) == 1, "Batch counts vary across epochs: {epoch_batch_counts}"
             assert epoch_batch_counts[0] > 0, "Should have at least one batch per epoch"
 
         finally:

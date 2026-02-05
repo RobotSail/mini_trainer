@@ -16,8 +16,9 @@
 # torchrun --nnodes=1 --nproc_per_node=8 tensor_parallelism_getting_started.py
 # 8 GPUs are required for this script.
 # And we need to setup_distributed() function to initialize the distributed process group.
-import torch
 import os
+
+import torch
 from torch.distributed import init_process_group
 
 
@@ -38,13 +39,12 @@ device = torch.device(f"cuda:{local_rank}")
 # {"messages": [{"role": "user","content": "<input 1>"},{"role": "assistant","content": "<output 1>"}]}
 # {"messages": [{"role": "user","content": "<input 2>"},{"role": "assistant","content": "<output 2>"}]}
 import json
+
 from datasets import load_dataset
 
 # Only rank 0 will download the dataset and process it.
 if local_rank == 0:
-    ds = load_dataset(
-        "NousResearch/hermes-function-calling-v1", "func_calling_singleturn"
-    )
+    ds = load_dataset("NousResearch/hermes-function-calling-v1", "func_calling_singleturn")
     new_ds = []
     for convo in ds["train"]["conversations"]:
         tmp = []
@@ -146,9 +146,7 @@ def to_input_example(sample):
 # Setup the model
 import setup_model_for_training
 
-model = setup_model_for_training.setup_model(
-    model_name_or_path=model_name, use_liger_kernels=False
-).to(device)
+model = setup_model_for_training.setup_model(model_name_or_path=model_name, use_liger_kernels=False).to(device)
 # we will create a deepcopy of the model, so that we can start from a clean slate, when we do TP and DP + TP.
 import copy
 
@@ -218,9 +216,7 @@ from torch.distributed.tensor.parallel import parallelize_module
 
 tp_model = copy.deepcopy(model)
 for layer_id, transformer_block in enumerate(tp_model.model.layers):
-    parallelize_module(
-        module=transformer_block, device_mesh=tp_mesh, parallelize_plan=tp_block_plan
-    )
+    parallelize_module(module=transformer_block, device_mesh=tp_mesh, parallelize_plan=tp_block_plan)
     # inorder to shard the model, while keeping the api intact, this function will change the data type
     # from torch.Tensor to torch.DTensor.
 
@@ -270,33 +266,25 @@ if local_rank == 0:
 
 fsdp_tp_model = copy.deepcopy(model)
 for transformer_block in fsdp_tp_model.model.layers:
-    parallelize_module(
-        module=transformer_block, device_mesh=tp_mesh, parallelize_plan=tp_block_plan
-    )
+    parallelize_module(module=transformer_block, device_mesh=tp_mesh, parallelize_plan=tp_block_plan)
 
 # setup fsdp2 model
-from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
+from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 
 fsdp_tp_model.config.use_cache = False  # disable cache for HF model
 for idx, block in enumerate(fsdp_tp_model.model.layers):
     fsdp_tp_model.model.layers[idx] = ptd_checkpoint_wrapper(
         block, preserve_rng_state=False
     )  # activation checkpoint each block
-mp_policy = MixedPrecisionPolicy(
-    param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, output_dtype=torch.bfloat16
-)
+mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, output_dtype=torch.bfloat16)
 # FSDP2 wrap each block
 for idx, block in enumerate(fsdp_tp_model.model.layers):
     reshard = idx < len(fsdp_tp_model.model.layers) - 1
-    fully_shard(
-        block, mesh=fsdp_mesh, mp_policy=mp_policy, reshard_after_forward=reshard
-    )
-fully_shard(
-    fsdp_tp_model, mesh=fsdp_mesh, mp_policy=mp_policy, reshard_after_forward=True
-)  # wrap the full model
+    fully_shard(block, mesh=fsdp_mesh, mp_policy=mp_policy, reshard_after_forward=reshard)
+fully_shard(fsdp_tp_model, mesh=fsdp_mesh, mp_policy=mp_policy, reshard_after_forward=True)  # wrap the full model
 
 optimizer = torch.optim.AdamW(
     fsdp_tp_model.parameters(),

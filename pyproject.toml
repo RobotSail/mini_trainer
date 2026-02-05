@@ -101,3 +101,73 @@ markers = [
 version_file = "src/mini_trainer/_version.py"
 # do not include +gREV local version, required for Test PyPI upload
 local_scheme = "no-local-version"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = [
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".git",
+    "build",
+    "dist",
+    "*.egg-info",
+    "checkpoints",
+    "outputs",
+    "wandb",
+    "mlruns",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "RUF",    # ruff-specific rules
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "E402",   # module level import not at top (common in ML scripts for path setup)
+    "E741",   # ambiguous variable name (l, O, I) - common in ML for loss, lambda
+    "B007",   # unused loop variable (often intentional: for _ in range)
+    "B008",   # function call in default argument (common in typer/fastapi)
+    "B905",   # zip without strict= (often intentional in ML)
+    "UP007",  # Use X | Y for type union (compatibility)
+    "RUF001", # ambiguous unicode (intentional for i18n test strings)
+    "RUF002", # ambiguous unicode in docstrings
+    "RUF012", # mutable class attrs (common in dataclasses)
+    "RUF013", # implicit Optional (stylistic preference)
+    "RUF015", # prefer next() over [0] slice (stylistic)
+    "RUF022", # __all__ not sorted (stylistic)
+    "RUF059", # unused parameters (often intentional in callbacks/hooks)
+    "C401",   # unnecessary generator - set comprehension (stylistic)
+    "C408",   # unnecessary dict/list/tuple call (stylistic)
+    "C416",   # unnecessary dict comprehension (stylistic)
+    "C419",   # unnecessary comprehension in any/all (stylistic)
+    "B012",   # return in finally (sometimes intentional for early exit)
+    "UP042",  # use StrEnum instead of str, Enum (compatibility with older Python)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["mini_trainer"]
+combine-as-imports = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "F841"]  # allow assert and unused vars in tests
+"__init__.py" = ["F401"]  # allow unused imports in __init__
+"regression_tests/*" = ["F401", "F811", "F841"]  # allow unused and redefinitions in benchmark scripts
+"research_scratch/*" = ["F401", "F841"]  # allow unused in research scripts
+"tutorials/*" = ["F401", "F841"]  # allow unused in tutorials
+"scripts/*" = ["E722"]  # allow bare except in scripts
+"test-*.py" = ["F841"]  # allow unused vars in standalone test files
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+skip-magic-trailing-comma = false

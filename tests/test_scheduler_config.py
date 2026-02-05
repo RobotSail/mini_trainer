@@ -5,24 +5,22 @@ Tests the scheduler configuration with different training modes and
 the calculation of training steps.
 """
 
+import json
 import os
 import sys
 import tempfile
-import json
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-
+from unittest.mock import MagicMock, patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import torch
 import pytest
+import torch
 from transformers import get_scheduler
 
-from mini_trainer.training_types import TrainingMode
-from mini_trainer.setup_model_for_training import setup_training_components
 from mini_trainer.sampler import get_data_loader
+from mini_trainer.setup_model_for_training import setup_training_components
 from mini_trainer.train import calculate_num_training_steps
+from mini_trainer.training_types import TrainingMode
 
 
 class TestCalculateTrainingSteps:
@@ -33,9 +31,7 @@ class TestCalculateTrainingSteps:
         """Create temporary test data file."""
 
         def _create(num_samples=10):
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".jsonl", delete=False
-            ) as f:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
                 for i in range(num_samples):
                     seq_length = 10 + (i % 3) * 5
                     input_ids = list(range(100, 100 + seq_length))
@@ -55,31 +51,23 @@ class TestCalculateTrainingSteps:
 
     def test_calculate_steps_infinite_mode(self):
         """Test that INFINITE mode returns None for training steps."""
-        result = calculate_num_training_steps(
-            training_mode=TrainingMode.INFINITE, data_loader=None
-        )
+        result = calculate_num_training_steps(training_mode=TrainingMode.INFINITE, data_loader=None)
         assert result is None
 
     def test_calculate_steps_step_mode(self):
         """Test that STEP mode returns max_steps."""
-        result = calculate_num_training_steps(
-            training_mode=TrainingMode.STEP, data_loader=None, max_steps=1000
-        )
+        result = calculate_num_training_steps(training_mode=TrainingMode.STEP, data_loader=None, max_steps=1000)
         assert result == 1000
 
     @patch("torch.distributed.is_initialized", return_value=False)
     @patch("torch.distributed.get_rank", return_value=0)
     @patch("torch.distributed.get_world_size", return_value=1)
-    def test_calculate_steps_epoch_mode(
-        self, mock_world_size, mock_rank, mock_is_init, create_test_data
-    ):
+    def test_calculate_steps_epoch_mode(self, mock_world_size, mock_rank, mock_is_init, create_test_data):
         """Test calculating steps for EPOCH mode."""
         data_path = create_test_data(num_samples=20)
 
         try:
-            data_loader, _ = get_data_loader(
-                data_path=data_path, batch_size=4, max_tokens_per_gpu=1000, seed=42
-            )
+            data_loader, _ = get_data_loader(data_path=data_path, batch_size=4, max_tokens_per_gpu=1000, seed=42)
 
             # Reset data loader for fresh iteration
             data_loader.sampler.set_epoch(0)
@@ -100,16 +88,12 @@ class TestCalculateTrainingSteps:
     @patch("torch.distributed.is_initialized", return_value=False)
     @patch("torch.distributed.get_rank", return_value=0)
     @patch("torch.distributed.get_world_size", return_value=1)
-    def test_calculate_steps_token_mode(
-        self, mock_world_size, mock_rank, mock_is_init, create_test_data
-    ):
+    def test_calculate_steps_token_mode(self, mock_world_size, mock_rank, mock_is_init, create_test_data):
         """Test calculating steps for TOKEN mode."""
         data_path = create_test_data(num_samples=10)
 
         try:
-            data_loader, _ = get_data_loader(
-                data_path=data_path, batch_size=2, max_tokens_per_gpu=1000, seed=42
-            )
+            data_loader, _ = get_data_loader(data_path=data_path, batch_size=2, max_tokens_per_gpu=1000, seed=42)
 
             # Reset data loader
             data_loader.sampler.set_epoch(0)
@@ -130,9 +114,7 @@ class TestCalculateTrainingSteps:
     def test_calculate_steps_with_infinite_mode(self):
         """Test that INFINITE mode returns None for training steps."""
         # INFINITE mode should always return None
-        result = calculate_num_training_steps(
-            training_mode=TrainingMode.INFINITE, data_loader=None, max_epochs=5
-        )
+        result = calculate_num_training_steps(training_mode=TrainingMode.INFINITE, data_loader=None, max_epochs=5)
         assert result is None
 
 
@@ -196,9 +178,7 @@ class TestSchedulerConfiguration:
         model.parameters.return_value = [torch.nn.Parameter(torch.randn(10, 10))]
 
         # Mock the optim_wrapper to return the optimizer unchanged
-        with patch(
-            "mini_trainer.osft_utils.optim_wrapper", side_effect=lambda opt, model: opt
-        ):
+        with patch("mini_trainer.osft_utils.optim_wrapper", side_effect=lambda opt, model: opt):
             model, optimizer, scheduler = setup_training_components(
                 model=model,
                 learning_rate=1e-5,
@@ -224,9 +204,7 @@ class TestDatasetMetrics:
         """Create temporary test data file."""
 
         def _create():
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".jsonl", delete=False
-            ) as f:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
                 samples = [
                     {
                         "input_ids": [1, 2, 3, 4, 5],

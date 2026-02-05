@@ -6,13 +6,12 @@ the reconstructed parameters from the decomposed SVD parts are identical to the
 original untouched model parameters (within numerical tolerance).
 """
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from unittest.mock import MagicMock, patch
-import os
-from pathlib import Path
 
 from mini_trainer.osft_utils import create_osft_model_class
 
@@ -111,29 +110,21 @@ class TestOSFTReconstructionFidelity:
             # Check if parameters are close enough
             if torch.equal(reconstructed_param, original_param):
                 identical_params += 1
-            elif torch.allclose(
-                reconstructed_param, original_param, atol=tolerance, rtol=tolerance
-            ):
+            elif torch.allclose(reconstructed_param, original_param, atol=tolerance, rtol=tolerance):
                 close_params += 1
             else:
                 different_params += 1
-                pytest.fail(
-                    f"Parameter {param_name} differs by {max_diff:.2e}, exceeding tolerance {tolerance:.2e}"
-                )
+                pytest.fail(f"Parameter {param_name} differs by {max_diff:.2e}, exceeding tolerance {tolerance:.2e}")
 
         # Verify we compared some parameters
         assert total_params_compared > 0, "No parameters were compared"
 
         # All parameters should be at least close
-        assert different_params == 0, (
-            f"{different_params} parameters exceeded tolerance"
-        )
+        assert different_params == 0, f"{different_params} parameters exceeded tolerance"
 
         # Log statistics (these would normally be logged, but in tests we just verify)
         success_rate = (identical_params + close_params) / total_params_compared * 100
-        assert success_rate == 100.0, (
-            f"Only {success_rate:.1f}% of parameters match within tolerance"
-        )
+        assert success_rate == 100.0, f"Only {success_rate:.1f}% of parameters match within tolerance"
 
     def test_osft_handles_different_dtypes(self, mock_model):
         """Test OSFT reconstruction with different data types."""
@@ -172,9 +163,7 @@ class TestOSFTReconstructionFidelity:
 
         # Attempting to reconstruct these should raise an error
         for param_name in skipped_params:
-            with pytest.raises(
-                ValueError, match=f"Parameter {param_name} not in OSFT mapping"
-            ):
+            with pytest.raises(ValueError, match=f"Parameter {param_name} not in OSFT mapping"):
                 mock_osft_model._reconstruct_weight(param_name)
 
     def test_osft_reconstruction_with_rank_ratio(self):
@@ -200,9 +189,7 @@ class TestOSFTReconstructionFidelity:
             reconstructed = U_truncated @ torch.diag(S_truncated) @ V_truncated.T
 
             # Calculate reconstruction error
-            error = torch.norm(original_weight - reconstructed) / torch.norm(
-                original_weight
-            )
+            error = torch.norm(original_weight - reconstructed) / torch.norm(original_weight)
 
             # Higher rank ratios should have lower reconstruction error
             if ratio >= 0.5:
@@ -210,9 +197,7 @@ class TestOSFTReconstructionFidelity:
 
             # Very high rank ratios should have very low error
             if ratio >= 0.9:
-                assert error < 0.15, (
-                    f"Rank ratio {ratio} should have minimal error, got {error}"
-                )
+                assert error < 0.15, f"Rank ratio {ratio} should have minimal error, got {error}"
 
     @patch("mini_trainer.setup_model_for_training.setup_model")
     def test_osft_model_integration(self, mock_setup):
@@ -233,9 +218,7 @@ class TestOSFTReconstructionFidelity:
         # Load models with and without OSFT
         from mini_trainer.setup_model_for_training import setup_model
 
-        model_without_osft = setup_model(
-            model_name_or_path="test-model", osft=False, local_rank=0
-        )
+        model_without_osft = setup_model(model_name_or_path="test-model", osft=False, local_rank=0)
 
         model_with_osft = setup_model(
             model_name_or_path="test-model",
@@ -253,8 +236,8 @@ class TestOSFTReconstructionFidelity:
 
         # Check the calls
         calls = mock_setup.call_args_list
-        assert calls[0].kwargs["osft"] == False
-        assert calls[1].kwargs["osft"] == True
+        assert calls[0].kwargs["osft"] is False
+        assert calls[1].kwargs["osft"] is True
         assert calls[1].kwargs["osft_rank_ratio"] == 0.5
 
 
@@ -286,12 +269,8 @@ class TestSVDNumericalStability:
         ortho_error_32 = torch.norm(U_32 @ U_32.T - torch.eye(8, dtype=torch.float32))
 
         # Float64 should have much better orthogonality
-        assert ortho_error_64 < 1e-13, (
-            f"Float64 orthogonality error too high: {ortho_error_64}"
-        )
-        assert ortho_error_32 < 1e-5, (
-            f"Float32 orthogonality error too high: {ortho_error_32}"
-        )
+        assert ortho_error_64 < 1e-13, f"Float64 orthogonality error too high: {ortho_error_64}"
+        assert ortho_error_32 < 1e-5, f"Float32 orthogonality error too high: {ortho_error_32}"
 
         # The float32 error should be noticeably worse than float64
         assert ortho_error_32 > ortho_error_64 * 100, (
@@ -309,9 +288,7 @@ class TestSVDNumericalStability:
         assert rank_32 <= 4, f"Float32 rank detection affected by precision: {rank_32}"
 
         # Document the precision limitations
-        print(
-            f"Orthogonality error - Float64: {ortho_error_64:.2e}, Float32: {ortho_error_32:.2e}"
-        )
+        print(f"Orthogonality error - Float64: {ortho_error_64:.2e}, Float32: {ortho_error_32:.2e}")
         print(f"Detected rank - Float64: {rank_64}, Float32: {rank_32}")
 
     def test_svd_with_extreme_values(self):
@@ -326,12 +303,8 @@ class TestSVDNumericalStability:
         reconstructed = U @ torch.diag(S) @ V.T
 
         # Should maintain relative accuracy
-        rel_error = torch.norm(small_weight - reconstructed) / (
-            torch.norm(small_weight) + 1e-20
-        )
-        assert rel_error < 1e-5, (
-            f"Failed to reconstruct small values accurately: {rel_error}"
-        )
+        rel_error = torch.norm(small_weight - reconstructed) / (torch.norm(small_weight) + 1e-20)
+        assert rel_error < 1e-5, f"Failed to reconstruct small values accurately: {rel_error}"
 
         # Test with very large values
         large_weight = torch.randn(32, 16, dtype=torch.float32) * 1e10
@@ -339,9 +312,7 @@ class TestSVDNumericalStability:
         reconstructed = U @ torch.diag(S) @ V.T
 
         rel_error = torch.norm(large_weight - reconstructed) / torch.norm(large_weight)
-        assert rel_error < 1e-5, (
-            f"Failed to reconstruct large values accurately: {rel_error}"
-        )
+        assert rel_error < 1e-5, f"Failed to reconstruct large values accurately: {rel_error}"
 
     def test_svd_with_rank_deficient_matrix(self):
         """Test SVD with rank-deficient matrices.
@@ -365,9 +336,7 @@ class TestSVDNumericalStability:
             if S[2] > 1e-14:  # Only check ratio if 3rd value is not essentially zero
                 ratio = S[1] / S[2]
                 # With float64, we expect a large ratio but not as strict due to numerical noise
-                assert ratio > 10, (
-                    f"Singular values should drop after rank 2, ratio: {ratio}"
-                )
+                assert ratio > 10, f"Singular values should drop after rank 2, ratio: {ratio}"
             else:
                 # If S[2] is essentially zero, that's even better
                 assert S[2] < 1e-10, f"Expected near-zero singular value, got {S[2]}"

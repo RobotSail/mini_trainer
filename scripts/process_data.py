@@ -1,8 +1,9 @@
 from pathlib import Path
+
+import numpy as np
 import typer
 from datasets import load_dataset
 from transformers import AutoTokenizer
-import numpy as np
 
 app = typer.Typer()
 
@@ -35,14 +36,9 @@ def is_gpt_oss_assistant_channel(pos, original_ids, tokenizer):
 
         # Check if we have the start of an assistant channel pattern
         if (
-            start_pos + len(start_token) + len(assistant_tokens) + len(channel_token)
-            <= len(original_ids)
+            start_pos + len(start_token) + len(assistant_tokens) + len(channel_token) <= len(original_ids)
             and original_ids[start_pos : start_pos + len(start_token)] == start_token
-            and original_ids[
-                start_pos + len(start_token) : start_pos
-                + len(start_token)
-                + len(assistant_tokens)
-            ]
+            and original_ids[start_pos + len(start_token) : start_pos + len(start_token) + len(assistant_tokens)]
             == assistant_tokens
             and original_ids[
                 start_pos + len(start_token) + len(assistant_tokens) : start_pos
@@ -53,22 +49,13 @@ def is_gpt_oss_assistant_channel(pos, original_ids, tokenizer):
             == channel_token
         ):
             # Found assistant channel start, now look for the message token ahead
-            message_start = (
-                start_pos
-                + len(start_token)
-                + len(assistant_tokens)
-                + len(channel_token)
-            )
+            message_start = start_pos + len(start_token) + len(assistant_tokens) + len(channel_token)
             for forward in range(
                 min(len(original_ids) - message_start, 20)
             ):  # Look forward up to 20 tokens for message token
                 if (
                     message_start + forward + len(message_token) <= len(original_ids)
-                    and original_ids[
-                        message_start + forward : message_start
-                        + forward
-                        + len(message_token)
-                    ]
+                    and original_ids[message_start + forward : message_start + forward + len(message_token)]
                     == message_token
                 ):
                     # Found complete assistant channel pattern
@@ -93,14 +80,10 @@ def make_input_ids_from_messages(sample: dict, tokenizer):
         if "pretrain" in roles:
             assert len(roles) == 1
             content = sample["messages"][0]["content"]
-            sample["input_ids"] = tokenizer.encode(
-                content + tokenizer.eos_token, add_special_tokens=False
-            )
+            sample["input_ids"] = tokenizer.encode(content + tokenizer.eos_token, add_special_tokens=False)
             sample["pretrain"] = True
         else:
-            sample["input_ids"] = tokenizer.apply_chat_template(
-                sample["messages"], tokenize=True
-            )
+            sample["input_ids"] = tokenizer.apply_chat_template(sample["messages"], tokenize=True)
             messages = sample["messages"]
             for m in messages:
                 # Check if assistant has content, thinking, or reasoning_content
@@ -112,14 +95,12 @@ def make_input_ids_from_messages(sample: dict, tokenizer):
                         sample["error"] = True
         sample["len"] = len(sample["input_ids"])
         return sample
-    except Exception as e:
+    except Exception:
         sample["error"] = True
         return sample
 
 
-def make_labels_from_input_ids(
-    sample: dict, assistant_tk_ids: list, user_tk_ids: list, tokenizer=None
-):
+def make_labels_from_input_ids(sample: dict, assistant_tk_ids: list, user_tk_ids: list, tokenizer=None):
     """
     Create training labels by unmasking only the assistant's reply tokens and masking all other tokens (user messages and special delimiters) with -100. For pretraining samples, labels equal the input_ids.
     """
@@ -184,9 +165,7 @@ def infer_special_token_sequences(tokenizer):
         {"role": "assistant", "content": "1"},
     ]
     input_ids = tokenizer.apply_chat_template(messages, tokenize=True)
-    assert sum([t == tk_1 for t in input_ids]) == 2, (
-        "tk_1 should be only 2 times to infer the special token sequences"
-    )
+    assert sum([t == tk_1 for t in input_ids]) == 2, "tk_1 should be only 2 times to infer the special token sequences"
     tk_1_first_idx = [i for i, t in enumerate(input_ids) if t == tk_1][0]
     tk_1_second_idx = [i for i, t in enumerate(input_ids) if t == tk_1][1]
 
@@ -198,9 +177,7 @@ def infer_special_token_sequences(tokenizer):
         {"role": "user", "content": "1"},
     ]
     input_ids = tokenizer.apply_chat_template(messages, tokenize=True)
-    assert sum([t == tk_1 for t in input_ids]) == 2, (
-        "tk_1 should be only 2 times to infer the special token sequences"
-    )
+    assert sum([t == tk_1 for t in input_ids]) == 2, "tk_1 should be only 2 times to infer the special token sequences"
     tk_1_first_idx = [i for i, t in enumerate(input_ids) if t == tk_1][0]
     tk_1_second_idx = [i for i, t in enumerate(input_ids) if t == tk_1][1]
 
@@ -236,21 +213,15 @@ def infer_special_token_sequences(tokenizer):
         lcs.reverse()
         return lcs
 
-    assistant_tk_ids = longest_common_subsequence(
-        assistant_tk_ids_1, assistant_tk_ids_2
-    )
+    assistant_tk_ids = longest_common_subsequence(assistant_tk_ids_1, assistant_tk_ids_2)
     user_tk_ids = longest_common_subsequence(user_tk_ids_1, user_tk_ids_2)
     return assistant_tk_ids, user_tk_ids
 
 
 @app.command()
 def process_data(
-    input_jsonl: str = typer.Option(
-        ..., "--input-file", help="path to the input jsonl file"
-    ),
-    output_jsonl: str = typer.Option(
-        ..., "--output-file", help="path to the output tokenizedjsonl file"
-    ),
+    input_jsonl: str = typer.Option(..., "--input-file", help="path to the input jsonl file"),
+    output_jsonl: str = typer.Option(..., "--output-file", help="path to the output tokenizedjsonl file"),
     model_name_or_path: str = typer.Option(..., "--model-name-or-path"),
     max_sample_num_tokens: int = typer.Option(
         2147483647,
@@ -265,9 +236,7 @@ def process_data(
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
     assistant_tk_ids, user_tk_ids = infer_special_token_sequences(tokenizer)
     tokenizer.add_special_tokens({"extra_special_tokens": [string_for_printing_masks]})
-    string_for_printing_masks_tk = tokenizer.encode(
-        string_for_printing_masks, add_special_tokens=False
-    )[0]
+    string_for_printing_masks_tk = tokenizer.encode(string_for_printing_masks, add_special_tokens=False)[0]
 
     dataset = load_dataset("json", data_files=input_jsonl, split="train")
 
@@ -296,9 +265,7 @@ def process_data(
     )
 
     dataset_with_labels = dataset_with_input_ids.map(
-        lambda x: make_labels_from_input_ids(
-            x, assistant_tk_ids, user_tk_ids, tokenizer
-        ),
+        lambda x: make_labels_from_input_ids(x, assistant_tk_ids, user_tk_ids, tokenizer),
         num_proc=64,
     )
 
@@ -316,9 +283,7 @@ def process_data(
         print("input_ids:")
         print("\033[38;5;51m" + tokenizer.decode(sample["input_ids"]) + "\033[0m")
         print("labels:")
-        label_ids = [
-            l if l != -100 else string_for_printing_masks_tk for l in sample["labels"]
-        ]
+        label_ids = [l if l != -100 else string_for_printing_masks_tk for l in sample["labels"]]
         print("\033[38;5;208m" + tokenizer.decode(label_ids) + "\033[0m")
         print("-" * 100)
 

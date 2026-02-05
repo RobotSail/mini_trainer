@@ -8,14 +8,17 @@ Usage:
     torchrun --nnodes=1 --nproc-per-node=8 fsdp1_dummy_script.py
 """
 
-import os
 import functools
+import os
+
 import torch
 import torch.distributed as dist
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import (
+    FullyShardedDataParallel as FSDP,
+    MixedPrecision,
+)
 from torch.distributed.fsdp.fully_sharded_data_parallel import ShardingStrategy
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-from torch.distributed.fsdp import MixedPrecision
 
 
 def log_rank_0(msg: str):
@@ -53,9 +56,7 @@ def wrap_model_with_fsdp1(model: torch.nn.Module) -> FSDP:
         layer_name = model._no_split_modules[0]
         layer_cls = get_module_class_from_name(model, layer_name)
         if layer_cls:
-            auto_wrap_policy = functools.partial(
-                transformer_auto_wrap_policy, transformer_layer_cls={layer_cls}
-            )
+            auto_wrap_policy = functools.partial(transformer_auto_wrap_policy, transformer_layer_cls={layer_cls})
             log_rank_0(f"Auto-wrap policy: {layer_cls}")
 
     # Mixed precision policy
@@ -80,9 +81,7 @@ def wrap_model_with_fsdp1(model: torch.nn.Module) -> FSDP:
     return fsdp_model
 
 
-def create_dummy_batch(
-    num_sequences: int, sequence_length: int, vocab_size: int
-) -> dict:
+def create_dummy_batch(num_sequences: int, sequence_length: int, vocab_size: int) -> dict:
     """Create dummy batch like in sequence_length_experiment.py."""
     total_tokens = num_sequences * sequence_length
 
@@ -110,9 +109,7 @@ def test_forward_backward(model, optimizer, vocab_size: int):
     device = torch.cuda.current_device()
 
     # Create dummy batch
-    batch = create_dummy_batch(
-        num_sequences=4, sequence_length=512, vocab_size=vocab_size
-    )
+    batch = create_dummy_batch(num_sequences=4, sequence_length=512, vocab_size=vocab_size)
     batch = {k: v.to(device) for k, v in batch.items()}
 
     # Reset memory stats

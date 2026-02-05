@@ -5,11 +5,10 @@ Correct GPT-OSS MXFP4 quantization implementation that matches OpenAI's format e
 Based on the official OSS specification.
 """
 
-import re
-import torch
-from typing import Dict
 import logging
+import re
 
+import torch
 from transformers import AutoConfig, PretrainedConfig
 
 from mini_trainer.utils import log_rank_0
@@ -108,9 +107,7 @@ def _e2m1_encode(normalized: torch.Tensor) -> torch.Tensor:
 
     # OPTIMIZED: Increased batch sizes and smarter memory management
     # Process larger chunks since we're now batching more efficiently
-    if (
-        normalized_clamped.dim() >= 3 and normalized_clamped.shape[0] > 32
-    ):  # Very large tensors
+    if normalized_clamped.dim() >= 3 and normalized_clamped.shape[0] > 32:  # Very large tensors
         # Process in larger batches - modern GPUs can handle much more
         batch_size = 32  # Increased from 4 to 32 for better GPU utilization
         expert_results = []
@@ -138,9 +135,7 @@ def _pack_nibbles(low_nib: torch.Tensor, high_nib: torch.Tensor) -> torch.Tensor
 def _power2_scales_from_maxabs(blocks: torch.Tensor) -> torch.Tensor:
     # blocks: [..., nblocks, G]
     # Use exact PyTorch AO scale calculation with bit manipulation
-    maxabs = (
-        blocks.abs().amax(dim=-1, keepdim=True).clamp_min(2 ** (-126))
-    )  # [..., nblocks, 1]
+    maxabs = blocks.abs().amax(dim=-1, keepdim=True).clamp_min(2 ** (-126))  # [..., nblocks, 1]
 
     # Extract power-of-2 component from float32 representation (PyTorch AO method)
     maxabs_int32 = maxabs.view(torch.int32)
@@ -181,12 +176,10 @@ def _quantize_tensor_to_mxfp4_param(weight: torch.Tensor, group_size: int = GROU
     xb = x.view(new_shape)
 
     # per-block signed exponent e (int8); scale = 2**e
-    e_i8 = _power2_scales_from_maxabs(
-        xb.to(torch.float32)
-    )  # [..., nblocks] - ensure float32
-    scale = torch.pow(
-        torch.tensor(2.0, device=x.device, dtype=torch.float32), e_i8.to(torch.float32)
-    ).unsqueeze(-1)  # [..., nblocks, 1]
+    e_i8 = _power2_scales_from_maxabs(xb.to(torch.float32))  # [..., nblocks] - ensure float32
+    scale = torch.pow(torch.tensor(2.0, device=x.device, dtype=torch.float32), e_i8.to(torch.float32)).unsqueeze(
+        -1
+    )  # [..., nblocks, 1]
 
     y = xb * (1.0 / scale)  # normalized (use reciprocal like Triton)
 
@@ -221,8 +214,8 @@ def _quantize_tensor_to_mxfp4_param(weight: torch.Tensor, group_size: int = GROU
 
 
 def convert_dequantized_to_quantized_format_correct(
-    state_dict: Dict[str, torch.Tensor],
-) -> Dict[str, torch.Tensor]:
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
     """
     Convert dequantized GPT-OSS parameters to quantized format using the correct OSS-compatible algorithm.
 
@@ -258,22 +251,16 @@ def convert_dequantized_to_quantized_format_correct(
             # Keep non-expert parameters - move to CPU and convert to bf16 for memory efficiency
             if param_tensor.dtype == torch.float32:
                 converted_param = param_tensor.to(torch.bfloat16).cpu()
-                logger.debug(
-                    f"💾 {param_name}: converted float32 → bf16 and moved to CPU"
-                )
+                logger.debug(f"💾 {param_name}: converted float32 → bf16 and moved to CPU")
             else:
                 converted_param = param_tensor.cpu()
-                logger.debug(
-                    f"💾 {param_name}: moved to CPU, kept {param_tensor.dtype}"
-                )
+                logger.debug(f"💾 {param_name}: moved to CPU, kept {param_tensor.dtype}")
 
             converted_state_dict[param_name] = converted_param
 
     # Now convert expert parameters one at a time to manage GPU memory
     for param_name, param_tensor in expert_params_to_convert:
-        logger.info(
-            f"🔄 Converting {param_name}: {param_tensor.shape} {param_tensor.dtype}"
-        )
+        logger.info(f"🔄 Converting {param_name}: {param_tensor.shape} {param_tensor.dtype}")
 
         try:
             # OPTIMIZATION: Move parameter to GPU for fast quantization, then back to CPU
@@ -281,19 +268,13 @@ def convert_dequantized_to_quantized_format_correct(
             logger.info(f"   📤 Moving {param_name} to GPU for fast quantization")
 
             # Move to GPU (parameters come from CPU after FSDP extraction)
-            param_gpu = (
-                param_tensor.cuda()
-                if param_tensor.device.type == "cpu"
-                else param_tensor
-            )
+            param_gpu = param_tensor.cuda() if param_tensor.device.type == "cpu" else param_tensor
 
             # Use OpenAI's exact dimensional mapping discovered through reverse engineering
             # OpenAI's format: dequant[expert, row, col] -> blocks[expert, col, block_idx, byte_idx]
             # This means we quantize along the row dimension (dim=1), not the column dimension
 
-            logger.info(
-                f"🔄 Processing {param_name} with OpenAI's exact dimensional mapping on GPU"
-            )
+            logger.info(f"🔄 Processing {param_name} with OpenAI's exact dimensional mapping on GPU")
             logger.info(f"   Input shape: {param_gpu.shape}")
 
             if "gate_up_proj" in param_name:
@@ -303,9 +284,7 @@ def convert_dequantized_to_quantized_format_correct(
                 experts, rows, cols = param_gpu.shape
                 blocks_per_col = rows // GROUP_SIZE
 
-                logger.info(
-                    f"   Processing {cols} columns, each with {blocks_per_col} blocks"
-                )
+                logger.info(f"   Processing {cols} columns, each with {blocks_per_col} blocks")
 
                 # OPTIMIZED: Process ALL columns at once using vectorized operations ON GPU
                 # Reshape to process all columns simultaneously: [experts, cols, rows] = [32, 5760, 2880]
@@ -317,24 +296,16 @@ def convert_dequantized_to_quantized_format_correct(
                 total_columns = experts * cols
                 reshaped_for_quant = tensor_transposed.reshape(total_columns, 1, rows)
 
-                logger.info(
-                    f"   GPU VECTORIZED: Quantizing {total_columns} columns simultaneously"
-                )
+                logger.info(f"   GPU VECTORIZED: Quantizing {total_columns} columns simultaneously")
 
                 # Single quantization call for all columns ON GPU - MASSIVE speedup!
-                all_blocks_flat, all_scales_flat, _ = _quantize_tensor_to_mxfp4_param(
-                    reshaped_for_quant, GROUP_SIZE
-                )
+                all_blocks_flat, all_scales_flat, _ = _quantize_tensor_to_mxfp4_param(reshaped_for_quant, GROUP_SIZE)
 
                 # Reshape back to the correct format
                 # all_blocks_flat: [32*5760, 1, 90, 16] -> [32, 5760, 90, 16]
-                blocks_u8 = all_blocks_flat.squeeze(1).reshape(
-                    experts, cols, blocks_per_col, 16
-                )
+                blocks_u8 = all_blocks_flat.squeeze(1).reshape(experts, cols, blocks_per_col, 16)
                 # all_scales_flat: [32*5760, 1, 90] -> [32, 5760, 90]
-                scales_i8 = all_scales_flat.squeeze(1).reshape(
-                    experts, cols, blocks_per_col
-                )
+                scales_i8 = all_scales_flat.squeeze(1).reshape(experts, cols, blocks_per_col)
 
             else:
                 # down_proj: dequantized is [experts, rows, cols] = [32, 2880, 2880]
@@ -342,9 +313,7 @@ def convert_dequantized_to_quantized_format_correct(
                 experts, rows, cols = param_gpu.shape
                 blocks_per_col = rows // GROUP_SIZE
 
-                logger.info(
-                    f"   Processing {cols} columns, each with {blocks_per_col} blocks"
-                )
+                logger.info(f"   Processing {cols} columns, each with {blocks_per_col} blocks")
 
                 # OPTIMIZED: Process ALL columns at once using vectorized operations ON GPU
                 # Transpose to put columns first: [32, 2880, 2880] -> [32, 2880, 2880]
@@ -354,24 +323,16 @@ def convert_dequantized_to_quantized_format_correct(
                 total_columns = experts * cols
                 reshaped_for_quant = tensor_transposed.reshape(total_columns, 1, rows)
 
-                logger.info(
-                    f"   GPU VECTORIZED: Quantizing {total_columns} columns simultaneously"
-                )
+                logger.info(f"   GPU VECTORIZED: Quantizing {total_columns} columns simultaneously")
 
                 # Single quantization call for all columns ON GPU - MASSIVE speedup!
-                all_blocks_flat, all_scales_flat, _ = _quantize_tensor_to_mxfp4_param(
-                    reshaped_for_quant, GROUP_SIZE
-                )
+                all_blocks_flat, all_scales_flat, _ = _quantize_tensor_to_mxfp4_param(reshaped_for_quant, GROUP_SIZE)
 
                 # Reshape back to the correct format
                 # all_blocks_flat: [32*2880, 1, 90, 16] -> [32, 2880, 90, 16]
-                blocks_u8 = all_blocks_flat.squeeze(1).reshape(
-                    experts, cols, blocks_per_col, 16
-                )
+                blocks_u8 = all_blocks_flat.squeeze(1).reshape(experts, cols, blocks_per_col, 16)
                 # all_scales_flat: [32*2880, 1, 90] -> [32, 2880, 90]
-                scales_i8 = all_scales_flat.squeeze(1).reshape(
-                    experts, cols, blocks_per_col
-                )
+                scales_i8 = all_scales_flat.squeeze(1).reshape(experts, cols, blocks_per_col)
 
             # Create new parameter names with _blocks and _scales
             blocks_name = param_name + "_blocks"
@@ -399,9 +360,7 @@ def convert_dequantized_to_quantized_format_correct(
             logger.error(f"❌ Failed to convert {param_name}: {e}")
             raise e
 
-    logger.info(
-        f"🎯 Converted {conversion_count} expert parameters using correct MXFP4 algorithm"
-    )
+    logger.info(f"🎯 Converted {conversion_count} expert parameters using correct MXFP4 algorithm")
     logger.info(f"📊 Output state dict has {len(converted_state_dict)} parameters")
 
     return converted_state_dict
@@ -413,9 +372,7 @@ def is_gpt_oss_model(model_name_or_config: PretrainedConfig | dict | str) -> boo
     """
     # maybe this was a string not a config
     if isinstance(model_name_or_config, str):
-        model_config = AutoConfig.from_pretrained(
-            model_name_or_config, trust_remote_code=True
-        )
+        model_config = AutoConfig.from_pretrained(model_name_or_config, trust_remote_code=True)
     else:
         model_config = model_name_or_config
 
@@ -435,7 +392,7 @@ def update_config_for_quantized_format(config_path):
         logger.warning(f"Config file not found: {config_path}")
         return
 
-    with open(config_path, "r") as f:
+    with open(config_path) as f:
         config = json.load(f)
 
     # Add the actual GPT-OSS quantization config if not present

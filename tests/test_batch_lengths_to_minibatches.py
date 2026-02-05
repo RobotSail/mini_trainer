@@ -5,9 +5,9 @@ Tests correctness of the batching algorithms for distributed training.
 """
 
 import numpy as np
-import pytest
-from mini_trainer.sampler import batch_lengths_to_minibatches
+
 from mini_trainer.batch_packer import batch_lengths_to_minibatches_lpt
+from mini_trainer.sampler import batch_lengths_to_minibatches
 
 
 class TestBatchLengthsToMinibatches:
@@ -74,9 +74,7 @@ class TestBatchLengthsToMinibatches:
                 for minibatch in rank_result:
                     for idx in minibatch:
                         if idx != -1:
-                            assert idx not in all_assigned_indices, (
-                                f"Index {idx} assigned to multiple ranks"
-                            )
+                            assert idx not in all_assigned_indices, f"Index {idx} assigned to multiple ranks"
                             all_assigned_indices.add(idx)
 
         # All non-padding indices should be covered
@@ -190,9 +188,7 @@ class TestBatchLengthsToMinibatches:
                     if rank not in results_by_rank:
                         results_by_rank[rank] = result
                     else:
-                        assert results_by_rank[rank] == result, (
-                            f"Non-deterministic output for rank {rank}"
-                        )
+                        assert results_by_rank[rank] == result, f"Non-deterministic output for rank {rank}"
 
 
 class TestLPTSpecificBehavior:
@@ -206,12 +202,8 @@ class TestLPTSpecificBehavior:
         num_ranks = 2
 
         # LPT should process longest sequences first
-        rank0_result = batch_lengths_to_minibatches_lpt(
-            batch_lengths, max_tokens, num_ranks, 0
-        )
-        rank1_result = batch_lengths_to_minibatches_lpt(
-            batch_lengths, max_tokens, num_ranks, 1
-        )
+        rank0_result = batch_lengths_to_minibatches_lpt(batch_lengths, max_tokens, num_ranks, 0)
+        rank1_result = batch_lengths_to_minibatches_lpt(batch_lengths, max_tokens, num_ranks, 1)
 
         # Collect all assigned sequences
         all_sequences = []
@@ -232,9 +224,7 @@ class TestLPTSpecificBehavior:
             if rank_result and rank_result[0]:
                 for idx in rank_result[0]:
                     if idx != -1:
-                        first_minibatch_max = max(
-                            first_minibatch_max, batch_lengths[idx]
-                        )
+                        first_minibatch_max = max(first_minibatch_max, batch_lengths[idx])
 
         # First minibatch should contain one of the longer sequences
         assert first_minibatch_max >= 5000
@@ -251,9 +241,7 @@ class TestLPTSpecificBehavior:
             loads = []
             for rank in range(num_ranks):
                 rank_result = algo_fn(batch_lengths, max_tokens, num_ranks, rank)
-                total_load = sum(
-                    sum(batch_lengths[i] for i in mb if i != -1) for mb in rank_result
-                )
+                total_load = sum(sum(batch_lengths[i] for i in mb if i != -1) for mb in rank_result)
                 loads.append(total_load)
 
             if max(loads) == 0:

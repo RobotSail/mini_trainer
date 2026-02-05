@@ -1,13 +1,12 @@
 """API wrapper for mini_trainer that provides programmatic training interface."""
 
-import subprocess
-import os
 import json
 import logging
+import os
+import subprocess
 from pathlib import Path
 
 from mini_trainer.training_types import TorchrunArgs, TrainingArgs
-
 
 logger = logging.getLogger(__name__)
 
@@ -158,9 +157,7 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
     if train_args.mlflow_tracking_uri:
         command.append(f"--mlflow-tracking-uri={train_args.mlflow_tracking_uri}")
         if train_args.mlflow_experiment_name:
-            command.append(
-                f"--mlflow-experiment-name={train_args.mlflow_experiment_name}"
-            )
+            command.append(f"--mlflow-experiment-name={train_args.mlflow_experiment_name}")
         if train_args.mlflow_run_name:
             command.append(f"--mlflow-run-name={train_args.mlflow_run_name}")
 
@@ -172,9 +169,7 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
 
         if train_args.save_best_val_loss:
             command.append("--save-best-val-loss")
-            command.append(
-                f"--val-loss-improvement-threshold={train_args.val_loss_improvement_threshold}"
-            )
+            command.append(f"--val-loss-improvement-threshold={train_args.val_loss_improvement_threshold}")
 
     # pretraining-related arguments
     if train_args.pretraining_config is not None:
@@ -182,9 +177,7 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
 
     # Add optional min_samples_per_checkpoint if specified
     if train_args.min_samples_per_checkpoint is not None:
-        command.append(
-            f"--min-samples-per-checkpoint={train_args.min_samples_per_checkpoint}"
-        )
+        command.append(f"--min-samples-per-checkpoint={train_args.min_samples_per_checkpoint}")
 
     # Add optional boolean flags
     if train_args.use_liger_kernels:
@@ -194,13 +187,9 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
         if train_args.osft_unfreeze_rank_ratio is None:
             raise ValueError("osft_unfreeze_rank_ratio is required when osft is True")
         command.append("--osft")
-        command.append(
-            f"--osft-unfreeze-rank-ratio={train_args.osft_unfreeze_rank_ratio}"
-        )
+        command.append(f"--osft-unfreeze-rank-ratio={train_args.osft_unfreeze_rank_ratio}")
         if train_args.osft_target_patterns:
-            command.append(
-                f"--osft-target-patterns={','.join(train_args.osft_target_patterns)}"
-            )
+            command.append(f"--osft-target-patterns={','.join(train_args.osft_target_patterns)}")
         if train_args.osft_upcast_dtype:
             command.append(f"--osft-upcast-dtype={train_args.osft_upcast_dtype}")
         if train_args.osft_output_dtype:
@@ -256,6 +245,4 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
         if interrupt:
             raise interrupt
         if failure:
-            raise RuntimeError(
-                f"Training failed. Please check the logs at {log_file} for details."
-            )
+            raise RuntimeError(f"Training failed. Please check the logs at {log_file} for details.")

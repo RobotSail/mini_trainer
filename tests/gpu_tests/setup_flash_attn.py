@@ -7,9 +7,9 @@ while allowing those tests to be skippable on non-GPU tests that need to run the
 """
 
 import argparse
+import importlib.util
 import subprocess
 import sys
-import importlib.util
 
 
 def is_package_installed(package_name):
@@ -33,9 +33,7 @@ def install_flash_attn(strict=False):
     # Check if flash-attn is already installed and uninstall it
     if is_package_installed("flash_attn"):
         print("⚠️  flash-attn is already installed, uninstalling first...")
-        result = subprocess.run(
-            ["uv", "pip", "uninstall", "flash-attn"], capture_output=True, text=True
-        )
+        result = subprocess.run(["uv", "pip", "uninstall", "flash-attn"], capture_output=True, text=True)
         if result.returncode != 0:
             print(f"❌ Failed to uninstall flash-attn: {result.stderr}")
             return False if strict else True
@@ -54,9 +52,7 @@ def install_flash_attn(strict=False):
     for dep in build_deps:
         if not is_package_installed(dep):
             print(f"  Installing {dep}...")
-            result = subprocess.run(
-                ["uv", "pip", "install", dep], capture_output=True, text=True
-            )
+            result = subprocess.run(["uv", "pip", "install", dep], capture_output=True, text=True)
             if result.returncode != 0:
                 print(f"  ⚠️  Failed to install {dep}")
 
@@ -89,9 +85,7 @@ def install_flash_attn(strict=False):
     # Check if mamba-ssm is already installed and uninstall it
     if is_package_installed("mamba_ssm"):
         print("\n⚠️  mamba-ssm is already installed, uninstalling first...")
-        result = subprocess.run(
-            ["uv", "pip", "uninstall", "mamba-ssm"], capture_output=True, text=True
-        )
+        result = subprocess.run(["uv", "pip", "uninstall", "mamba-ssm"], capture_output=True, text=True)
         if result.returncode != 0:
             print(f"❌ Failed to uninstall mamba-ssm: {result.stderr}")
             return False if strict else True
@@ -120,9 +114,7 @@ def install_flash_attn(strict=False):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Install flash-attn and mamba-ssm for GPU tests"
-    )
+    parser = argparse.ArgumentParser(description="Install flash-attn and mamba-ssm for GPU tests")
     parser.add_argument(
         "--strict",
         action="store_true",

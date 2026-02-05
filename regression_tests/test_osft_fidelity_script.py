@@ -13,16 +13,16 @@ Usage:
     torchrun --nnodes=1 --nproc-per-node=4 test_osft_fidelity_script.py
 """
 
+import os
+import time
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import os
-import time
-from mini_trainer.setup_model_for_training import setup_model
-from mini_trainer.utils import init_distributed_environment, log_rank_0
-from mini_trainer.osft_utils import get_osft_target_parameters
 import typer
 
+from mini_trainer.setup_model_for_training import setup_model
+from mini_trainer.utils import init_distributed_environment, log_rank_0
 
 app = typer.Typer()
 
@@ -122,9 +122,7 @@ def compare_parameters(original_model, osft_model, tolerance=1e-5):
             param_type = "reconstructed"
         except Exception as e:
             # If reconstruction fails, skip this parameter
-            results["param_details"].append(
-                {"name": orig_name, "type": "reconstruction_failed", "error": str(e)}
-            )
+            results["param_details"].append({"name": orig_name, "type": "reconstruction_failed", "error": str(e)})
             continue
 
         # upcast the original_param to reduce information loss from comparison
@@ -158,9 +156,7 @@ def compare_parameters(original_model, osft_model, tolerance=1e-5):
         if torch.equal(comparison_param, original_param):
             status = "identical"
             results["identical_params"] += 1
-        elif torch.allclose(
-            comparison_param, original_param, atol=tolerance, rtol=tolerance
-        ):
+        elif torch.allclose(comparison_param, original_param, atol=tolerance, rtol=tolerance):
             status = "close"
             results["close_params"] += 1
         else:
@@ -180,9 +176,7 @@ def compare_parameters(original_model, osft_model, tolerance=1e-5):
 
     # Calculate average difference
     if results["differences"]:
-        results["avg_difference"] = sum(results["differences"]) / len(
-            results["differences"]
-        )
+        results["avg_difference"] = sum(results["differences"]) / len(results["differences"])
 
     print_results(results, tolerance)
     dist.breakpoint()
@@ -192,66 +186,52 @@ def compare_parameters(original_model, osft_model, tolerance=1e-5):
 def print_results(results, tolerance):
     """Print comparison results in a formatted way."""
     print(f"\n{'=' * 60}")
-    print(f"OSFT RECONSTRUCTION FIDELITY TEST RESULTS")
+    print("OSFT RECONSTRUCTION FIDELITY TEST RESULTS")
     print(f"{'=' * 60}")
 
     print(f"Parameters compared: {results['total_params_compared']}")
     print(f"Tolerance: {tolerance:.2e}")
-    print(f"")
+    print("")
 
-    print(f"📊 Summary:")
+    print("📊 Summary:")
     print(f"  ✅ Identical parameters: {results['identical_params']}")
     print(f"  🔍 Close parameters (within tolerance): {results['close_params']}")
     print(f"  ❌ Different parameters: {results['different_params']}")
-    print(f"")
+    print("")
 
-    print(f"📈 Numerical Statistics:")
+    print("📈 Numerical Statistics:")
     print(f"  Max difference: {results['max_difference']:.2e}")
     print(f"  Average difference: {results['avg_difference']:.2e}")
-    print(f"")
+    print("")
 
     # Show parameter breakdown by type
-    reconstructed_count = sum(
-        1 for p in results["param_details"] if p["type"] == "reconstructed"
-    )
+    reconstructed_count = sum(1 for p in results["param_details"] if p["type"] == "reconstructed")
     direct_count = sum(1 for p in results["param_details"] if p["type"] == "direct")
 
-    print(f"🔧 Parameter Types:")
+    print("🔧 Parameter Types:")
     print(f"  Reconstructed from OSFT: {reconstructed_count}")
     print(f"  Direct comparison: {direct_count}")
-    print(f"")
+    print("")
 
     # Show worst differences for reconstructed parameters
-    reconstructed_params = [
-        p
-        for p in results["param_details"]
-        if p["type"] == "reconstructed" and "max_diff" in p
-    ]
+    reconstructed_params = [p for p in results["param_details"] if p["type"] == "reconstructed" and "max_diff" in p]
     if reconstructed_params:
-        print(f"🚨 Worst Reconstructed Parameter Differences:")
-        worst_params = sorted(
-            reconstructed_params, key=lambda x: x["max_diff"], reverse=True
-        )[:5]
+        print("🚨 Worst Reconstructed Parameter Differences:")
+        worst_params = sorted(reconstructed_params, key=lambda x: x["max_diff"], reverse=True)[:5]
         for param in worst_params:
-            print(
-                f"  {param['name']}: {param['max_diff']:.2e} (status: {param['status']})"
-            )
-        print(f"")
+            print(f"  {param['name']}: {param['max_diff']:.2e} (status: {param['status']})")
+        print("")
 
     # Overall result
     success_rate = (
-        (
-            (results["identical_params"] + results["close_params"])
-            / results["total_params_compared"]
-            * 100
-        )
+        ((results["identical_params"] + results["close_params"]) / results["total_params_compared"] * 100)
         if results["total_params_compared"] > 0
         else 0
     )
 
-    print(f"🎯 Overall Result:")
+    print("🎯 Overall Result:")
     if results["different_params"] == 0:
-        print(f"  ✅ SUCCESS: All parameters match within tolerance!")
+        print("  ✅ SUCCESS: All parameters match within tolerance!")
     else:
         print(f"  ⚠️  PARTIAL SUCCESS: {success_rate:.1f}% of parameters match")
 
@@ -269,9 +249,7 @@ def compare_params(original_model: nn.Module, osft_model: nn.Module):
 
 @app.command()
 def test_reconstruction_fidelity(
-    model_name_or_path: str = typer.Option(
-        "Qwen/Qwen2.5-1.5B-Instruct", help="Model name or path"
-    ),
+    model_name_or_path: str = typer.Option("Qwen/Qwen2.5-1.5B-Instruct", help="Model name or path"),
     use_liger_kernels: bool = typer.Option(False, help="Whether to use liger kernels"),
     tolerance: float = typer.Option(1e-5, help="Numerical tolerance for comparison"),
     verbose: bool = typer.Option(False, help="Show detailed parameter comparison"),
@@ -316,7 +294,7 @@ def test_reconstruction_fidelity(
 
         # Show detailed results if requested
         if verbose:
-            print(f"\n📋 Detailed Parameter Comparison:")
+            print("\n📋 Detailed Parameter Comparison:")
             for param in results["param_details"]:
                 if "max_diff" in param:
                     print(

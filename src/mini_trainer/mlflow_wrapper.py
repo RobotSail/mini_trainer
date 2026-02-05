@@ -7,7 +7,7 @@ across all processes when mlflow is not installed.
 
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any
 
 # Try to import mlflow
 try:
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Store the active run ID to ensure we can resume the run if needed
 # This is needed because async logging may lose the thread-local run context
-_active_run_id: Optional[str] = None
+_active_run_id: str | None = None
 
 
 class MLflowNotAvailableError(ImportError):
@@ -35,17 +35,16 @@ def check_mlflow_available(operation: str) -> None:
     """Check if mlflow is available, raise error if not."""
     if not MLFLOW_AVAILABLE:
         error_msg = (
-            f"Attempted to {operation} but mlflow is not installed. "
-            "Please install mlflow with: pip install mlflow"
+            f"Attempted to {operation} but mlflow is not installed. Please install mlflow with: pip install mlflow"
         )
         logger.error(error_msg)
         raise MLflowNotAvailableError(error_msg)
 
 
 def init(
-    tracking_uri: Optional[str] = None,
-    experiment_name: Optional[str] = None,
-    run_name: Optional[str] = None,
+    tracking_uri: str | None = None,
+    experiment_name: str | None = None,
+    run_name: str | None = None,
     **kwargs,
 ) -> Any:
     """
@@ -79,9 +78,7 @@ def init(
         mlflow.set_tracking_uri(effective_tracking_uri)
 
     # Apply kwarg > env var precedence for experiment_name
-    effective_experiment_name = experiment_name or os.environ.get(
-        "MLFLOW_EXPERIMENT_NAME"
-    )
+    effective_experiment_name = experiment_name or os.environ.get("MLFLOW_EXPERIMENT_NAME")
     if effective_experiment_name:
         mlflow.set_experiment(effective_experiment_name)
 
@@ -99,7 +96,7 @@ def init(
     return run
 
 
-def get_active_run_id() -> Optional[str]:
+def get_active_run_id() -> str | None:
     """Get the active run ID that was started by init()."""
     return _active_run_id
 
@@ -118,7 +115,7 @@ def _ensure_run_for_logging() -> None:
         mlflow.start_run(run_id=_active_run_id)
 
 
-def log_params(params: Dict[str, Any]) -> None:
+def log_params(params: dict[str, Any]) -> None:
     """
     Log parameters to mlflow. Raises MLflowNotAvailableError if mlflow is not installed.
 
@@ -136,7 +133,7 @@ def log_params(params: Dict[str, Any]) -> None:
     mlflow.log_params(str_params)
 
 
-def log(data: Dict[str, Any], step: Optional[int] = None) -> None:
+def log(data: dict[str, Any], step: int | None = None) -> None:
     """
     Log metrics to mlflow. Raises MLflowNotAvailableError if mlflow is not installed.
 

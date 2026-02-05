@@ -1,16 +1,16 @@
-from datetime import timedelta
-import random
-import numpy as np
 import importlib
 import inspect
 import logging
 import os
+import random
+from datetime import timedelta
 from typing import Any
 
+import numpy as np
 import torch
-from torch.distributed import is_initialized
 import torch.distributed as dist
 from rich.logging import RichHandler
+from torch.distributed import is_initialized
 from transformers import AutoConfig
 from transformers.models.auto import MODEL_FOR_CAUSAL_LM_MAPPING
 
@@ -24,9 +24,7 @@ def get_control_process_group():
     global _CONTROL_PROCESS_GROUP
     if _CONTROL_PROCESS_GROUP is None:
         if not dist.is_initialized():
-            raise RuntimeError(
-                "Distributed process group must be initialized before creating control group"
-            )
+            raise RuntimeError("Distributed process group must be initialized before creating control group")
         ranks = list(range(dist.get_world_size()))
         _CONTROL_PROCESS_GROUP = dist.new_group(ranks=ranks, backend="gloo")
     return _CONTROL_PROCESS_GROUP
@@ -55,9 +53,7 @@ def log_rank_0(msg, include_caller=False, rank=None, to_print=True):
 
 
 def setup_logger(level="DEBUG"):
-    logging.basicConfig(
-        level=level, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()]
-    )
+    logging.basicConfig(level=level, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
 
 
 def get_node_rank() -> int:
@@ -130,9 +126,7 @@ def check_distributed_is_evenly_configured():
 def init_distributed_environment():
     local_rank = int(os.environ["LOCAL_RANK"])
     device = torch.device("cuda", local_rank)
-    torch.distributed.init_process_group(
-        "nccl", timeout=timedelta(minutes=180), device_id=device
-    )
+    torch.distributed.init_process_group("nccl", timeout=timedelta(minutes=180), device_id=device)
     # NOTE(osilkin): PyTorch wants us to avoid this API in favor of setting the device explicitly
     # through `init_process_group`, but without setting this, FSDP2 will shard the
     # entire model onto the first GPU. I haven't yet figured out a solution to this.

@@ -5,11 +5,11 @@ This file provides shared fixtures and configurations for all tests,
 particularly handling multiprocessing context for DataLoader tests.
 """
 
+import sys
+
 import pytest
 import torch
 import torch.multiprocessing as mp
-import os
-import sys
 
 
 def pytest_configure(config):
@@ -103,14 +103,12 @@ def zero_workers_dataloader(monkeypatch):
         return sampler.DataLoader(
             sampler.JsonlDataset(kwargs["data_path"]),
             kwargs["batch_size"],
-            sampler=sampler.InfiniteSampler(
-                len(sampler.JsonlDataset(kwargs["data_path"])), seed=kwargs["seed"]
-            ),
+            sampler=sampler.InfiniteSampler(len(sampler.JsonlDataset(kwargs["data_path"])), seed=kwargs["seed"]),
             collate_fn=sampler.MaxTokensPerRankCollator(
                 kwargs["max_tokens_per_gpu"],
-                rank=kwargs.get("rank", None),
-                world_size=kwargs.get("world_size", None),
-                dummy_sample=kwargs.get("dummy_sample", None),
+                rank=kwargs.get("rank"),
+                world_size=kwargs.get("world_size"),
+                dummy_sample=kwargs.get("dummy_sample"),
             ),
             num_workers=0,  # Force to 0 to avoid multiprocessing issues
         )

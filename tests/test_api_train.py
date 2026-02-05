@@ -1,13 +1,14 @@
 """Unit tests for the mini_trainer API wrapper."""
 
-import pytest
-import tempfile
 import json
-from pathlib import Path
-from unittest.mock import patch, MagicMock
 import subprocess
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-from mini_trainer.api_train import run_training, StreamablePopen
+import pytest
+
+from mini_trainer.api_train import StreamablePopen, run_training
 from mini_trainer.training_types import TorchrunArgs, TrainingArgs, TrainingMode
 
 
@@ -197,8 +198,8 @@ class TestStreamablePopen:
 
     def test_streamable_popen_stdout_realtime(self):
         """Test StreamablePopen captures stdout in real-time."""
-        import time
         import threading
+        import time
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_file = Path(tmpdir) / "stdout_realtime_test.log"
@@ -221,14 +222,10 @@ class TestStreamablePopen:
             listen_thread.start()
 
             # Check that "1" appears first
-            time.sleep(
-                self.buffer_time
-            )  # Increased delay for CI environments to start subprocess
+            time.sleep(self.buffer_time)  # Increased delay for CI environments to start subprocess
             with open(log_file) as f:
                 content = f.read()
-                assert "1" in content, (
-                    f"Expected '1' in content but got: {repr(content)}"
-                )
+                assert "1" in content, f"Expected '1' in content but got: {content!r}"
                 assert "2" not in content
                 assert "3" not in content
 
@@ -237,9 +234,7 @@ class TestStreamablePopen:
             with open(log_file) as f:
                 content = f.read()
                 assert "1" in content
-                assert "2" in content, (
-                    f"Expected '2' in content but got: {repr(content)}"
-                )
+                assert "2" in content, f"Expected '2' in content but got: {content!r}"
                 assert "3" not in content
 
             # Check that "3" appears last
@@ -248,17 +243,15 @@ class TestStreamablePopen:
                 content = f.read()
                 assert "1" in content
                 assert "2" in content
-                assert "3" in content, (
-                    f"Expected '3' in content but got: {repr(content)}"
-                )
+                assert "3" in content, f"Expected '3' in content but got: {content!r}"
 
             listen_thread.join()
             assert popen.poll() == 0
 
     def test_streamable_popen_stderr_realtime(self):
         """Test StreamablePopen captures stderr in real-time."""
-        import time
         import threading
+        import time
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_file = Path(tmpdir) / "stderr_realtime_test.log"
@@ -281,14 +274,10 @@ class TestStreamablePopen:
             listen_thread.start()
 
             # Check that "1" appears first
-            time.sleep(
-                self.buffer_time
-            )  # Increased delay for CI environments to start subprocess
+            time.sleep(self.buffer_time)  # Increased delay for CI environments to start subprocess
             with open(log_file) as f:
                 content = f.read()
-                assert "1" in content, (
-                    f"Expected '1' in content but got: {repr(content)}"
-                )
+                assert "1" in content, f"Expected '1' in content but got: {content!r}"
                 assert "2" not in content
                 assert "3" not in content
 
@@ -297,9 +286,7 @@ class TestStreamablePopen:
             with open(log_file) as f:
                 content = f.read()
                 assert "1" in content
-                assert "2" in content, (
-                    f"Expected '2' in content but got: {repr(content)}"
-                )
+                assert "2" in content, f"Expected '2' in content but got: {content!r}"
                 assert "3" not in content
 
             # Check that "3" appears last
@@ -308,17 +295,15 @@ class TestStreamablePopen:
                 content = f.read()
                 assert "1" in content
                 assert "2" in content
-                assert "3" in content, (
-                    f"Expected '3' in content but got: {repr(content)}"
-                )
+                assert "3" in content, f"Expected '3' in content but got: {content!r}"
 
             listen_thread.join()
             assert popen.poll() == 0
 
     def test_streamable_popen_mixed_realtime(self):
         """Test StreamablePopen captures mixed stdout/stderr in real-time."""
-        import time
         import threading
+        import time
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_file = Path(tmpdir) / "mixed_realtime_test.log"
@@ -346,9 +331,7 @@ class TestStreamablePopen:
             time.sleep(self.buffer_time)  # Increased initial delay for CI environments
             with open(log_file) as f:
                 content = f.read()
-                assert "stdout-1" in content, (
-                    f"Expected 'stdout-1' in content but got: {repr(content)}"
-                )
+                assert "stdout-1" in content, f"Expected 'stdout-1' in content but got: {content!r}"
                 assert "stderr-1" not in content
                 assert "stdout-2" not in content
                 assert "stderr-2" not in content
@@ -358,9 +341,7 @@ class TestStreamablePopen:
             with open(log_file) as f:
                 content = f.read()
                 assert "stdout-1" in content
-                assert "stderr-1" in content, (
-                    f"Expected 'stderr-1' in content but got: {repr(content)}"
-                )
+                assert "stderr-1" in content, f"Expected 'stderr-1' in content but got: {content!r}"
                 assert "stdout-2" not in content
                 assert "stderr-2" not in content
 
@@ -370,23 +351,17 @@ class TestStreamablePopen:
                 content = f.read()
                 assert "stdout-1" in content
                 assert "stderr-1" in content
-                assert "stdout-2" in content, (
-                    f"Expected 'stdout-2' in content but got: {repr(content)}"
-                )
+                assert "stdout-2" in content, f"Expected 'stdout-2' in content but got: {content!r}"
                 assert "stderr-2" not in content
 
             # Check second stderr appears
-            time.sleep(
-                self.buffer_time
-            )  # Increased delay to ensure last output is written
+            time.sleep(self.buffer_time)  # Increased delay to ensure last output is written
             with open(log_file) as f:
                 content = f.read()
                 assert "stdout-1" in content
                 assert "stderr-1" in content
                 assert "stdout-2" in content
-                assert "stderr-2" in content, (
-                    f"Expected 'stderr-2' in content but got: {repr(content)}"
-                )
+                assert "stderr-2" in content, f"Expected 'stderr-2' in content but got: {content!r}"
 
             listen_thread.join()
             assert popen.poll() == 0
@@ -746,10 +721,7 @@ sys.exit(1)
                 parsed_kwargs = json.loads(json_str)
 
                 # Verify all values are preserved correctly
-                assert (
-                    parsed_kwargs["description"]
-                    == "A string with spaces and special chars: @#$%"
-                )
+                assert parsed_kwargs["description"] == "A string with spaces and special chars: @#$%"
                 assert parsed_kwargs["path"] == "/path/with/slashes"
                 assert parsed_kwargs["float_val"] == 3.14159
                 assert parsed_kwargs["bool_val"] is True
@@ -843,9 +815,7 @@ sys.exit(1)
                     training_mode=mode,
                 )
 
-                with patch(
-                    "mini_trainer.api_train.StreamablePopen"
-                ) as mock_popen_class:
+                with patch("mini_trainer.api_train.StreamablePopen") as mock_popen_class:
                     mock_popen = MagicMock()
                     mock_popen.poll.return_value = 0
                     mock_popen_class.return_value = mock_popen

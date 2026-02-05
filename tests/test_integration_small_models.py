@@ -5,35 +5,35 @@ These tests use tiny model configurations to test real functionality
 without requiring large amounts of memory or computation.
 """
 
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
 import tempfile
-import torch
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
+import pytest
+import torch
 from transformers import (
+    GPT2Config,
+    GPT2LMHeadModel,
     LlamaConfig,
     LlamaForCausalLM,
     MistralConfig,
     MistralForCausalLM,
     Qwen2Config,
     Qwen2ForCausalLM,
-    GPT2Config,
-    GPT2LMHeadModel,
 )
 
+from mini_trainer.osft_utils import (
+    auto_generate_target_osft_config,
+    create_osft_model_class,
+)
 from mini_trainer.setup_model_for_training import (
     align_model_and_tokenizer,
     setup_training_components,
-)
-from mini_trainer.osft_utils import (
-    create_osft_model_class,
-    auto_generate_target_osft_config,
 )
 
 
@@ -135,9 +135,7 @@ class TestModelInitialization:
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     @patch("mini_trainer.setup_model_for_training.dist.get_rank", return_value=0)
     @patch("mini_trainer.setup_model_for_training.dist.get_world_size", return_value=1)
-    @patch(
-        "mini_trainer.setup_model_for_training.dist.is_initialized", return_value=False
-    )
+    @patch("mini_trainer.setup_model_for_training.dist.is_initialized", return_value=False)
     def test_wrap_tiny_model_fsdp(self, mock_dist_init, mock_world_size, mock_rank):
         """Test FSDP wrapping with a tiny model."""
         from mini_trainer.setup_model_for_training import wrap_fsdp2
@@ -146,29 +144,25 @@ class TestModelInitialization:
         model = model.cuda()
 
         # Wrap with FSDP2
-        with patch(
-            "mini_trainer.setup_model_for_training.init_device_mesh"
-        ) as mock_mesh:
-            with patch(
-                "mini_trainer.setup_model_for_training.fully_shard"
-            ) as mock_shard:
-                mock_mesh.return_value = MagicMock()
-                mock_shard.side_effect = lambda x, **kwargs: x
+        with (
+            patch("mini_trainer.setup_model_for_training.init_device_mesh") as mock_mesh,
+            patch("mini_trainer.setup_model_for_training.fully_shard") as mock_shard,
+        ):
+            mock_mesh.return_value = MagicMock()
+            mock_shard.side_effect = lambda x, **kwargs: x
 
-                wrapped_model = wrap_fsdp2(model)
+            wrapped_model = wrap_fsdp2(model)
 
-                assert wrapped_model is not None
-                # Check that sharding was attempted
-                # TODO: make sure transformer blocks were also wrapped
-                assert mock_shard.called
+            assert wrapped_model is not None
+            # Check that sharding was attempted
+            # TODO: make sure transformer blocks were also wrapped
+            assert mock_shard.called
 
     @patch("mini_trainer.setup_model_for_training.log_rank_0")
     @patch("mini_trainer.osft_utils.optim_wrapper")
     @patch("transformers.get_scheduler")
     @patch("mini_trainer.setup_model_for_training.wrap_fsdp2")
-    def test_training_components_setup_with_tiny_model(
-        self, mock_wrap, mock_sched_fn, mock_opt_wrap, mock_log
-    ):
+    def test_training_components_setup_with_tiny_model(self, mock_wrap, mock_sched_fn, mock_opt_wrap, mock_log):
         """Test setting up training components with a tiny model."""
         model, config = create_tiny_llama_model()
 

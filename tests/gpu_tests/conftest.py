@@ -1,9 +1,10 @@
 """Pytest configuration for GPU tests."""
 
-import pytest
-import torch
 import sys
 from pathlib import Path
+
+import pytest
+import torch
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -11,9 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 def pytest_configure(config):
     """Add custom markers for GPU tests."""
-    config.addinivalue_line(
-        "markers", "gpu: marks tests as requiring GPU (deselect with '-m \"not gpu\"')"
-    )
+    config.addinivalue_line("markers", "gpu: marks tests as requiring GPU (deselect with '-m \"not gpu\"')")
 
 
 @pytest.fixture(scope="session")

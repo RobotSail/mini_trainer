@@ -30,5 +30,5 @@ def get_fsdp2_lazy_init_mode(model: nn.Module) -> FSDP2LazyInitMode | None:
     """Return the tagged lazy-init mode, if any."""
     mode = getattr(model, FSDP2_LAZY_INIT_ATTR, None)
     if isinstance(mode, str) and mode in (FSDP2_LAZY_INIT_SFT, FSDP2_LAZY_INIT_OSFT):
-        return cast(FSDP2LazyInitMode, mode)
+        return cast("FSDP2LazyInitMode", mode)
     return None

@@ -4,8 +4,8 @@ Test suite for AsyncStructuredLogger.
 Tests the asynchronous logging functionality used for training metrics.
 """
 
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -13,6 +13,7 @@ import json
 import tempfile
 import time
 from unittest.mock import patch
+
 import pytest
 
 from mini_trainer.async_structured_logger import AsyncStructuredLogger
@@ -59,7 +60,7 @@ class TestAsyncStructuredLogger:
             logger.loop.call_soon_threadsafe(logger.loop.stop)
 
             # Read and verify
-            with open(temp_path, "r") as f:
+            with open(temp_path) as f:
                 lines = f.readlines()
                 assert len(lines) == 1
                 logged_data = json.loads(lines[0])
@@ -95,7 +96,7 @@ class TestAsyncStructuredLogger:
             logger.loop.call_soon_threadsafe(logger.loop.stop)
 
             # Read and verify
-            with open(temp_path, "r") as f:
+            with open(temp_path) as f:
                 lines = f.readlines()
                 assert len(lines) == 3
 
@@ -134,7 +135,7 @@ class TestAsyncStructuredLogger:
             logger.loop.call_soon_threadsafe(logger.loop.stop)
 
             # Read and verify
-            with open(temp_path, "r") as f:
+            with open(temp_path) as f:
                 lines = f.readlines()
                 assert len(lines) == 1
                 data = json.loads(lines[0])
@@ -170,7 +171,7 @@ class TestAsyncStructuredLogger:
             logger.loop.call_soon_threadsafe(logger.loop.stop)
 
             # Read and verify
-            with open(temp_path, "r") as f:
+            with open(temp_path) as f:
                 lines = f.readlines()
                 assert len(lines) == 2
 
@@ -256,7 +257,7 @@ class TestAsyncLoggerIntegration:
             logger.loop.call_soon_threadsafe(logger.loop.stop)
 
             # Verify all metrics were logged
-            with open(temp_path, "r") as f:
+            with open(temp_path) as f:
                 lines = f.readlines()
                 assert len(lines) == 3
 
@@ -296,7 +297,7 @@ class TestAsyncLoggerIntegration:
             logger.loop.call_soon_threadsafe(logger.loop.stop)
 
             # The valid data should still be logged
-            with open(temp_path, "r") as f:
+            with open(temp_path) as f:
                 lines = f.readlines()
                 # May have 0 or 1 lines depending on error handling
                 if lines:

@@ -12,15 +12,17 @@ Usage:
     python regression_tests/benchmark_batching.py
 """
 
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import numpy as np
 import time
-from mini_trainer.sampler import batch_lengths_to_minibatches
+
+import numpy as np
+
 from mini_trainer.batch_packer import batch_lengths_to_minibatches_lpt
+from mini_trainer.sampler import batch_lengths_to_minibatches
 
 
 class BatchingEfficiencyAnalyzer:
@@ -31,18 +33,10 @@ class BatchingEfficiencyAnalyzer:
         np.random.seed(seed)
 
         # Realistic distribution: mostly shorter sequences with some long ones
-        short_seqs = np.random.randint(
-            100, 2000, size=int(n_sequences * 0.5)
-        )  # 50% short
-        medium_seqs = np.random.randint(
-            2000, 20000, size=int(n_sequences * 0.3)
-        )  # 30% medium
-        long_seqs = np.random.randint(
-            20000, 60000, size=int(n_sequences * 0.15)
-        )  # 15% long
-        very_long_seqs = np.random.randint(
-            60000, 100000, size=int(n_sequences * 0.05)
-        )  # 5% very long
+        short_seqs = np.random.randint(100, 2000, size=int(n_sequences * 0.5))  # 50% short
+        medium_seqs = np.random.randint(2000, 20000, size=int(n_sequences * 0.3))  # 30% medium
+        long_seqs = np.random.randint(20000, 60000, size=int(n_sequences * 0.15))  # 15% long
+        very_long_seqs = np.random.randint(60000, 100000, size=int(n_sequences * 0.05))  # 5% very long
 
         lengths = np.concatenate([short_seqs, medium_seqs, long_seqs, very_long_seqs])
         np.random.shuffle(lengths)
@@ -102,28 +96,18 @@ class BatchingEfficiencyAnalyzer:
                 total_tokens_used += sum(row_loads)
 
         # Calculate aggregate statistics
-        avg_row_balance = (
-            np.mean(minibatch_balance_scores) if minibatch_balance_scores else 0
-        )
-        worst_row_balance = (
-            np.min(minibatch_balance_scores) if minibatch_balance_scores else 0
-        )
-        avg_row_efficiency = (
-            np.mean(minibatch_efficiencies) if minibatch_efficiencies else 0
-        )
+        avg_row_balance = np.mean(minibatch_balance_scores) if minibatch_balance_scores else 0
+        worst_row_balance = np.min(minibatch_balance_scores) if minibatch_balance_scores else 0
+        avg_row_efficiency = np.mean(minibatch_efficiencies) if minibatch_efficiencies else 0
 
         # Overall efficiency considering wasted capacity
-        overall_efficiency = total_tokens_used / (
-            total_minibatches * num_ranks * max_tokens
-        )
+        overall_efficiency = total_tokens_used / (total_minibatches * num_ranks * max_tokens)
 
         return {
             "total_minibatches": total_minibatches,
             "avg_row_balance_ratio": avg_row_balance,
             "worst_row_balance_ratio": worst_row_balance,
-            "row_balance_std": np.std(minibatch_balance_scores)
-            if minibatch_balance_scores
-            else 0,
+            "row_balance_std": np.std(minibatch_balance_scores) if minibatch_balance_scores else 0,
             "avg_row_efficiency": avg_row_efficiency,
             "overall_efficiency": overall_efficiency,
             "total_sequences": len(batch_lengths),
@@ -144,9 +128,7 @@ class BatchingEfficiencyAnalyzer:
             ("Greedy", batch_lengths_to_minibatches),
             ("LPT", batch_lengths_to_minibatches_lpt),
         ]:
-            stats = self.measure_load_distribution(
-                batch_lengths, max_tokens, num_ranks, algo
-            )
+            stats = self.measure_load_distribution(batch_lengths, max_tokens, num_ranks, algo)
             print(f"\n{name} Algorithm:")
             print(f"  Total minibatches: {stats['total_minibatches']}")
             print(f"  Avg row balance ratio: {stats['avg_row_balance_ratio']:.3f}")
@@ -164,9 +146,7 @@ class BatchingEfficiencyAnalyzer:
             ("Greedy", batch_lengths_to_minibatches),
             ("LPT", batch_lengths_to_minibatches_lpt),
         ]:
-            stats = self.measure_load_distribution(
-                batch_lengths, max_tokens, num_ranks, algo
-            )
+            stats = self.measure_load_distribution(batch_lengths, max_tokens, num_ranks, algo)
             print(f"\n{name} Algorithm:")
             print(f"  Total sequences: {len(batch_lengths)}")
             print(f"  Total minibatches: {stats['total_minibatches']}")
@@ -181,16 +161,12 @@ class BatchingEfficiencyAnalyzer:
         # Case 1: All sequences same length
         uniform_lengths = [15000] * 20
         stats1 = self.measure_load_distribution(uniform_lengths, 130000, 4)
-        print(
-            f"\nUniform lengths - Avg row balance: {stats1['avg_row_balance_ratio']:.3f}"
-        )
+        print(f"\nUniform lengths - Avg row balance: {stats1['avg_row_balance_ratio']:.3f}")
 
         # Case 2: One very long sequence with many short ones
         mixed_lengths = [1000] * 50 + [95000]
         stats2 = self.measure_load_distribution(mixed_lengths, 130000, 4)
-        print(
-            f"Mixed with outlier - Avg row balance: {stats2['avg_row_balance_ratio']:.3f}"
-        )
+        print(f"Mixed with outlier - Avg row balance: {stats2['avg_row_balance_ratio']:.3f}")
 
         # Case 3: Many sequences that barely fit (near max token limit)
         tight_fit = [120000] * 10
@@ -213,7 +189,7 @@ class BatchingEfficiencyAnalyzer:
         np.random.shuffle(bimodal)
 
         stats1 = self.measure_load_distribution(bimodal, 130000, 8)
-        print(f"\nBimodal distribution:")
+        print("\nBimodal distribution:")
         print(f"  Avg row balance ratio: {stats1['avg_row_balance_ratio']:.3f}")
         print(f"  Total minibatches: {stats1['total_minibatches']}")
         print(f"  Overall efficiency: {stats1['overall_efficiency']:.3f}")
@@ -227,7 +203,7 @@ class BatchingEfficiencyAnalyzer:
         np.random.shuffle(power_law)
 
         stats2 = self.measure_load_distribution(power_law, 130000, 8)
-        print(f"\nPower law distribution:")
+        print("\nPower law distribution:")
         print(f"  Avg row balance ratio: {stats2['avg_row_balance_ratio']:.3f}")
         print(f"  Total minibatches: {stats2['total_minibatches']}")
         print(f"  Overall efficiency: {stats2['overall_efficiency']:.3f}")
@@ -239,7 +215,7 @@ class BatchingEfficiencyAnalyzer:
         np.random.shuffle(extreme)
 
         stats4 = self.measure_load_distribution(extreme, 130000, 8)
-        print(f"\nExtreme outliers:")
+        print("\nExtreme outliers:")
         print(f"  Avg row balance ratio: {stats4['avg_row_balance_ratio']:.3f}")
         print(f"  Total minibatches: {stats4['total_minibatches']}")
         print(f"  Overall efficiency: {stats4['overall_efficiency']:.3f}")
@@ -248,9 +224,7 @@ class BatchingEfficiencyAnalyzer:
 class AlgorithmComparison:
     """Compare greedy vs LPT algorithms side by side."""
 
-    def _measure_algorithm(
-        self, algorithm_fn, batch_lengths, max_tokens, num_ranks, name
-    ):
+    def _measure_algorithm(self, algorithm_fn, batch_lengths, max_tokens, num_ranks, name):
         """Measure performance with focus on per-minibatch (row) balance."""
         # Time the algorithm execution
         start_time = time.perf_counter()
@@ -294,23 +268,13 @@ class AlgorithmComparison:
                 total_tokens_used += sum(row_loads)
 
         # Calculate aggregate statistics
-        avg_row_balance = (
-            np.mean(minibatch_balance_scores) if minibatch_balance_scores else 0
-        )
-        worst_row_balance = (
-            np.min(minibatch_balance_scores) if minibatch_balance_scores else 0
-        )
-        avg_row_efficiency = (
-            np.mean(minibatch_efficiencies) if minibatch_efficiencies else 0
-        )
-        row_balance_std = (
-            np.std(minibatch_balance_scores) if minibatch_balance_scores else 0
-        )
+        avg_row_balance = np.mean(minibatch_balance_scores) if minibatch_balance_scores else 0
+        worst_row_balance = np.min(minibatch_balance_scores) if minibatch_balance_scores else 0
+        avg_row_efficiency = np.mean(minibatch_efficiencies) if minibatch_efficiencies else 0
+        row_balance_std = np.std(minibatch_balance_scores) if minibatch_balance_scores else 0
 
         # Overall efficiency
-        overall_efficiency = total_tokens_used / (
-            total_minibatches * num_ranks * max_tokens
-        )
+        overall_efficiency = total_tokens_used / (total_minibatches * num_ranks * max_tokens)
 
         return {
             "algorithm": name,
@@ -376,9 +340,7 @@ class AlgorithmComparison:
             (
                 "Execution time (ms)",
                 "execution_time_ms",
-                lambda g, l: (
-                    f"{(l - g) / g * 100:.1f}% {'faster' if l < g else 'slower'}"
-                ),
+                lambda g, l: f"{(l - g) / g * 100:.1f}% {'faster' if l < g else 'slower'}",
             ),
         ]
 
@@ -386,13 +348,9 @@ class AlgorithmComparison:
             greedy_val = greedy_stats[key]
             lpt_val = lpt_stats[key]
             if isinstance(greedy_val, float):
-                print(
-                    f"{name:<25} {greedy_val:>12.3f} {lpt_val:>12.3f} {improvement_fn(greedy_val, lpt_val):>15}"
-                )
+                print(f"{name:<25} {greedy_val:>12.3f} {lpt_val:>12.3f} {improvement_fn(greedy_val, lpt_val):>15}")
             else:
-                print(
-                    f"{name:<25} {greedy_val:>12} {lpt_val:>12} {improvement_fn(greedy_val, lpt_val):>15}"
-                )
+                print(f"{name:<25} {greedy_val:>12} {lpt_val:>12} {improvement_fn(greedy_val, lpt_val):>15}")
 
         return greedy_stats, lpt_stats
 
@@ -477,9 +435,7 @@ class AlgorithmComparison:
         for i in range(num_iterations):
             start_time = time.perf_counter()
             for rank in range(num_ranks):
-                batch_lengths_to_minibatches_lpt(
-                    batch_lengths, max_tokens, num_ranks, rank
-                )
+                batch_lengths_to_minibatches_lpt(batch_lengths, max_tokens, num_ranks, rank)
             lpt_times.append(time.perf_counter() - start_time)
 
         # Calculate statistics
@@ -490,13 +446,9 @@ class AlgorithmComparison:
 
         speedup = greedy_mean / lpt_mean if lpt_mean > 0 else float("inf")
 
-        print(
-            f"Test setup: {len(batch_lengths)} sequences, {num_ranks} ranks, {num_iterations} iterations"
-        )
-        print(f"")
-        print(
-            f"{'Algorithm':<15} {'Mean (ms)':>12} {'Std Dev (ms)':>15} {'Min (ms)':>12} {'Max (ms)':>12}"
-        )
+        print(f"Test setup: {len(batch_lengths)} sequences, {num_ranks} ranks, {num_iterations} iterations")
+        print("")
+        print(f"{'Algorithm':<15} {'Mean (ms)':>12} {'Std Dev (ms)':>15} {'Min (ms)':>12} {'Max (ms)':>12}")
         print("-" * 75)
         print(
             f"{'Greedy':<15} {greedy_mean:>12.2f} {greedy_std:>15.2f} {min(greedy_times) * 1000:>12.2f} {max(greedy_times) * 1000:>12.2f}"
@@ -504,7 +456,7 @@ class AlgorithmComparison:
         print(
             f"{'LPT':<15} {lpt_mean:>12.2f} {lpt_std:>15.2f} {min(lpt_times) * 1000:>12.2f} {max(lpt_times) * 1000:>12.2f}"
         )
-        print(f"")
+        print("")
         if speedup > 1:
             print(f"🚀 LPT is {speedup:.2f}x FASTER than Greedy")
         elif speedup < 1:
@@ -544,8 +496,6 @@ if __name__ == "__main__":
     comparison.run_speed_benchmark()
 
     print("\n" + "=" * 80)
-    print(
-        "Analysis complete. These benchmarks help identify performance characteristics"
-    )
+    print("Analysis complete. These benchmarks help identify performance characteristics")
     print("and potential optimization opportunities in the batching algorithms.")
     print("=" * 80)

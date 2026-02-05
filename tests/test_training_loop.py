@@ -5,21 +5,21 @@ Tests the full training pipeline including data loading, model training,
 checkpointing, and metrics logging.
 """
 
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch, mock_open
+from unittest.mock import MagicMock, mock_open, patch
 
-import torch
 import pytest
+import torch
 
-from mini_trainer.train import train, main, validate_training_mode
 from mini_trainer.batch_metrics import BatchMetrics
+from mini_trainer.train import main, train, validate_training_mode
 from mini_trainer.training_types import TrainingMode
 
 
@@ -29,57 +29,35 @@ class TestValidateTrainingMode:
     def test_epoch_mode_validation(self):
         """Test EPOCH mode validation."""
         # Should pass with valid max_epochs
-        validate_training_mode(
-            TrainingMode.EPOCH, max_epochs=5, max_steps=0, max_tokens=0
-        )
+        validate_training_mode(TrainingMode.EPOCH, max_epochs=5, max_steps=0, max_tokens=0)
 
         # Should fail without max_epochs
-        with pytest.raises(
-            ValueError, match="EPOCH training mode requires max_epochs > 0"
-        ):
-            validate_training_mode(
-                TrainingMode.EPOCH, max_epochs=0, max_steps=0, max_tokens=0
-            )
+        with pytest.raises(ValueError, match="EPOCH training mode requires max_epochs > 0"):
+            validate_training_mode(TrainingMode.EPOCH, max_epochs=0, max_steps=0, max_tokens=0)
 
     def test_step_mode_validation(self):
         """Test STEP mode validation."""
         # Should pass with valid max_steps
-        validate_training_mode(
-            TrainingMode.STEP, max_epochs=0, max_steps=100, max_tokens=0
-        )
+        validate_training_mode(TrainingMode.STEP, max_epochs=0, max_steps=100, max_tokens=0)
 
         # Should fail without max_steps
-        with pytest.raises(
-            ValueError, match="STEP training mode requires max_steps > 0"
-        ):
-            validate_training_mode(
-                TrainingMode.STEP, max_epochs=0, max_steps=0, max_tokens=0
-            )
+        with pytest.raises(ValueError, match="STEP training mode requires max_steps > 0"):
+            validate_training_mode(TrainingMode.STEP, max_epochs=0, max_steps=0, max_tokens=0)
 
     def test_token_mode_validation(self):
         """Test TOKEN mode validation."""
         # Should pass with valid max_tokens
-        validate_training_mode(
-            TrainingMode.TOKEN, max_epochs=0, max_steps=0, max_tokens=1000
-        )
+        validate_training_mode(TrainingMode.TOKEN, max_epochs=0, max_steps=0, max_tokens=1000)
 
         # Should fail without max_tokens
-        with pytest.raises(
-            ValueError, match="TOKEN training mode requires max_tokens > 0"
-        ):
-            validate_training_mode(
-                TrainingMode.TOKEN, max_epochs=0, max_steps=0, max_tokens=0
-            )
+        with pytest.raises(ValueError, match="TOKEN training mode requires max_tokens > 0"):
+            validate_training_mode(TrainingMode.TOKEN, max_epochs=0, max_steps=0, max_tokens=0)
 
     def test_infinite_mode_validation(self):
         """Test INFINITE mode validation."""
         # Should pass with any parameter values since INFINITE mode doesn't check them
-        validate_training_mode(
-            TrainingMode.INFINITE, max_epochs=0, max_steps=0, max_tokens=0
-        )
-        validate_training_mode(
-            TrainingMode.INFINITE, max_epochs=5, max_steps=100, max_tokens=1000
-        )
+        validate_training_mode(TrainingMode.INFINITE, max_epochs=0, max_steps=0, max_tokens=0)
+        validate_training_mode(TrainingMode.INFINITE, max_epochs=5, max_steps=100, max_tokens=1000)
 
 
 class TestTrainFunction:
@@ -99,9 +77,7 @@ class TestTrainFunction:
         # Mock model forward pass - return unreduced losses (per-token)
         output = MagicMock()
         # Return a tensor of losses that will be summed in the training loop
-        output.loss = torch.tensor(
-            [1.5, 2.0, 3.0, 2.5, 1.0], requires_grad=True
-        )  # 5 token losses
+        output.loss = torch.tensor([1.5, 2.0, 3.0, 2.5, 1.0], requires_grad=True)  # 5 token losses
         model.return_value = output
 
         return model
@@ -483,9 +459,7 @@ class TestMainCLI:
     @patch("mini_trainer.train.setup_logger")
     @patch("mini_trainer.train.setup_model")
     @patch("mini_trainer.train.setup_training_components")
-    @patch(
-        "mini_trainer.train.get_data_loader", return_value=(MagicMock(), MagicMock())
-    )
+    @patch("mini_trainer.train.get_data_loader", return_value=(MagicMock(), MagicMock()))
     @patch("mini_trainer.train.train")
     @patch("mini_trainer.train.dist.get_rank", return_value=0)
     @patch.dict(os.environ, {"WORLD_SIZE": "1"})
@@ -590,9 +564,7 @@ class TestMainCLI:
 
         # Check that open was not called for writing params
         # (it might be called for other purposes)
-        param_file_written = any(
-            "training_params.json" in str(call) for call in mock_file.call_args_list
-        )
+        param_file_written = any("training_params.json" in str(call) for call in mock_file.call_args_list)
         assert not param_file_written
 
 
@@ -856,29 +828,25 @@ class TestTrainingModes:
         mock_model.parameters = MagicMock(return_value=iter([mock_param]))
         output = MagicMock()
         # Return unreduced losses for 5 tokens
-        output.loss = torch.tensor(
-            [2.5, 3.0, 1.5, 2.0, 3.5], requires_grad=True
-        )  # 5 token losses
+        output.loss = torch.tensor([2.5, 3.0, 1.5, 2.0, 3.5], requires_grad=True)  # 5 token losses
         mock_model.return_value = output
 
         # Create data loader with batches containing specific token counts
         mock_data_loader = MagicMock()
-        mock_data_loader.__iter__ = (
-            lambda self: iter(
+        mock_data_loader.__iter__ = lambda self: iter(
+            [
                 [
-                    [
-                        {
-                            "input_ids": torch.tensor([[1, 2, 3, 4, 5]]),  # 5 tokens
-                            "labels": torch.tensor([[10, 20, 30, 40, 50]]),
-                            "position_ids": torch.tensor([5], dtype=torch.long),
-                            "num_loss_counted_tokens": 5,
-                            "num_samples": 1,
-                            "batch_num_loss_counted_tokens": 5,  # 5 tokens counted per batch
-                        }
-                    ]
+                    {
+                        "input_ids": torch.tensor([[1, 2, 3, 4, 5]]),  # 5 tokens
+                        "labels": torch.tensor([[10, 20, 30, 40, 50]]),
+                        "position_ids": torch.tensor([5], dtype=torch.long),
+                        "num_loss_counted_tokens": 5,
+                        "num_samples": 1,
+                        "batch_num_loss_counted_tokens": 5,  # 5 tokens counted per batch
+                    }
                 ]
-                * 10
-            )
+            ]
+            * 10
         )  # 10 batches available
         mock_data_loader.sampler = MagicMock()
         mock_data_loader.sampler.set_epoch = MagicMock()
@@ -995,14 +963,10 @@ class TestSaveModel:
     @patch("safetensors.torch.save_file")
     @patch(
         "huggingface_hub.split_torch_state_dict_into_shards",
-        return_value=MagicMock(
-            filename_to_tensors={"model.safetensors": []}, is_sharded=False
-        ),
+        return_value=MagicMock(filename_to_tensors={"model.safetensors": []}, is_sharded=False),
     )
     @patch("transformers.AutoTokenizer.from_pretrained", return_value=MagicMock())
-    @patch(
-        "torch.distributed.checkpoint.state_dict.get_model_state_dict", return_value={}
-    )
+    @patch("torch.distributed.checkpoint.state_dict.get_model_state_dict", return_value={})
     @patch("mini_trainer.train.torch.distributed.barrier")
     @patch("mini_trainer.train.torch.distributed.get_rank", return_value=0)
     @patch.dict(os.environ, {"RANK": "0", "LOCAL_WORLD_SIZE": "1"})
@@ -1022,23 +986,17 @@ class TestSaveModel:
         model.module.config.torch_dtype = torch.bfloat16
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            save_model(
-                model, samples_seen=1000, output_dir=temp_dir, model_name_or_path="test"
-            )
+            save_model(model, samples_seen=1000, output_dir=temp_dir, model_name_or_path="test")
 
             # Verify files are saved on rank 0
             mock_save.assert_called_once()
 
     @patch("safetensors.torch.save_file")
-    @patch(
-        "torch.distributed.checkpoint.state_dict.get_model_state_dict", return_value={}
-    )
+    @patch("torch.distributed.checkpoint.state_dict.get_model_state_dict", return_value={})
     @patch("mini_trainer.train.torch.distributed.barrier")
     @patch("mini_trainer.train.torch.distributed.get_rank", return_value=1)
     @patch.dict(os.environ, {"RANK": "1", "LOCAL_WORLD_SIZE": "2"})
-    def test_save_model_non_rank_0_no_save(
-        self, mock_rank, mock_barrier, mock_state_dict, mock_save
-    ):
+    def test_save_model_non_rank_0_no_save(self, mock_rank, mock_barrier, mock_state_dict, mock_save):
         """Test that non-rank 0 processes don't save files."""
         from mini_trainer.train import save_model
 
@@ -1046,9 +1004,7 @@ class TestSaveModel:
         model.module.config.torch_dtype = torch.bfloat16
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            save_model(
-                model, samples_seen=1000, output_dir=temp_dir, model_name_or_path="test"
-            )
+            save_model(model, samples_seen=1000, output_dir=temp_dir, model_name_or_path="test")
 
             # Non-rank 0 should not save
             mock_save.assert_not_called()
@@ -1077,18 +1033,12 @@ class TestSaveModel:
 
         model = MagicMock()
         model.module.config.torch_dtype = torch.bfloat16
-        model.module.prepare_state_dict_for_save = MagicMock(
-            return_value={"weight": torch.tensor([1.0])}
-        )
+        model.module.prepare_state_dict_for_save = MagicMock(return_value={"weight": torch.tensor([1.0])})
 
-        mock_split.return_value = MagicMock(
-            filename_to_tensors={"model.safetensors": ["weight"]}, is_sharded=False
-        )
+        mock_split.return_value = MagicMock(filename_to_tensors={"model.safetensors": ["weight"]}, is_sharded=False)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            save_model(
-                model, samples_seen=1000, output_dir=temp_dir, model_name_or_path="test"
-            )
+            save_model(model, samples_seen=1000, output_dir=temp_dir, model_name_or_path="test")
 
             # Verify OSFT prepare method was called
             model.module.prepare_state_dict_for_save.assert_called_once()
@@ -1120,14 +1070,10 @@ class TestSaveModel:
         state_dict = {"weight": original_tensor}
         mock_state_dict.return_value = state_dict
 
-        mock_split.return_value = MagicMock(
-            filename_to_tensors={"model.safetensors": ["weight"]}, is_sharded=False
-        )
+        mock_split.return_value = MagicMock(filename_to_tensors={"model.safetensors": ["weight"]}, is_sharded=False)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            save_model(
-                model, samples_seen=1000, output_dir=temp_dir, model_name_or_path="test"
-            )
+            save_model(model, samples_seen=1000, output_dir=temp_dir, model_name_or_path="test")
 
             # Check that save_file was called (the dtype casting happens inside save_model)
             mock_save.assert_called_once()
@@ -1138,14 +1084,10 @@ class TestSaveModel:
     @patch("safetensors.torch.save_file")
     @patch(
         "huggingface_hub.split_torch_state_dict_into_shards",
-        return_value=MagicMock(
-            filename_to_tensors={"model.safetensors": []}, is_sharded=False
-        ),
+        return_value=MagicMock(filename_to_tensors={"model.safetensors": []}, is_sharded=False),
     )
     @patch("transformers.AutoTokenizer.from_pretrained", return_value=MagicMock())
-    @patch(
-        "torch.distributed.checkpoint.state_dict.get_model_state_dict", return_value={}
-    )
+    @patch("torch.distributed.checkpoint.state_dict.get_model_state_dict", return_value={})
     @patch("mini_trainer.train.torch.distributed.barrier")
     @patch("mini_trainer.train.torch.distributed.get_rank", return_value=0)
     @patch.dict(os.environ, {"RANK": "0", "LOCAL_WORLD_SIZE": "1"})
@@ -1165,9 +1107,7 @@ class TestSaveModel:
         model.module.config.torch_dtype = torch.bfloat16
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            save_model(
-                model, samples_seen=1000, output_dir=temp_dir, model_name_or_path="test"
-            )
+            save_model(model, samples_seen=1000, output_dir=temp_dir, model_name_or_path="test")
 
             # Check directory was created
             expected_dir = Path(temp_dir) / "hf_format" / "samples_1000"

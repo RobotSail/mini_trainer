@@ -1,16 +1,16 @@
 """Tests for OSFT dtype functionality and parameter propagation."""
 
+import tempfile
+from unittest.mock import MagicMock, patch
+
 import pytest
 import torch
 import torch.nn as nn
-import tempfile
-from unittest.mock import patch, MagicMock
 
 from mini_trainer.osft_utils import (
+    create_osft_model_class,
     create_svd_dict,
     reconstruct_weight_matrix,
-    create_osft_model_class,
-    auto_generate_target_osft_config,
 )
 from mini_trainer.setup_model_for_training import setup_model
 
@@ -98,9 +98,7 @@ class TestOSFTDtypeFunctions:
         )
 
         # Test reconstruction with different dtypes
-        reconstructed = reconstruct_weight_matrix(
-            svd_dict, upcast_dtype=torch.float32, output_dtype=torch.float16
-        )
+        reconstructed = reconstruct_weight_matrix(svd_dict, upcast_dtype=torch.float32, output_dtype=torch.float16)
 
         # Should return tensor in output_dtype
         assert reconstructed.dtype == torch.float16
@@ -114,9 +112,7 @@ class TestOSFTDtypeFunctions:
         svd_dict = create_svd_dict(weight, top_k, decompose_existing=True)
 
         # Reconstruct without specifying output_dtype
-        reconstructed = reconstruct_weight_matrix(
-            svd_dict, upcast_dtype=torch.float32, output_dtype=None
-        )
+        reconstructed = reconstruct_weight_matrix(svd_dict, upcast_dtype=torch.float32, output_dtype=None)
 
         # Should stay in upcast_dtype
         assert reconstructed.dtype == torch.float32
@@ -135,9 +131,7 @@ class TestOSFTDtypeFunctions:
             output_dtype=torch.float64,
         )
 
-        reconstructed = reconstruct_weight_matrix(
-            svd_dict, upcast_dtype=torch.float64, output_dtype=torch.float64
-        )
+        reconstructed = reconstruct_weight_matrix(svd_dict, upcast_dtype=torch.float64, output_dtype=torch.float64)
 
         # Should be very close to original (within numerical precision)
         assert torch.allclose(weight, reconstructed, atol=1e-6)
@@ -238,12 +232,8 @@ class TestOSFTModelDtypeIntegration:
                 self.reinitialize_osft = MagicMock()
                 # Add some dummy parameters for OSFT config generation
                 self._parameters = {
-                    "model.layers.0.self_attn.q_proj.weight": torch.nn.Parameter(
-                        torch.randn(512, 512)
-                    ),
-                    "model.layers.0.self_attn.v_proj.weight": torch.nn.Parameter(
-                        torch.randn(512, 512)
-                    ),
+                    "model.layers.0.self_attn.q_proj.weight": torch.nn.Parameter(torch.randn(512, 512)),
+                    "model.layers.0.self_attn.v_proj.weight": torch.nn.Parameter(torch.randn(512, 512)),
                 }
 
             def named_parameters(self):
@@ -299,10 +289,8 @@ class TestOSFTModelDtypeIntegration:
                 @classmethod
                 def from_pretrained(cls, *args, **kwargs):
                     # Set the proper attributes on the model
-                    mock_osft_model.upcast_dtype = kwargs.get(
-                        "upcast_dtype", torch.float32
-                    )
-                    mock_osft_model.output_dtype = kwargs.get("output_dtype", None)
+                    mock_osft_model.upcast_dtype = kwargs.get("upcast_dtype", torch.float32)
+                    mock_osft_model.output_dtype = kwargs.get("output_dtype")
                     mock_osft_model.reinitialize_osft = MagicMock()
                     return mock_osft_model
 
@@ -330,9 +318,7 @@ class TestOSFTModelDtypeIntegration:
 
         # Verify reinitialize_osft was called
         assert hasattr(result, "reinitialize_osft")
-        result.reinitialize_osft.assert_called_once_with(
-            decompose_existing_weights=True
-        )
+        result.reinitialize_osft.assert_called_once_with(decompose_existing_weights=True)
 
 
 class TestOSFTParameterFlow:
@@ -441,9 +427,7 @@ class TestOSFTDtypeEdgeCases:
         svd_dict["S_high"] = svd_dict["S_high"].to(torch.bfloat16)
 
         # Reconstruction should still work by upcasting everything
-        reconstructed = reconstruct_weight_matrix(
-            svd_dict, upcast_dtype=torch.float32, output_dtype=torch.bfloat16
-        )
+        reconstructed = reconstruct_weight_matrix(svd_dict, upcast_dtype=torch.float32, output_dtype=torch.bfloat16)
 
         assert reconstructed.dtype == torch.bfloat16
         assert reconstructed.shape == weight.shape

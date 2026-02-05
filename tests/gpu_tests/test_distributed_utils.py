@@ -6,14 +6,13 @@ so they are placed in the gpu_tests directory.
 """
 
 import os
+from unittest.mock import patch
+
 import pytest
-import torch
-import torch.distributed as dist
-from unittest.mock import patch, MagicMock
 
 from mini_trainer.utils import (
-    init_distributed_environment,
     check_distributed_is_synchronized,
+    init_distributed_environment,
 )
 
 
@@ -64,9 +63,7 @@ class TestDistributedUtils:
     @patch("mini_trainer.utils.dist.get_rank", return_value=0)
     @patch("mini_trainer.utils.dist.get_world_size", return_value=4)
     @patch("mini_trainer.utils.dist.all_reduce")
-    def test_check_distributed_synchronized(
-        self, mock_all_reduce, mock_world_size, mock_rank
-    ):
+    def test_check_distributed_synchronized(self, mock_all_reduce, mock_world_size, mock_rank):
         """Test distributed synchronization check."""
 
         # Mock successful all_reduce
@@ -85,9 +82,7 @@ class TestDistributedUtils:
     @patch("mini_trainer.utils.dist.get_rank", return_value=0)
     @patch("mini_trainer.utils.dist.get_world_size", return_value=4)
     @patch("mini_trainer.utils.dist.all_reduce")
-    def test_check_distributed_not_synchronized(
-        self, mock_all_reduce, mock_world_size, mock_rank
-    ):
+    def test_check_distributed_not_synchronized(self, mock_all_reduce, mock_world_size, mock_rank):
         """Test distributed synchronization check failure."""
 
         # Mock failed all_reduce

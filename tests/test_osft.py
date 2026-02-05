@@ -8,28 +8,29 @@ Tests validate:
 4. Integration with setup_model
 """
 
-import pytest
+import subprocess
 import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
 import torch
 import torch.nn as nn
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-import subprocess
 
-from mini_trainer.api_train import run_training
-from mini_trainer.training_types import TorchrunArgs, TrainingArgs
 import mini_trainer.osft_utils as osft_module
+from mini_trainer.api_train import run_training
 from mini_trainer.osft_utils import (
-    auto_generate_target_osft_config,
-    get_model_config,
-    is_osft_param,
-    create_osft_model_class,
     MODEL_CONFIGS,
     _get_model_patterns_from_name,
-    optim_wrapper,
     _load_model_memory_efficient,
+    auto_generate_target_osft_config,
+    create_osft_model_class,
+    get_model_config,
+    is_osft_param,
+    optim_wrapper,
 )
 from mini_trainer.setup_model_for_training import setup_model
+from mini_trainer.training_types import TorchrunArgs, TrainingArgs
 from tests.test_utils.orthogonality import (
     OrthogonalityTracker,
     check_gradient_orthogonality,
@@ -130,9 +131,7 @@ class TestOSFTAPIValidation:
                 _, command = call_args[0]
 
                 assert "--osft" not in command
-                assert all(
-                    not arg.startswith("--osft-unfreeze-rank-ratio") for arg in command
-                )
+                assert all(not arg.startswith("--osft-unfreeze-rank-ratio") for arg in command)
                 assert mock_popen_class.call_count > 0
 
     @patch("mini_trainer.api_train.StreamablePopen")
@@ -174,9 +173,7 @@ class TestOSFTAPIValidation:
 
             assert patterns_arg is not None
             # The patterns should be passed as a list string
-            expected = (
-                "--osft-target-patterns=self_attn.q_proj,self_attn.k_proj,mlp.gate_proj"
-            )
+            expected = "--osft-target-patterns=self_attn.q_proj,self_attn.k_proj,mlp.gate_proj"
             assert patterns_arg == expected
 
     def test_osft_target_patterns_empty_list(self):
@@ -286,54 +283,20 @@ class TestOSFTConfigGeneration:
         # - Qwen
         # - Mistral
         # - Phi-4
-        assert (
-            _get_model_patterns_from_name("llama") == MODEL_CONFIGS["llama"]["patterns"]
-        )
-        assert (
-            _get_model_patterns_from_name("gpt-j-6b")
-            == MODEL_CONFIGS["gpt-j"]["patterns"]
-        )
-        assert (
-            _get_model_patterns_from_name("gptj") == MODEL_CONFIGS["gpt-j"]["patterns"]
-        )
-        assert (
-            _get_model_patterns_from_name("opt-350m")
-            == MODEL_CONFIGS["opt"]["patterns"]
-        )
-        assert (
-            _get_model_patterns_from_name("qwen2-7b")
-            == MODEL_CONFIGS["qwen"]["patterns"]
-        )
-        assert (
-            _get_model_patterns_from_name("gemma-2b")
-            == MODEL_CONFIGS["gemma"]["patterns"]
-        )
-        assert (
-            _get_model_patterns_from_name("mistral")
-            == MODEL_CONFIGS["mistral"]["patterns"]
-        )
-        assert (
-            _get_model_patterns_from_name("mistral-7b")
-            == MODEL_CONFIGS["mistral"]["patterns"]
-        )
-        assert (
-            _get_model_patterns_from_name("microsoft/Phi-4")
-            == MODEL_CONFIGS["phi3"]["patterns"]
-        )
-        assert (
-            _get_model_patterns_from_name("microsoft/Phi-3")
-            == MODEL_CONFIGS["phi3"]["patterns"]
-        )
-        assert (
-            _get_model_patterns_from_name("microsoft/Phi-4-mini-instruct")
-            == MODEL_CONFIGS["phi3"]["patterns"]
-        )
+        assert _get_model_patterns_from_name("llama") == MODEL_CONFIGS["llama"]["patterns"]
+        assert _get_model_patterns_from_name("gpt-j-6b") == MODEL_CONFIGS["gpt-j"]["patterns"]
+        assert _get_model_patterns_from_name("gptj") == MODEL_CONFIGS["gpt-j"]["patterns"]
+        assert _get_model_patterns_from_name("opt-350m") == MODEL_CONFIGS["opt"]["patterns"]
+        assert _get_model_patterns_from_name("qwen2-7b") == MODEL_CONFIGS["qwen"]["patterns"]
+        assert _get_model_patterns_from_name("gemma-2b") == MODEL_CONFIGS["gemma"]["patterns"]
+        assert _get_model_patterns_from_name("mistral") == MODEL_CONFIGS["mistral"]["patterns"]
+        assert _get_model_patterns_from_name("mistral-7b") == MODEL_CONFIGS["mistral"]["patterns"]
+        assert _get_model_patterns_from_name("microsoft/Phi-4") == MODEL_CONFIGS["phi3"]["patterns"]
+        assert _get_model_patterns_from_name("microsoft/Phi-3") == MODEL_CONFIGS["phi3"]["patterns"]
+        assert _get_model_patterns_from_name("microsoft/Phi-4-mini-instruct") == MODEL_CONFIGS["phi3"]["patterns"]
 
         # Test default fallback
-        assert (
-            _get_model_patterns_from_name("unknown-model")
-            == MODEL_CONFIGS["default"]["patterns"]
-        )
+        assert _get_model_patterns_from_name("unknown-model") == MODEL_CONFIGS["default"]["patterns"]
 
     def test_get_model_config_with_custom_patterns(self):
         """Test that custom patterns override model defaults."""
@@ -372,9 +335,7 @@ class TestOSFTConfigGeneration:
 
         # Test with custom patterns
         custom_patterns = ["custom_proj", "another_proj"]
-        config = auto_generate_target_osft_config(
-            mock_model, target_patterns=custom_patterns, rank_ratio=0.5
-        )
+        config = auto_generate_target_osft_config(mock_model, target_patterns=custom_patterns, rank_ratio=0.5)
 
         # Should only include layers matching custom patterns
         assert "layer2.custom_proj.weight" in config
@@ -397,9 +358,7 @@ class TestOSFTConfigGeneration:
 
         # Test different rank ratios
         for ratio in [0.1, 0.25, 0.5, 0.75, 0.9]:
-            config = auto_generate_target_osft_config(
-                mock_model, target_patterns=["proj"], rank_ratio=ratio
-            )
+            config = auto_generate_target_osft_config(mock_model, target_patterns=["proj"], rank_ratio=ratio)
 
             expected_rank = int(80 * ratio)  # min(100, 80) * ratio
             assert config["layer.proj.weight"] == expected_rank
@@ -412,9 +371,7 @@ class TestOSFTConfigGeneration:
         mock_params = [("layer.proj.weight", torch.zeros(50, 50))]
         mock_model.named_parameters.return_value = mock_params
 
-        config = auto_generate_target_osft_config(
-            mock_model, target_patterns=["proj"], rank_ratio=1.0
-        )
+        config = auto_generate_target_osft_config(mock_model, target_patterns=["proj"], rank_ratio=1.0)
         assert config["layer.proj.weight"] == 49  # full_rank - 1
 
         # Test with 1D parameters (should be skipped)
@@ -424,9 +381,7 @@ class TestOSFTConfigGeneration:
         ]
         mock_model.named_parameters.return_value = mock_params
 
-        config = auto_generate_target_osft_config(
-            mock_model, target_patterns=["layer"], rank_ratio=0.5
-        )
+        config = auto_generate_target_osft_config(mock_model, target_patterns=["layer"], rank_ratio=0.5)
 
         assert "layer.bias" not in config  # 1D should be skipped
         assert "layer.weight" in config  # 2D should be included
@@ -688,9 +643,7 @@ class TestOSFTConfigGeneration:
             ]
         else:
             # For future model types, we can add specific handling
-            raise NotImplementedError(
-                f"Layer patterns not implemented for {model_type}"
-            )
+            raise NotImplementedError(f"Layer patterns not implemented for {model_type}")
 
     @pytest.mark.parametrize(
         "model_creator",
@@ -713,9 +666,7 @@ class TestOSFTConfigGeneration:
         model, config, model_type = creator_method()
 
         # Get the OSFT config using the model
-        osft_config = auto_generate_target_osft_config(
-            model, model_name_or_class=model_type, rank_ratio=0.5
-        )
+        osft_config = auto_generate_target_osft_config(model, model_name_or_class=model_type, rank_ratio=0.5)
 
         # Expected patterns from MODEL_CONFIGS
         expected_patterns = MODEL_CONFIGS[model_type]["patterns"]
@@ -726,19 +677,11 @@ class TestOSFTConfigGeneration:
         # Check that each expected pattern matches at least one parameter
         for pattern in expected_patterns:
             matching_params = [name for name in osft_config.keys() if pattern in name]
-            assert len(matching_params) > 0, (
-                f"Pattern '{pattern}' not found in OSFT config for {model_type}"
-            )
+            assert len(matching_params) > 0, f"Pattern '{pattern}' not found in OSFT config for {model_type}"
 
             # Also verify these parameters exist in the actual model
-            model_matches = [
-                name
-                for name in model_param_names
-                if pattern in name and ".weight" in name
-            ]
-            assert len(model_matches) > 0, (
-                f"Pattern '{pattern}' not found in model parameters for {model_type}"
-            )
+            model_matches = [name for name in model_param_names if pattern in name and ".weight" in name]
+            assert len(model_matches) > 0, f"Pattern '{pattern}' not found in model parameters for {model_type}"
 
         # Verify that the OSFT config only contains parameters matching our patterns
         for param_name in osft_config.keys():
@@ -748,9 +691,7 @@ class TestOSFTConfigGeneration:
 
         # Verify correct number of layers are matched (2 layers as configured)
         for i in range(config.num_hidden_layers):
-            expected_layer_params = self._get_model_layer_patterns(
-                model_type, config, i
-            )
+            expected_layer_params = self._get_model_layer_patterns(model_type, config, i)
             for expected_param in expected_layer_params:
                 assert expected_param in osft_config, (
                     f"Expected parameter '{expected_param}' not found in OSFT config for {model_type}"
@@ -858,9 +799,7 @@ class TestSetupModelIntegration:
                     # Store the kwargs for verification
                     cls.last_kwargs = kwargs
                     # Set attributes on the instance
-                    mock_osft_instance.upcast_dtype = kwargs.get(
-                        "upcast_dtype", torch.float32
-                    )
+                    mock_osft_instance.upcast_dtype = kwargs.get("upcast_dtype", torch.float32)
                     if "output_dtype" in kwargs and kwargs["output_dtype"] is not None:
                         mock_osft_instance.output_dtype = kwargs["output_dtype"]
                     return mock_osft_instance
@@ -978,16 +917,12 @@ if __name__ == "__main__":
             assert "PATTERNS: ['q_proj', 'k_proj']" in result.stdout
 
             # Test missing unfreeze_rank_ratio
-            result = subprocess.run(
-                ["python", str(test_script), "--osft"], capture_output=True, text=True
-            )
+            result = subprocess.run(["python", str(test_script), "--osft"], capture_output=True, text=True)
             assert result.returncode == 1
             assert "ERROR: osft_unfreeze_rank_ratio required" in result.stdout
 
             # Test osft=False doesn't require rank_ratio
-            result = subprocess.run(
-                ["python", str(test_script)], capture_output=True, text=True
-            )
+            result = subprocess.run(["python", str(test_script)], capture_output=True, text=True)
             assert result.returncode == 0
             assert "SUCCESS: osft=False" in result.stdout
 
@@ -1031,9 +966,7 @@ class TestOSFTPrepareStateDict:
         assert "linear.weight" in reconstructed
         for key in reconstructed.keys():
             assert "osft_params" not in key
-            assert (
-                "_U_high" not in key and "_S_high" not in key and "_V_high" not in key
-            )
+            assert "_U_high" not in key and "_S_high" not in key and "_V_high" not in key
 
         # Verify shape is correct
         assert reconstructed["linear.weight"].shape == (4, 4)
@@ -1045,9 +978,7 @@ class TestOSFTPrepareStateDict:
             def __init__(self, config=None, **kwargs):
                 super().__init__()
                 self.osft_layer = nn.Linear(4, 4, bias=False)
-                self.regular_layer = nn.Linear(
-                    4, 2, bias=True
-                )  # Will not be decomposed
+                self.regular_layer = nn.Linear(4, 2, bias=True)  # Will not be decomposed
                 self.config = config or MagicMock()
                 self.dtype = torch.float32
 
@@ -1194,9 +1125,7 @@ class TestOSFTOrthogonality:
                 check_gradient_orthogonality(model, module, step=1, tracker=tracker)
 
         # Verify orthogonality is maintained
-        assert tracker.is_successful(), (
-            f"Gradient orthogonality violated:\n{tracker.get_summary()}"
-        )
+        assert tracker.is_successful(), f"Gradient orthogonality violated:\n{tracker.get_summary()}"
 
     def test_gradient_orthogonality_multi_layer(self):
         """Test gradient orthogonality with multiple OSFT layers."""
@@ -1261,9 +1190,7 @@ class TestOSFTOrthogonality:
             ):
                 check_gradient_orthogonality(model, module, step=1, tracker=tracker)
 
-        assert tracker.is_successful(), (
-            f"Multi-layer gradient orthogonality violated:\n{tracker.get_summary()}"
-        )
+        assert tracker.is_successful(), f"Multi-layer gradient orthogonality violated:\n{tracker.get_summary()}"
 
     def test_parameter_orthogonality_after_optimizer_step(self):
         """Test that parameters remain orthogonal after optimizer step."""
@@ -1369,9 +1296,7 @@ class TestOSFTOrthogonality:
 
             optimizer.zero_grad()
 
-        assert tracker.is_successful(), (
-            f"Orthogonality violated during training:\n{tracker.get_summary()}"
-        )
+        assert tracker.is_successful(), f"Orthogonality violated during training:\n{tracker.get_summary()}"
 
     def test_orthogonality_with_different_rank_ratios(self):
         """Test orthogonality with different rank ratios."""
@@ -1379,9 +1304,7 @@ class TestOSFTOrthogonality:
         rank_ratios = [0.1, 0.5, 0.9]
 
         for rank_ratio in rank_ratios:
-            model, _ = self._create_simple_osft_model(
-                hidden_size=16, rank_ratio=rank_ratio
-            )
+            model, _ = self._create_simple_osft_model(hidden_size=16, rank_ratio=rank_ratio)
             tracker = OrthogonalityTracker(margin_deg=1.0)
 
             osft_params = [p for n, p in model.named_parameters() if "osft_params" in n]
@@ -1417,13 +1340,9 @@ class TestOSFTOrthogonality:
                     and hasattr(module, "osft_S_high")
                     and hasattr(module, "osft_V_high")
                 ):
-                    check_parameter_orthogonality(
-                        model, module, step=1, tracker=tracker
-                    )
+                    check_parameter_orthogonality(model, module, step=1, tracker=tracker)
 
-            assert tracker.is_successful(), (
-                f"Rank ratio {rank_ratio} failed orthogonality:\n{tracker.get_summary()}"
-            )
+            assert tracker.is_successful(), f"Rank ratio {rank_ratio} failed orthogonality:\n{tracker.get_summary()}"
 
     def test_compute_angle_differences_utility(self):
         """Test the compute_angle_differences utility function."""
@@ -1438,9 +1357,7 @@ class TestOSFTOrthogonality:
         assert len(angles) > 0
         # A[:, 0] = [1, 0, 0] and B[:, 0] = [0, 0, 1] are orthogonal (90 deg)
         # So the deviation from orthogonality should be near 0
-        assert angles[0] < 1.0, (
-            f"Expected small angle difference for orthogonal vectors, got {angles[0]}"
-        )
+        assert angles[0] < 1.0, f"Expected small angle difference for orthogonal vectors, got {angles[0]}"
 
         # Test with non-orthogonal matrices
         C = torch.randn(10, 5)
@@ -1527,9 +1444,7 @@ class TestLazyInitTokenizerAlignment:
         monkeypatch.setattr(osft_module.dist, "is_initialized", lambda: True)
         monkeypatch.setattr(osft_module.dist, "get_rank", lambda: 0)
         monkeypatch.setattr(osft_module.dist, "barrier", lambda: None)
-        monkeypatch.setattr(
-            osft_module.dist, "broadcast_object_list", lambda *_, **__: None
-        )
+        monkeypatch.setattr(osft_module.dist, "broadcast_object_list", lambda *_, **__: None)
         monkeypatch.setattr(osft_module.torch.cuda, "is_available", lambda: False)
 
         model = _load_model_memory_efficient(

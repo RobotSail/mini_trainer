@@ -7,7 +7,7 @@ used across the mini_trainer package to avoid duplication and ensure consistency
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Dict, Any, Literal
+from typing import Any, Literal
 
 
 class TrainingMode(str, Enum):
@@ -39,9 +39,9 @@ class TorchrunArgs:
     rdzv_id: str | int = 123
 
     # Optional rendezvous / master fields
-    rdzv_endpoint: Optional[str] = None
-    master_addr: Optional[str] = None
-    master_port: Optional[int] = None
+    rdzv_endpoint: str | None = None
+    master_addr: str | None = None
+    master_port: int | None = None
 
     def __post_init__(self):
         # in order to support systems which are still relying on `master_addr`
@@ -49,9 +49,7 @@ class TorchrunArgs:
         # for rdzv_endpoint:
         # https://github.com/pytorch/pytorch/blob/ecb53078faf86ca1b33277df33b82985675bb011/torch/distributed/run.py#L799
         if self.rdzv_endpoint and self.master_addr:
-            raise ValueError(
-                "Provide either `rdzv_endpoint` OR both `master_addr` and `master_port`, not both."
-            )
+            raise ValueError("Provide either `rdzv_endpoint` OR both `master_addr` and `master_port`, not both.")
 
 
 @dataclass
@@ -59,27 +57,17 @@ class TrainingArgs:
     """Complete training configuration arguments."""
 
     # Required fields (no defaults)
-    model_name_or_path: str = field(
-        metadata={"help": "The name or path of the model to train."}
-    )
+    model_name_or_path: str = field(metadata={"help": "The name or path of the model to train."})
     data_path: str = field(metadata={"help": "The path to the training data."})
     batch_size: int = field(metadata={"help": "The batch size to use for training."})
-    max_tokens_per_gpu: int = field(
-        metadata={"help": "The maximum number of tokens per GPU per minibatch."}
-    )
-    learning_rate: float = field(
-        metadata={"help": "The learning rate to use for training."}
-    )
-    output_dir: str = field(
-        metadata={"help": "Directory to save checkpoints and logs."}
-    )
+    max_tokens_per_gpu: int = field(metadata={"help": "The maximum number of tokens per GPU per minibatch."})
+    learning_rate: float = field(metadata={"help": "The learning rate to use for training."})
+    output_dir: str = field(metadata={"help": "Directory to save checkpoints and logs."})
 
     # Optional fields (with defaults)
     num_warmup_steps: int = field(
         default=0,
-        metadata={
-            "help": "The number of warmup steps for the learning rate scheduler."
-        },
+        metadata={"help": "The number of warmup steps for the learning rate scheduler."},
     )
     lr_scheduler: str = field(
         default="cosine",
@@ -87,22 +75,16 @@ class TrainingArgs:
             "help": "The learning rate scheduler to use. NOTE: Infinite mode only supports schedulers which do not read the number of training steps."
         },
     )
-    lr_scheduler_kwargs: Optional[Dict[str, Any]] = field(
+    lr_scheduler_kwargs: dict[str, Any] | None = field(
         default_factory=dict,
-        metadata={
-            "help": "Additional keyword arguments for the learning rate scheduler."
-        },
+        metadata={"help": "Additional keyword arguments for the learning rate scheduler."},
     )
-    seed: int = field(
-        default=42, metadata={"help": "The random seed to use for training."}
-    )
+    seed: int = field(default=42, metadata={"help": "The random seed to use for training."})
 
     # AdamW optimizer parameters
     beta1: float = field(
         default=0.9,
-        metadata={
-            "help": "Beta1 parameter for AdamW optimizer (momentum coefficient)."
-        },
+        metadata={"help": "Beta1 parameter for AdamW optimizer (momentum coefficient)."},
     )
     beta2: float = field(
         default=0.95,
@@ -110,18 +92,12 @@ class TrainingArgs:
     )
     eps: float = field(
         default=1e-8,
-        metadata={
-            "help": "Epsilon parameter for numerical stability in AdamW optimizer."
-        },
+        metadata={"help": "Epsilon parameter for numerical stability in AdamW optimizer."},
     )
-    weight_decay: float = field(
-        default=0.0, metadata={"help": "Weight decay (L2 penalty) for AdamW optimizer."}
-    )
+    weight_decay: float = field(default=0.0, metadata={"help": "Weight decay (L2 penalty) for AdamW optimizer."})
 
     # Model configuration
-    use_liger_kernels: bool = field(
-        default=False, metadata={"help": "Whether to use Liger kernels."}
-    )
+    use_liger_kernels: bool = field(default=False, metadata={"help": "Whether to use Liger kernels."})
     osft: bool = field(
         default=False,
         metadata={
@@ -142,9 +118,7 @@ class TrainingArgs:
     )
     osft_upcast_dtype: str | None = field(
         default="float32",
-        metadata={
-            "help": "Upcast dtype for OSFT computations. Can be 'float16', 'bfloat16', 'float32', etc."
-        },
+        metadata={"help": "Upcast dtype for OSFT computations. Can be 'float16', 'bfloat16', 'float32', etc."},
     )
     osft_output_dtype: str | None = field(
         default=None,
@@ -165,11 +139,9 @@ class TrainingArgs:
     )
 
     # Output options
-    min_samples_per_checkpoint: Optional[int] = field(
+    min_samples_per_checkpoint: int | None = field(
         default=None,
-        metadata={
-            "help": "If provided, this must be the number of samples to process before saving a checkpoint."
-        },
+        metadata={"help": "If provided, this must be the number of samples to process before saving a checkpoint."},
     )
 
     # Training mode and stopping criteria
@@ -209,32 +181,18 @@ class TrainingArgs:
     )
     train_dtype: str = field(
         default="float32",
-        metadata={
-            "help": "Dtype for training computations. Can be 'float16', 'bfloat16', 'float32', etc."
-        },
+        metadata={"help": "Dtype for training computations. Can be 'float16', 'bfloat16', 'float32', etc."},
     )
 
     # Weights & Biases integration
-    wandb_project: Optional[str] = field(
-        default=None, metadata={"help": "Weights & Biases project name."}
-    )
-    wandb_run_name: Optional[str] = field(
-        default=None, metadata={"help": "Weights & Biases run name."}
-    )
-    wandb_entity: Optional[str] = field(
-        default=None, metadata={"help": "Weights & Biases entity/team name."}
-    )
+    wandb_project: str | None = field(default=None, metadata={"help": "Weights & Biases project name."})
+    wandb_run_name: str | None = field(default=None, metadata={"help": "Weights & Biases run name."})
+    wandb_entity: str | None = field(default=None, metadata={"help": "Weights & Biases entity/team name."})
 
     # MLflow integration
-    mlflow_tracking_uri: Optional[str] = field(
-        default=None, metadata={"help": "MLflow tracking server URI."}
-    )
-    mlflow_experiment_name: Optional[str] = field(
-        default=None, metadata={"help": "MLflow experiment name."}
-    )
-    mlflow_run_name: Optional[str] = field(
-        default=None, metadata={"help": "MLflow run name."}
-    )
+    mlflow_tracking_uri: str | None = field(default=None, metadata={"help": "MLflow tracking server URI."})
+    mlflow_experiment_name: str | None = field(default=None, metadata={"help": "MLflow experiment name."})
+    mlflow_run_name: str | None = field(default=None, metadata={"help": "MLflow run name."})
 
     # validation
     validation_split: float = field(
@@ -243,15 +201,13 @@ class TrainingArgs:
             "help": "The fraction of data to use for validation. 0.0 means no validation, 0.1 means 10% of the data is used for validation."
         },
     )
-    validation_frequency: Optional[int] = field(
+    validation_frequency: int | None = field(
         default=None,
-        metadata={
-            "help": "The frequency of validation in steps. Required when validation_split > 0."
-        },
+        metadata={"help": "The frequency of validation in steps. Required when validation_split > 0."},
     )
 
     # Pretraining configuration (None = instruction tuning, non-None = pretraining)
-    pretraining_config: Optional[PretrainingConfig] = field(
+    pretraining_config: PretrainingConfig | None = field(
         default=None,
         metadata={
             "help": "Pretraining configuration. If provided, enables pretraining mode with block-based sampling."
@@ -265,7 +221,5 @@ class TrainingArgs:
     )
     val_loss_improvement_threshold: float = field(
         default=0.0,
-        metadata={
-            "help": "Minimum validation loss improvement required to trigger a save"
-        },
+        metadata={"help": "Minimum validation loss improvement required to trigger a save"},
     )

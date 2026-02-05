@@ -7,20 +7,21 @@ to ensure correct model initialization, FSDP wrapping, and optimizer setup.
 TODO: This file needs to be combined with `test_integration_small_models.py`
 """
 
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import torch
-import pytest
 from unittest.mock import MagicMock, patch
 
+import pytest
+import torch
+
 from mini_trainer.setup_model_for_training import (
-    wrap_fsdp2,
     align_model_and_tokenizer,
     setup_model,
     setup_training_components,
+    wrap_fsdp2,
 )
 
 
@@ -216,9 +217,7 @@ class TestSetupModel:
     @patch("transformers.AutoModelForCausalLM.from_pretrained")
     @patch("transformers.AutoConfig.from_pretrained")
     @patch("mini_trainer.setup_model_for_training.align_model_and_tokenizer")
-    def test_setup_model_standard(
-        self, mock_align, auto_config, mock_model_cls, mock_tokenizer_cls
-    ):
+    def test_setup_model_standard(self, mock_align, auto_config, mock_model_cls, mock_tokenizer_cls):
         """Test standard model setup without special features."""
         mock_tokenizer = MagicMock()
         mock_tokenizer_cls.return_value = mock_tokenizer
@@ -361,9 +360,7 @@ class TestIntegration:
     """Integration tests for model initialization and training setup."""
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-    @patch(
-        "mini_trainer.setup_model_for_training.dist.is_initialized", return_value=False
-    )
+    @patch("mini_trainer.setup_model_for_training.dist.is_initialized", return_value=False)
     @patch("mini_trainer.setup_model_for_training.AutoTokenizer.from_pretrained")
     def test_model_device_placement(self, mock_tokenizer, mock_dist_init):
         """Test that model is correctly placed on GPU."""

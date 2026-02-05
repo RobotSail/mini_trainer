@@ -6,13 +6,11 @@ using JIT compilation for optimal speed while maintaining superior load balancin
 """
 
 import numpy as np
-from numba import njit, int64
+from numba import int64, njit
 
 
 @njit
-def _lpt_check_heap(
-    heap: np.ndarray, lengths: np.ndarray, max_tokens: int64, n: int64
-) -> bool:
+def _lpt_check_heap(heap: np.ndarray, lengths: np.ndarray, max_tokens: int64, n: int64) -> bool:
     """Check if sequences can fit using min-heap for O(log n) insertions.
 
     Uses a binary min-heap where heap[1] is the root (heap[0] unused).
@@ -106,9 +104,7 @@ def _lpt_distribute_heap(
 
 
 @njit
-def _batch_to_minibatches_lpt_core(
-    lengths: np.ndarray, max_tokens: int64, num_ranks: int64, rank: int64
-) -> tuple:
+def _batch_to_minibatches_lpt_core(lengths: np.ndarray, max_tokens: int64, num_ranks: int64, rank: int64) -> tuple:
     """Core numba-optimized LPT batching algorithm.
 
     Returns:
@@ -154,17 +150,12 @@ def _batch_to_minibatches_lpt_core(
         left = 1
         right = min(
             remaining + 1,
-            1
-            + np.searchsorted(
-                lengths_cumsum[start_idx:], s + max_tokens * num_ranks, "right"
-            ),
+            1 + np.searchsorted(lengths_cumsum[start_idx:], s + max_tokens * num_ranks, "right"),
         )
 
         while right - left > 1:
             mid = (left + right) // 2
-            if _lpt_check_heap(
-                heap, sorted_lengths[start_idx : start_idx + mid], max_tokens, num_ranks
-            ):
+            if _lpt_check_heap(heap, sorted_lengths[start_idx : start_idx + mid], max_tokens, num_ranks):
                 left = mid
             else:
                 right = mid
@@ -208,9 +199,7 @@ def _batch_to_minibatches_lpt_core(
     return minibatch_indices[:n_minibatches], minibatch_sizes[:n_minibatches]
 
 
-def batch_lengths_to_minibatches_lpt(
-    batch_lengths: list[int], max_tokens_per_rank: int, num_ranks: int, rank: int
-):
+def batch_lengths_to_minibatches_lpt(batch_lengths: list[int], max_tokens_per_rank: int, num_ranks: int, rank: int):
     """High-performance LPT batch packing using numba optimization.
 
     Distributes sequences across ranks using the Longest Processing Time (LPT)
@@ -236,9 +225,7 @@ def batch_lengths_to_minibatches_lpt(
     lengths = np.array(batch_lengths, dtype=np.int64)
 
     # Call numba-optimized core
-    minibatch_indices, minibatch_sizes = _batch_to_minibatches_lpt_core(
-        lengths, max_tokens_per_rank, num_ranks, rank
-    )
+    minibatch_indices, minibatch_sizes = _batch_to_minibatches_lpt_core(lengths, max_tokens_per_rank, num_ranks, rank)
 
     # Convert back to list format
     result = []

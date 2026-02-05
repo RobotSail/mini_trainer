@@ -1,33 +1,33 @@
+import json
 import logging
-import time
 import os
 import sys
+import time
 from pathlib import Path
-import json
 from typing import Annotated, Literal
-from typer import Typer, Option
 
-from mini_trainer.async_structured_logger import AsyncStructuredLogger
-from mini_trainer import wandb_wrapper, mlflow_wrapper
-from tqdm import tqdm
 import torch
 import torch.distributed as dist
 from torch.distributed._tensor.api import (
     DTensor as _DTensor,
 )  # works if DTensor is available
+from tqdm import tqdm
+from typer import Option, Typer
 
+from mini_trainer import mlflow_wrapper, wandb_wrapper
+from mini_trainer.async_structured_logger import AsyncStructuredLogger
 from mini_trainer.batch_metrics import BatchMetrics
 from mini_trainer.sampler import get_data_loader
 from mini_trainer.setup_model_for_training import setup_model, setup_training_components
+from mini_trainer.training_types import PretrainingConfig, TrainingMode
 from mini_trainer.utils import (
+    destroy_distributed_environment,
+    get_node_rank,
     init_distributed_environment,
     log_rank_0,
-    setup_logger,
-    get_node_rank,
-    destroy_distributed_environment,
     set_seed,
+    setup_logger,
 )
-from mini_trainer.training_types import TrainingMode, PretrainingConfig
 
 # Suppress verbose HTTP request logs from httpx (used by huggingface_hub in transformers v5+)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -56,13 +56,9 @@ def validate_training_state(
     """
     for name, param in model.named_parameters():
         if param.requires_grad and param.dtype != expected_param_dtype:
-            raise ValueError(
-                f"Parameter {name} is not in {expected_param_dtype}, got {param.dtype}"
-            )
+            raise ValueError(f"Parameter {name} is not in {expected_param_dtype}, got {param.dtype}")
         if param.grad is not None and param.grad.dtype != expected_param_dtype:
-            raise ValueError(
-                f"Gradient {name} is not in {expected_param_dtype}, got {param.grad.dtype}"
-            )
+            raise ValueError(f"Gradient {name} is not in {expected_param_dtype}, got {param.grad.dtype}")
 
     # Check optimizer state tensors - only for trainable parameters
     for p_obj, state in optimizer.state.items():
@@ -84,9 +80,7 @@ def validate_training_state(
             # These should match the parameter dtype in mixed precision training
             v_dtype = v.dtype
             if v_dtype != expected_optimizer_dtype:
-                raise ValueError(
-                    f"Optimizer state {k} is not in {expected_optimizer_dtype} (got {v_dtype})"
-                )
+                raise ValueError(f"Optimizer state {k} is not in {expected_optimizer_dtype} (got {v_dtype})")
 
 
 def take_gradient_step(model, optimizer, lr_scheduler, expected_dtype=torch.float32):
@@ -122,11 +116,12 @@ def save_model(
         suffix (str | None): Optional suffix to add to the checkpoint directory name.
     """
     from huggingface_hub import split_torch_state_dict_into_shards
-    from transformers import AutoTokenizer
     from safetensors.torch import save_file
+    from transformers import AutoTokenizer
+
     from mini_trainer.gpt_oss_utils import (
-        is_gpt_oss_model,
         convert_dequantized_to_quantized_format_correct,
+        is_gpt_oss_model,
     )
 
     # Only on rank 0
@@ -151,8 +146,8 @@ def save_model(
     # Users may also face issues here if they lack the CPU memory required to store the original
     # FP32 state dict on CPU.
     from torch.distributed.checkpoint.state_dict import (
-        get_model_state_dict,
         StateDictOptions,
+        get_model_state_dict,
     )
 
     state_dict = get_model_state_dict(
@@ -187,9 +182,7 @@ def save_model(
 
     # This process takes a while, so worker nodes should print when this is happening
     if get_node_rank() != 0 and hasattr(inner, "prepare_state_dict_for_save"):
-        log_rank_0(
-            "Model checkpoint is being prepared on the main process of the master node. Please wait..."
-        )
+        log_rank_0("Model checkpoint is being prepared on the main process of the master node. Please wait...")
 
     torch.distributed.barrier()
 
@@ -199,9 +192,7 @@ def save_model(
     if global_rank == 0:
         # Model format conversion (GPT-OSS vs standard)
         if is_gpt_oss:
-            log_rank_0(
-                "🔧 Converting GPT-OSS parameters to quantized format for compatibility"
-            )
+            log_rank_0("🔧 Converting GPT-OSS parameters to quantized format for compatibility")
             # Convert state dict on GPU, then move to CPU
             state_dict = convert_dequantized_to_quantized_format_correct(state_dict)
         else:
@@ -214,9 +205,7 @@ def save_model(
             for k, v in state_dict.items():
                 if v.dtype != save_dtype:
                     if not notified_about_dtype:
-                        log_rank_0(
-                            f"⚠️  Warning: Found tensor {k} with dtype {v.dtype}, casting to {save_dtype}"
-                        )
+                        log_rank_0(f"⚠️  Warning: Found tensor {k} with dtype {v.dtype}, casting to {save_dtype}")
                         notified_about_dtype = True
                     state_dict[k] = v.to(dtype=save_dtype, device=cpu_device)
 
@@ -266,15 +255,11 @@ def save_model(
         tokenizer.save_pretrained(save_directory)
 
     if get_node_rank() != 0:
-        log_rank_0(
-            "Model checkpoint is being saved on the main process of the master node. Please wait..."
-        )
+        log_rank_0("Model checkpoint is being saved on the main process of the master node. Please wait...")
 
     log_rank_0("")
     torch.distributed.barrier()
-    log_rank_0(
-        f"✅ Saved model at {samples_seen} samples{suffix_text} in {time.time() - start:.2f} seconds"
-    )
+    log_rank_0(f"✅ Saved model at {samples_seen} samples{suffix_text} in {time.time() - start:.2f} seconds")
 
 
 def compute_validation_loss(model, val_data_loader, device):
@@ -304,12 +289,7 @@ def compute_validation_loss(model, val_data_loader, device):
     total_batches = len(val_data_loader)
 
     # Create tqdm with custom format matching Rich style
-    val_bar_format = (
-        "\033[1;35mValidation:\033[0m "
-        "{bar} "
-        "\033[33m{percentage:3.0f}%\033[0m │ "
-        "\033[37m{n}/{total}\033[0m"
-    )
+    val_bar_format = "\033[1;35mValidation:\033[0m {bar} \033[33m{percentage:3.0f}%\033[0m │ \033[37m{n}/{total}\033[0m"
     val_pbar = tqdm(
         total=total_batches,
         bar_format=val_bar_format,
@@ -384,11 +364,7 @@ def compute_validation_loss(model, val_data_loader, device):
 
             # Print tqdm-styled validation progress
             if is_main_process:
-                current_loss = (
-                    total_overall_loss / total_num_tokens
-                    if total_num_tokens > 0
-                    else 0.0
-                )
+                current_loss = total_overall_loss / total_num_tokens if total_num_tokens > 0 else 0.0
                 val_pbar.n = val_batch_idx
 
                 # Manually format the complete progress line with loss metric using format_meter
@@ -402,9 +378,7 @@ def compute_validation_loss(model, val_data_loader, device):
                 )
 
                 # Add the loss metric
-                metrics_str = (
-                    f" │ \033[32mloss:\033[0m \033[37m{current_loss:.4f}\033[0m"
-                )
+                metrics_str = f" │ \033[32mloss:\033[0m \033[37m{current_loss:.4f}\033[0m"
 
                 # Print the complete line
                 print(bar_str + metrics_str, file=sys.stdout, flush=True)
@@ -491,13 +465,9 @@ def parse_dtype(dtype_input: str | None) -> torch.dtype | None:
             "float64": torch.float64,
         }
         if dtype_input not in dtype_map:
-            raise ValueError(
-                f"Unsupported dtype string: '{dtype_input}'. Supported dtypes: {list(dtype_map.keys())}"
-            )
+            raise ValueError(f"Unsupported dtype string: '{dtype_input}'. Supported dtypes: {list(dtype_map.keys())}")
         return dtype_map[dtype_input]
-    elif hasattr(dtype_input, "dtype") or str(type(dtype_input)).startswith(
-        "<class 'torch."
-    ):
+    elif hasattr(dtype_input, "dtype") or str(type(dtype_input)).startswith("<class 'torch."):
         # Already a torch dtype
         return dtype_input
     else:
@@ -608,9 +578,7 @@ class Checkpointer:
             case "min_samples":
                 return (
                     self.min_samples_per_checkpoint is not None
-                    and accumulated_samples
-                    >= self.last_frequency_saved_samples
-                    + self.min_samples_per_checkpoint
+                    and accumulated_samples >= self.last_frequency_saved_samples + self.min_samples_per_checkpoint
                 )
 
             case "epoch":
@@ -836,15 +804,11 @@ def train(
             # use accumulated metrics to take a gradient step and logging
             bm = batch_totals.totals
             total_samples_accumulated += bm["num_samples"]
-            total_tokens_processed += (
-                batch_num_loss_counted_tokens  # Track tokens for TOKEN mode
-            )
+            total_tokens_processed += batch_num_loss_counted_tokens  # Track tokens for TOKEN mode
 
             # capture the LR that we'll use when taking a training step
             current_lr = lr_scheduler.get_last_lr()[0]
-            grad_norm = take_gradient_step(
-                model, optimizer, lr_scheduler, expected_dtype=train_dtype
-            )
+            grad_norm = take_gradient_step(model, optimizer, lr_scheduler, expected_dtype=train_dtype)
 
             batch_time = time.time() - batch_start_time
 
@@ -864,25 +828,17 @@ def train(
                 "batch_num_loss_counted_tokens": batch_num_loss_counted_tokens,
                 "num_total_tokens": bm["num_total_tokens"],
                 "grad_accum": grad_accum + 1,
-                "avg_time_per_minibatch": bm["time_per_minibatch"]
-                / (grad_accum + 1)
-                / world_size,
+                "avg_time_per_minibatch": bm["time_per_minibatch"] / (grad_accum + 1) / world_size,
                 "time_per_batch": batch_time,
                 "tokens_per_second": bm["num_total_tokens"] / batch_time,
                 "total_samples_accumulated": total_samples_accumulated,
                 "total_tokens_accumulated": total_tokens_processed,
-                "samples_per_second": bm["num_samples"] / batch_time
-                if batch_time > 0
-                else 0.0,
+                "samples_per_second": bm["num_samples"] / batch_time if batch_time > 0 else 0.0,
                 "peak_memory_usage_GB": float(torch.cuda.max_memory_allocated() / 1e9),
                 "val_loss": last_validation_loss,
             }
             # Add validation metrics if it's time to validate
-            if (
-                val_data_loader is not None
-                and validation_frequency is not None
-                and step % validation_frequency == 0
-            ):
+            if val_data_loader is not None and validation_frequency is not None and step % validation_frequency == 0:
                 val_metrics = compute_validation_loss(model, val_data_loader, device)
                 if val_metrics and "val_loss" in val_metrics:
                     last_validation_loss = val_metrics["val_loss"]
@@ -899,9 +855,7 @@ def train(
             if checkpointer.should_save_checkpoint(
                 save_type="min_samples", accumulated_samples=total_samples_accumulated
             ):
-                save_model(
-                    model, total_samples_accumulated, output_dir, model_name_or_path
-                )
+                save_model(model, total_samples_accumulated, output_dir, model_name_or_path)
                 checkpointer.record_save("min_samples", total_samples_accumulated)
 
             # Check for best validation loss saving after validation runs
@@ -917,9 +871,7 @@ def train(
                     model_name_or_path,
                     suffix="best_val_loss",
                 )
-                checkpointer.record_save(
-                    "best_val_loss", total_samples_accumulated, last_validation_loss
-                )
+                checkpointer.record_save("best_val_loss", total_samples_accumulated, last_validation_loss)
 
             torch.distributed.barrier()
 
@@ -1000,9 +952,7 @@ def calculate_num_training_steps(
     elif training_mode == TrainingMode.TOKEN:
         # Calculate average tokens per batch
         log_rank_0("Calculating average tokens per batch...")
-        total_loss_tokens = sum(
-            mb[0]["batch_num_loss_counted_tokens"] for mb in data_loader
-        )
+        total_loss_tokens = sum(mb[0]["batch_num_loss_counted_tokens"] for mb in data_loader)
         avg_tokens_per_batch = total_loss_tokens / len(data_loader)
         num_training_steps = int(max_tokens / avg_tokens_per_batch)  # approximate value
         log_rank_0(
@@ -1019,43 +969,21 @@ def main(
     # the '...' is a way of defining required options/arguments without breaking Python's
     # positional vs keyword argument rules
     model_name_or_path: Annotated[str, Option(help="Model name or path")] = ...,
-    data_path: Annotated[
-        str, Option(help="Path to the training data JSONL file")
-    ] = ...,
-    batch_size: Annotated[
-        int, Option(help="Initial batch size before dynamic splitting")
-    ] = ...,
-    max_tokens_per_gpu: Annotated[
-        int, Option(help="Maximum tokens per GPU per minibatch")
-    ] = ...,
+    data_path: Annotated[str, Option(help="Path to the training data JSONL file")] = ...,
+    batch_size: Annotated[int, Option(help="Initial batch size before dynamic splitting")] = ...,
+    max_tokens_per_gpu: Annotated[int, Option(help="Maximum tokens per GPU per minibatch")] = ...,
     learning_rate: Annotated[float, Option(help="Peak learning rate")] = ...,
-    num_warmup_steps: Annotated[
-        int, Option(help="Number of warmup steps for the LR scheduler")
-    ] = 0,
-    lr_scheduler: Annotated[
-        str, Option(help="Learning rate scheduler type")
-    ] = "constant_with_warmup",
-    lr_scheduler_kwargs: Annotated[
-        str, Option(help="JSON string of scheduler-specific kwargs")
-    ] = "{}",
+    num_warmup_steps: Annotated[int, Option(help="Number of warmup steps for the LR scheduler")] = 0,
+    lr_scheduler: Annotated[str, Option(help="Learning rate scheduler type")] = "constant_with_warmup",
+    lr_scheduler_kwargs: Annotated[str, Option(help="JSON string of scheduler-specific kwargs")] = "{}",
     seed: Annotated[int, Option(help="Random seed for reproducibility")] = 67,
     # AdamW optimizer parameters
-    beta1: Annotated[
-        float, Option(help="AdamW beta1 parameter (momentum coefficient)")
-    ] = 0.9,
-    beta2: Annotated[
-        float, Option(help="AdamW beta2 parameter (RMSprop coefficient)")
-    ] = 0.95,
+    beta1: Annotated[float, Option(help="AdamW beta1 parameter (momentum coefficient)")] = 0.9,
+    beta2: Annotated[float, Option(help="AdamW beta2 parameter (RMSprop coefficient)")] = 0.95,
     eps: Annotated[float, Option(help="AdamW epsilon for numerical stability")] = 1e-8,
-    weight_decay: Annotated[
-        float, Option(help="AdamW weight decay (L2 penalty)")
-    ] = 0.0,
-    use_liger_kernels: Annotated[
-        bool, Option(help="Whether to use Liger kernels")
-    ] = False,
-    osft: Annotated[
-        bool, Option(help="Enable OSFT (Orthogonal Subspace Fine-Tuning)")
-    ] = False,
+    weight_decay: Annotated[float, Option(help="AdamW weight decay (L2 penalty)")] = 0.0,
+    use_liger_kernels: Annotated[bool, Option(help="Whether to use Liger kernels")] = False,
+    osft: Annotated[bool, Option(help="Enable OSFT (Orthogonal Subspace Fine-Tuning)")] = False,
     osft_unfreeze_rank_ratio: Annotated[
         float,
         Option(
@@ -1074,9 +1002,7 @@ def main(
     ] = None,
     osft_upcast_dtype: Annotated[
         str | None,
-        Option(
-            help="Upcast dtype for OSFT computations. Can be 'float16', 'bfloat16', 'float32', etc."
-        ),
+        Option(help="Upcast dtype for OSFT computations. Can be 'float16', 'bfloat16', 'float32', etc."),
     ] = "float32",
     osft_output_dtype: Annotated[
         str | None,
@@ -1094,34 +1020,20 @@ def main(
             )
         ),
     ] = False,
-    output_dir: Annotated[
-        str, Option(help="Directory to save checkpoints and logs (required)")
-    ] = ...,
+    output_dir: Annotated[str, Option(help="Directory to save checkpoints and logs (required)")] = ...,
     min_samples_per_checkpoint: Annotated[
         int | None,
-        Option(
-            help="Minimum number of samples processed before saving a checkpoint (required)"
-        ),
+        Option(help="Minimum number of samples processed before saving a checkpoint (required)"),
     ] = None,
     # Training mode parameters
     training_mode: Annotated[
         TrainingMode,
-        Option(
-            help="Training mode: epoch, step, token, or infinite", case_sensitive=False
-        ),
+        Option(help="Training mode: epoch, step, token, or infinite", case_sensitive=False),
     ] = TrainingMode.EPOCH,
-    max_epochs: Annotated[
-        int, Option(help="Maximum number of epochs (for epoch mode)")
-    ] = 1,
-    max_steps: Annotated[
-        int, Option(help="Maximum number of steps (for step mode)")
-    ] = 0,
-    max_tokens: Annotated[
-        int, Option(help="Maximum number of loss-counted tokens (for token mode)")
-    ] = 0,
-    checkpoint_at_epoch: Annotated[
-        bool, Option(help="Whether to save checkpoints at the end of each epoch")
-    ] = False,
+    max_epochs: Annotated[int, Option(help="Maximum number of epochs (for epoch mode)")] = 1,
+    max_steps: Annotated[int, Option(help="Maximum number of steps (for step mode)")] = 0,
+    max_tokens: Annotated[int, Option(help="Maximum number of loss-counted tokens (for token mode)")] = 0,
+    checkpoint_at_epoch: Annotated[bool, Option(help="Whether to save checkpoints at the end of each epoch")] = False,
     save_final_checkpoint: Annotated[
         bool, Option(help="Whether to save a final checkpoint when training ends")
     ] = False,
@@ -1138,14 +1050,10 @@ def main(
         ),
     ] = "float32",
     # validation parameters
-    validation_split: Annotated[
-        float, Option(help="Fraction of data to use for validation (0.0 to 1.0)")
-    ] = 0.0,
+    validation_split: Annotated[float, Option(help="Fraction of data to use for validation (0.0 to 1.0)")] = 0.0,
     validation_frequency: Annotated[
         int | None,
-        Option(
-            help="Frequency of validation evaluation (in steps). Required when validation_split > 0"
-        ),
+        Option(help="Frequency of validation evaluation (in steps). Required when validation_split > 0"),
     ] = None,
     # checkpoint parameters
     save_best_val_loss: Annotated[
@@ -1163,22 +1071,12 @@ def main(
         ),
     ] = None,
     # wandb parameters
-    wandb_project: Annotated[
-        str | None, Option(help="Weights & Biases project name")
-    ] = None,
-    wandb_run_name: Annotated[
-        str | None, Option(help="Weights & Biases run name")
-    ] = None,
-    wandb_entity: Annotated[
-        str | None, Option(help="Weights & Biases entity/team name")
-    ] = None,
+    wandb_project: Annotated[str | None, Option(help="Weights & Biases project name")] = None,
+    wandb_run_name: Annotated[str | None, Option(help="Weights & Biases run name")] = None,
+    wandb_entity: Annotated[str | None, Option(help="Weights & Biases entity/team name")] = None,
     # mlflow parameters
-    mlflow_tracking_uri: Annotated[
-        str | None, Option(help="MLflow tracking server URI")
-    ] = None,
-    mlflow_experiment_name: Annotated[
-        str | None, Option(help="MLflow experiment name")
-    ] = None,
+    mlflow_tracking_uri: Annotated[str | None, Option(help="MLflow tracking server URI")] = None,
+    mlflow_experiment_name: Annotated[str | None, Option(help="MLflow experiment name")] = None,
     mlflow_run_name: Annotated[str | None, Option(help="MLflow run name")] = None,
 ):
     # Reproducibility: align with HF Trainer seeding behavior
@@ -1196,12 +1094,7 @@ def main(
         if osft_unfreeze_rank_ratio is None:
             raise ValueError("osft_unfreeze_rank_ratio is required when osft is True")
         if osft_target_patterns:
-            osft_target_patterns = (
-                osft_target_patterns.replace("'", "")
-                .replace('"', "")
-                .replace(" ", "")
-                .split(",")
-            )
+            osft_target_patterns = osft_target_patterns.replace("'", "").replace('"', "").replace(" ", "").split(",")
 
         # Deprecation warning for osft_memory_efficient_init
         if osft_memory_efficient_init:
@@ -1222,12 +1115,8 @@ def main(
     if validation_split < 0.0 or validation_split >= 1.0:
         raise ValueError("validation_split must be between 0.0 and 1.0 (exclusive)")
 
-    if validation_split > 0.0 and (
-        validation_frequency is None or validation_frequency <= 0
-    ):
-        raise ValueError(
-            "validation_frequency must be provided and positive when validation_split > 0"
-        )
+    if validation_split > 0.0 and (validation_frequency is None or validation_frequency <= 0):
+        raise ValueError("validation_frequency must be provided and positive when validation_split > 0")
 
     # Convert string dtypes to torch dtypes
     osft_upcast_dtype_torch = parse_dtype(osft_upcast_dtype)
@@ -1292,9 +1181,7 @@ def main(
             # authentication. So we error out here if it was requested but the user
             # is not authenticated
             if os.environ.get("WANDB_API_KEY") is None:
-                raise ValueError(
-                    "WANDB_API_KEY is not set. Please set the WANDB_API_KEY environment variable."
-                )
+                raise ValueError("WANDB_API_KEY is not set. Please set the WANDB_API_KEY environment variable.")
             wandb_wrapper.init(
                 project=wandb_project,
                 name=wandb_run_name,
@@ -1309,8 +1196,7 @@ def main(
             mlflow_wrapper.init(
                 tracking_uri=mlflow_tracking_uri,
                 experiment_name=mlflow_experiment_name,
-                run_name=mlflow_run_name
-                or wandb_run_name,  # fallback to wandb_run_name
+                run_name=mlflow_run_name or wandb_run_name,  # fallback to wandb_run_name
             )
             # Log hyperparameters
             mlflow_wrapper.log_params(params)
@@ -1320,29 +1206,21 @@ def main(
         with open(params_path, "w") as f:
             json.dump(params, f, indent=4)
         # Pretty print parameters in a single line using JSON
-        print(
-            f"Training with parameters: {json.dumps(params, separators=(',', ':'), indent=4)}"
-        )
+        print(f"Training with parameters: {json.dumps(params, separators=(',', ':'), indent=4)}")
         print(f"Training parameters saved to {params_path}")
 
     setup_logger(level="INFO")
 
     # Parse scheduler kwargs from JSON string
     try:
-        scheduler_kwargs_dict = (
-            json.loads(lr_scheduler_kwargs) if lr_scheduler_kwargs else {}
-        )
+        scheduler_kwargs_dict = json.loads(lr_scheduler_kwargs) if lr_scheduler_kwargs else {}
     except json.JSONDecodeError:
-        log_rank_0(
-            f"Warning: Invalid JSON for lr_scheduler_kwargs: {lr_scheduler_kwargs}. Using empty dict."
-        )
+        log_rank_0(f"Warning: Invalid JSON for lr_scheduler_kwargs: {lr_scheduler_kwargs}. Using empty dict.")
         scheduler_kwargs_dict = {}
 
     # If Orthogonal Subspace Learning is enabled, loads a model with decomposed trainable low-rank + fixed high-rank subspace weights (see osft_utils)
     # Convert user-facing osft_unfreeze_rank_ratio to internal osft_rank_ratio
-    osft_rank_ratio = (
-        None if osft_unfreeze_rank_ratio is None else (1.0 - osft_unfreeze_rank_ratio)
-    )
+    osft_rank_ratio = None if osft_unfreeze_rank_ratio is None else (1.0 - osft_unfreeze_rank_ratio)
     model = setup_model(
         model_name_or_path=model_name_or_path,
         save_dtype=save_dtype,
@@ -1375,9 +1253,7 @@ def main(
     )
 
     if validation_split > 0.0:
-        log_rank_0(
-            f"Created train/validation split with {validation_split:.1%} validation data"
-        )
+        log_rank_0(f"Created train/validation split with {validation_split:.1%} validation data")
         log_rank_0(f"Validation data loader length: {len(val_data_loader)}")
         log_rank_0(f"Training data loader length: {len(data_loader)}")
     else:

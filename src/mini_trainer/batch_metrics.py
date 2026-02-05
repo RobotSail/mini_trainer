@@ -1,4 +1,5 @@
 from collections import defaultdict
+
 import torch
 
 
@@ -23,9 +24,7 @@ class BatchMetrics:
         """
         # Create a tensor from the minibatch_metrics values in the order of keys
         keys = list(self.minibatch_metrics.keys())
-        tensor = torch.tensor(
-            [float(self.minibatch_metrics[k]) for k in keys], device=device
-        )
+        tensor = torch.tensor([float(self.minibatch_metrics[k]) for k in keys], device=device)
         torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.SUM)
         # Store reduced values for this batch
         self.totals = {key: value for key, value in zip(keys, tensor.tolist())}

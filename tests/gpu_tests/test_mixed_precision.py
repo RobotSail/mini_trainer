@@ -1,12 +1,12 @@
 """Test mixed precision training to ensure proper dtype handling."""
 
+import os
+
 import pytest
 import torch
-import torch.nn as nn
-import os
 import torch.distributed as dist
+from transformers import AutoTokenizer, LlamaConfig, LlamaForCausalLM
 
-from transformers import LlamaConfig, LlamaForCausalLM, AutoTokenizer
 from mini_trainer.setup_model_for_training import setup_model, setup_training_components
 from mini_trainer.utils import patch_target_module
 
@@ -111,9 +111,7 @@ class TestMixedPrecisionDtypes:
             # Create mock input for a simple forward/backward pass
             batch_size = 2
             seq_length = 32
-            input_ids = torch.randint(
-                0, config.vocab_size, (batch_size, seq_length)
-            ).to(single_gpu_device)
+            input_ids = torch.randint(0, config.vocab_size, (batch_size, seq_length)).to(single_gpu_device)
             labels = input_ids.clone()
 
             # Run a simple forward/backward pass
@@ -145,9 +143,7 @@ class TestMixedPrecisionDtypes:
                     # With FSDP2, the underlying parameter storage should be FP32
                     # even if computations happen in BF16
                     expected_dtype = torch.float32
-                    passed = check_tensor_dtype(
-                        param, expected_dtype, f"  Parameter '{name}'"
-                    )
+                    passed = check_tensor_dtype(param, expected_dtype, f"  Parameter '{name}'")
                     all_checks_passed = all_checks_passed and passed
 
                     param_count += 1
@@ -160,9 +156,7 @@ class TestMixedPrecisionDtypes:
                 if param.grad is not None:
                     # Gradients should be in FP32 for proper accumulation
                     expected_dtype = torch.float32
-                    passed = check_tensor_dtype(
-                        param.grad, expected_dtype, f"  Gradient '{name}'"
-                    )
+                    passed = check_tensor_dtype(param.grad, expected_dtype, f"  Gradient '{name}'")
                     all_checks_passed = all_checks_passed and passed
 
                     grad_count += 1
@@ -202,15 +196,11 @@ class TestMixedPrecisionDtypes:
             print(f"\n{'=' * 60}")
             if all_checks_passed:
                 print("✅ ALL DTYPE CHECKS PASSED!")
-                print(
-                    "Parameters, gradients, and optimizer states are correctly in FP32"
-                )
+                print("Parameters, gradients, and optimizer states are correctly in FP32")
             else:
                 print("❌ SOME DTYPE CHECKS FAILED!")
                 print("This indicates the mixed precision bug is present.")
-                print(
-                    "The fix is to set reduce_dtype=torch.float32 in MixedPrecisionPolicy"
-                )
+                print("The fix is to set reduce_dtype=torch.float32 in MixedPrecisionPolicy")
             print(f"{'=' * 60}\n")
 
             # Assert all checks passed

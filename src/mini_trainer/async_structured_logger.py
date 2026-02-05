@@ -1,28 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from datetime import datetime
 import asyncio
 import json
 import sys
 import threading
-import torch.distributed as dist
+from datetime import datetime
 
 # Third Party
 import aiofiles
+import torch.distributed as dist
 from rich.console import Console
 from tqdm import tqdm
 
 # Local imports
-from mini_trainer import wandb_wrapper, mlflow_wrapper
-from mini_trainer.wandb_wrapper import check_wandb_available
+from mini_trainer import mlflow_wrapper, wandb_wrapper
 from mini_trainer.mlflow_wrapper import check_mlflow_available
+from mini_trainer.wandb_wrapper import check_wandb_available
 
 
 class AsyncStructuredLogger:
-    def __init__(
-        self, file_name="training_log.jsonl", use_wandb=False, use_mlflow=False
-    ):
+    def __init__(self, file_name="training_log.jsonl", use_wandb=False, use_mlflow=False):
         self.file_name = file_name
 
         # wandb init is a special case -- if it is requested but unavailable,
@@ -45,9 +43,7 @@ class AsyncStructuredLogger:
 
         self.logs = []
         self.loop = asyncio.new_event_loop()
-        t = threading.Thread(
-            target=self._run_event_loop, args=(self.loop,), daemon=True
-        )
+        t = threading.Thread(target=self._run_event_loop, args=(self.loop,), daemon=True)
         t.start()
         asyncio.run_coroutine_threadsafe(self._initialize_log_file(), self.loop)
 
@@ -58,7 +54,7 @@ class AsyncStructuredLogger:
     async def _initialize_log_file(self):
         self.logs = []
         try:
-            async with aiofiles.open(self.file_name, "r") as f:
+            async with aiofiles.open(self.file_name) as f:
                 async for line in f:
                     if line.strip():  # Avoid empty lines
                         self.logs.append(json.loads(line.strip()))
@@ -88,9 +84,7 @@ class AsyncStructuredLogger:
             # Filter out step from data since it's passed as a separate argument
             if self.use_mlflow and is_rank0:
                 step = data.get("step")
-                mlflow_data = {
-                    k: v for k, v in data.items() if k not in ("timestamp", "step")
-                }
+                mlflow_data = {k: v for k, v in data.items() if k not in ("timestamp", "step")}
                 mlflow_wrapper.log(mlflow_data, step=step)
         except Exception as e:
             print(f"\033[1;38;2;0;255;255mError logging data: {e}\033[0m")
@@ -125,11 +119,7 @@ class AsyncStructuredLogger:
                 # Initialize tqdm on first call (lazy init to avoid early printing)
                 if self.train_pbar is None:
                     # Simple bar format with ANSI colors - we'll add epoch and metrics manually
-                    self.train_bar_format = (
-                        "{bar} "
-                        "\033[33m{percentage:3.0f}%\033[0m │ "
-                        "\033[37m{n}/{total}\033[0m"
-                    )
+                    self.train_bar_format = "{bar} \033[33m{percentage:3.0f}%\033[0m │ \033[37m{n}/{total}\033[0m"
                     self.train_pbar = tqdm(
                         total=data["steps_per_epoch"],
                         bar_format=self.train_bar_format,

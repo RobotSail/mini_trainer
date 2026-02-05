@@ -5,20 +5,21 @@ Tests gradient stepping, batch metrics, model saving, distributed setup,
 and other critical training loop components.
 """
 
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import tempfile
-import torch
+from collections import defaultdict
+from unittest.mock import MagicMock, mock_open, patch
+
 import numpy as np
 import pytest
-from unittest.mock import MagicMock, patch, mock_open
-from collections import defaultdict
+import torch
 
-from mini_trainer.train import take_gradient_step, save_model
 from mini_trainer.batch_metrics import BatchMetrics
+from mini_trainer.train import save_model, take_gradient_step
 from mini_trainer.utils import (
     patch_target_module,
 )
@@ -56,9 +57,7 @@ class TestTakeGradientStep:
         return scheduler
 
     @patch("mini_trainer.train.torch.nn.utils.clip_grad_norm_")
-    def test_gradient_step_basic(
-        self, mock_clip, mock_model, mock_optimizer, mock_scheduler
-    ):
+    def test_gradient_step_basic(self, mock_clip, mock_model, mock_optimizer, mock_scheduler):
         """Test basic gradient step execution."""
         mock_clip.return_value = torch.tensor(2.5)
 
@@ -76,9 +75,7 @@ class TestTakeGradientStep:
         assert grad_norm.item() == 2.5
 
     @patch("mini_trainer.train.torch.nn.utils.clip_grad_norm_")
-    def test_gradient_step_order(
-        self, mock_clip, mock_model, mock_optimizer, mock_scheduler
-    ):
+    def test_gradient_step_order(self, mock_clip, mock_model, mock_optimizer, mock_scheduler):
         """Test that operations happen in correct order."""
         mock_clip.return_value = torch.tensor(1.0)
 
@@ -98,9 +95,7 @@ class TestTakeGradientStep:
         assert call_order == ["clip", "opt_step", "sched_step", "zero_grad"]
 
     @patch("mini_trainer.train.torch.nn.utils.clip_grad_norm_")
-    def test_gradient_step_high_grad_norm(
-        self, mock_clip, mock_model, mock_optimizer, mock_scheduler
-    ):
+    def test_gradient_step_high_grad_norm(self, mock_clip, mock_model, mock_optimizer, mock_scheduler):
         """Test handling of high gradient norm."""
         mock_clip.return_value = torch.tensor(100.0)  # Very high grad norm
 
@@ -203,18 +198,14 @@ class TestBatchMetrics:
         metrics = BatchMetrics()
 
         # Test with numeric values
-        metrics.accumulate_minibatch_metrics(
-            custom_metric_1=42, custom_metric_2=3.14, another_metric=100
-        )
+        metrics.accumulate_minibatch_metrics(custom_metric_1=42, custom_metric_2=3.14, another_metric=100)
 
         assert metrics.minibatch_metrics["custom_metric_1"] == 42
         assert metrics.minibatch_metrics["custom_metric_2"] == 3.14
         assert metrics.minibatch_metrics["another_metric"] == 100
 
         # Test accumulation
-        metrics.accumulate_minibatch_metrics(
-            custom_metric_1=8, custom_metric_2=0.86, another_metric=50
-        )
+        metrics.accumulate_minibatch_metrics(custom_metric_1=8, custom_metric_2=0.86, another_metric=50)
 
         assert metrics.minibatch_metrics["custom_metric_1"] == 50
         assert abs(metrics.minibatch_metrics["custom_metric_2"] - 4.0) < 1e-6
@@ -231,9 +222,7 @@ class TestSaveModel:
         model.module = MagicMock()
         model.module.config = MagicMock()
         model.module.config.to_json_file = MagicMock()
-        model.module.config.torch_dtype = (
-            torch.bfloat16
-        )  # Set a proper dtype instead of MagicMock
+        model.module.config.torch_dtype = torch.bfloat16  # Set a proper dtype instead of MagicMock
         model.module.prepare_state_dict_for_save = MagicMock(side_effect=lambda x: x)
         return model
 
@@ -271,9 +260,7 @@ class TestSaveModel:
         mock_get_state_dict.return_value = state_dict
 
         mock_split_result = MagicMock()
-        mock_split_result.filename_to_tensors = {
-            "model.safetensors": ["layer1.weight", "layer2.weight"]
-        }
+        mock_split_result.filename_to_tensors = {"model.safetensors": ["layer1.weight", "layer2.weight"]}
         mock_split_result.is_sharded = False
         mock_split_result.metadata = {}
         mock_split_result.tensor_to_filename = {}
@@ -393,9 +380,7 @@ class TestSaveModel:
 
         # Should save index file for sharded model
         mock_file_open.assert_called()
-        written_content = "".join(
-            call.args[0] for call in mock_file_open().write.call_args_list
-        )
+        written_content = "".join(call.args[0] for call in mock_file_open().write.call_args_list)
         assert "metadata" in written_content
         assert "weight_map" in written_content
 
@@ -475,9 +460,7 @@ class TestTrainingIntegration:
         metrics = BatchMetrics()
 
         # Simulate minibatch processing
-        metrics.accumulate_minibatch_metrics(
-            num_samples=4, loss=2.5, num_loss_counted_tokens=200
-        )
+        metrics.accumulate_minibatch_metrics(num_samples=4, loss=2.5, num_loss_counted_tokens=200)
 
         # Take gradient step
         with patch("mini_trainer.train.torch.nn.utils.clip_grad_norm_") as mock_clip:
