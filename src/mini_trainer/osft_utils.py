@@ -315,6 +315,18 @@ MODEL_CONFIGS = {
             # "experts.down_proj",
         ]
     },
+    "qwen3_5": {
+        "patterns": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+            "self_attn.o_proj",
+            "linear_attn.out_proj",
+            "mlp.gate_proj",
+            "mlp.down_proj",
+            "mlp.up_proj",
+        ]
+    },
     "default": {
         "patterns": [
             "self_attn.q_proj",
@@ -346,8 +358,8 @@ MODEL_NAME_MAPPINGS = {
     "mistral": "mistral",
     "granite": "granite",
     "gpt2": "gpt2",
-    # Easy to add more mappings
-    # "phi": "phi",
+    "qwen3_5": "qwen3_5",
+    "qwen3.5": "qwen3_5",
 }
 
 

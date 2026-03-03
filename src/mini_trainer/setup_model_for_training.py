@@ -896,11 +896,25 @@ def setup_model(
         except ImportError:
             log_rank_0("⚠️ GPT-OSS model detected but Mxfp4Config not available - using default config")
 
+    # Check if model uses M-RoPE (multimodal rotary position embeddings).
+    # Models with M-RoPE (e.g. Qwen3.5) pass 3D position_ids through kwargs which
+    # causes Flash Attention 2's _is_packed_sequence() to misinterpret them as packed
+    # sequences, leading to incorrect cu_seqlens computation and CUDA illegal memory
+    # access. Force SDPA for these models.
+    _text_config = getattr(model_config, "text_config", model_config)
+    _rope_params = getattr(_text_config, "rope_parameters", {}) or {}
+    _uses_mrope = "mrope_section" in _rope_params
+
     # Check if flash_attn is available and set appropriate attention implementation
     try:
         import flash_attn as _  # noqa: F401
 
-        if is_gpt_oss:
+        if _uses_mrope:
+            base_model_args["attn_implementation"] = "sdpa"
+            log_rank_0(
+                f"Using SDPA for {model_name_or_path} (M-RoPE model incompatible with Flash Attention 2 varlen path)"
+            )
+        elif is_gpt_oss:
             base_model_args["attn_implementation"] = "kernels-community/vllm-flash-attn3"
             log_rank_0("Set attention implementation to vllm-flash-attn3 for GPT-OSS")
         else:
@@ -1080,6 +1094,7 @@ def setup_model(
         "Qwen2ForCausalLM",
         "Phi3ForCausalLM",  # covers phi3 and phi4
         "Qwen3ForCausalLM",
+        "Qwen3_5ForCausalLM",
     ]:
         log_rank_0(
             f"\033[38;2;255;255;0mWarning: Model class name: {class_name} is not in the list of supported models.\033[0m",
