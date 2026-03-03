@@ -146,9 +146,16 @@ def get_model_class_from_config(model_path):
     mapping = MODEL_FOR_CAUSAL_LM_MAPPING
 
     config_class = config.__class__
-    if config_class not in mapping:
-        raise ValueError(f"Model class {config_class} not found in mapping {mapping}")
-    return mapping[config_class]
+    if config_class in mapping:
+        return mapping[config_class]
+
+    # Fallback: for VLM models that wrap a CausalLM text backbone
+    # (e.g. Mistral3Config wrapping Ministral3Config), check text_config
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None and text_config.__class__ in mapping:
+        return mapping[text_config.__class__]
+
+    raise ValueError(f"Model class {config_class} not found in mapping {mapping}")
 
 
 def destroy_distributed_environment():
