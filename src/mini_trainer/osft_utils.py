@@ -940,6 +940,10 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
     class ModelWithOSFT(base_cls):
         osft_config: dict[str, int]
 
+        @classmethod
+        def _can_set_experts_implementation(cls):
+            return base_cls._can_set_experts_implementation()
+
         def __init__(
             self,
             config,
