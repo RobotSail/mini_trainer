@@ -674,7 +674,7 @@ def get_model_save_dtype(save_dtype: str | torch.dtype | None, model_name_or_pat
         return original_dtype
 
     # by now we know that we are going to use a custom data type, so we just validate
-    if not isinstance(save_dtype, (str, torch.dtype)):
+    if not isinstance(save_dtype, str | torch.dtype):
         raise ValueError(f"error: could not recognize '{save_dtype}' as a supported dtype for saving model checkpoints")
 
     # convert dtype to a str

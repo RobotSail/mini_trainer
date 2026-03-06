@@ -7,8 +7,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from mini_trainer.osft_utils import (create_osft_model_class, create_svd_dict,
-                                     reconstruct_weight_matrix)
+from mini_trainer.osft_utils import create_osft_model_class, create_svd_dict, reconstruct_weight_matrix
 from mini_trainer.setup_model_for_training import setup_model
 
 

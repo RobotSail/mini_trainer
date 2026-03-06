@@ -19,9 +19,14 @@ import pytest
 import torch
 from torch.utils.data import DataLoader
 
-from mini_trainer.sampler import (EpochSampler, JsonlDataset,
-                                  MaxTokensPerRankCollator, get_data_loader,
-                                  mb_collate_fn, reset_minibatches)
+from mini_trainer.sampler import (
+    EpochSampler,
+    JsonlDataset,
+    MaxTokensPerRankCollator,
+    get_data_loader,
+    mb_collate_fn,
+    reset_minibatches,
+)
 
 
 class TestJsonlDataset:

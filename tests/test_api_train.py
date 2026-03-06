@@ -9,8 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mini_trainer.api_train import StreamablePopen, run_training
-from mini_trainer.training_types import (TorchrunArgs, TrainingArgs,
-                                         TrainingMode)
+from mini_trainer.training_types import TorchrunArgs, TrainingArgs, TrainingMode
 
 
 class TestDataclasses:
