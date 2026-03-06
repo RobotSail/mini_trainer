@@ -39,7 +39,8 @@ from mini_trainer.utils import (
 )
 from mini_trainer.vlm_utils import (
     extract_causal_lm_from_vlm,
-    has_mrope,
+    needs_sdpa,
+    has_timm_vision_tower,
     is_vlm_for_direct_loading,
     is_vlm_with_causal_lm,
     load_vlm_for_text_training,
@@ -952,21 +953,19 @@ def setup_model(
         except ImportError:
             log_rank_0("⚠️ GPT-OSS model detected but Mxfp4Config not available - using default config")
 
-    # Check if model uses M-RoPE (multimodal rotary position embeddings).
-    # Models with M-RoPE (e.g. Qwen3.5) pass 3D position_ids through kwargs which
-    # causes Flash Attention 2's _is_packed_sequence() to misinterpret them as packed
-    # sequences, leading to incorrect cu_seqlens computation and CUDA illegal memory
-    # access. Force SDPA for these models.
-    _uses_mrope = has_mrope(model_config)
+    # Check if model requires SDPA instead of Flash Attention 2.
+    # This covers M-RoPE models (3D position_ids) and models with timm vision
+    # towers (TimmWrapperModel rejects flash_attention_2).
+    _needs_sdpa = needs_sdpa(model_config)
 
     # Check if flash_attn is available and set appropriate attention implementation
     try:
         import flash_attn as _  # noqa: F401
 
-        if _uses_mrope:
+        if _needs_sdpa:
             base_model_args["attn_implementation"] = "sdpa"
             log_rank_0(
-                f"Using SDPA for {model_name_or_path} (M-RoPE model incompatible with Flash Attention 2 varlen path)"
+                f"Using SDPA for {model_name_or_path} (model incompatible with Flash Attention 2)"
             )
         elif is_gpt_oss:
             # vllm-flash-attn3 requires Hopper (SM 9.0+) GPUs;
@@ -989,6 +988,20 @@ def setup_model(
             base_model_args["attn_implementation"] = "sdpa"
         else:
             raise e
+
+    # For models with timm vision towers: set vision config to eager
+    # while keeping the text model's attention implementation.
+    # timm's TimmWrapperModel rejects both FA2 and SDPA.
+    if has_timm_vision_tower(model_config):
+        attn_impl = base_model_args.get("attn_implementation", "flash_attention_2")
+        base_model_args["attn_implementation"] = {
+            "text_config": attn_impl,
+            "vision_config": "eager",
+        }
+        log_rank_0(
+            f"Model has timm vision tower — using eager attention for vision, "
+            f"{attn_impl} for text model."
+        )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
 
@@ -1178,6 +1191,7 @@ def setup_model(
         "Qwen3ForCausalLM",
         "Qwen3_5ForCausalLM",
         "Qwen3VLForConditionalGeneration",  # direct VLM loading (no CausalLM class)
+        "Gemma3nForConditionalGeneration",  # dual-registered VLM loaded as CausalLM
     ]:
         log_rank_0(
             f"\033[38;2;255;255;0mWarning: Model class name: {class_name} is not in the list of supported models.\033[0m",

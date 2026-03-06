@@ -211,3 +211,66 @@ def has_mrope(config) -> bool:
             if isinstance(rope_dict, dict) and "mrope_section" in rope_dict:
                 return True
     return False
+
+
+def needs_sdpa(config) -> bool:
+    """Check if a model requires SDPA instead of Flash Attention 2.
+
+    Returns True when the model has characteristics incompatible with
+    Flash Attention 2:
+    - M-RoPE (multimodal rotary position embeddings) producing 3D position_ids
+    - A timm-based vision tower (TimmWrapperModel rejects flash_attention_2)
+
+    Args:
+        config: An already-loaded HuggingFace model config object.
+
+    Returns:
+        True if the model should use SDPA attention.
+    """
+    if has_mrope(config):
+        return True
+
+    vision_config = getattr(config, "vision_config", None)
+    if vision_config is not None:
+        model_type = getattr(vision_config, "model_type", "")
+        if model_type in ("timm_wrapper", "gemma3n_vision"):
+            return True
+        try:
+            from transformers.models.auto import MODEL_MAPPING
+            if vision_config.__class__ in MODEL_MAPPING:
+                vision_cls = MODEL_MAPPING[vision_config.__class__]
+                if "Timm" in vision_cls.__name__:
+                    return True
+        except Exception:
+            pass
+
+    return False
+
+
+def has_timm_vision_tower(config) -> bool:
+    """Check if a model config has a timm-based vision tower.
+
+    timm vision towers only support ``eager`` attention. The vision config
+    must be patched to use eager while the text model can use FA2/SDPA.
+
+    Args:
+        config: An already-loaded HuggingFace model config object.
+
+    Returns:
+        True if the model has a timm-based vision tower.
+    """
+    vision_config = getattr(config, "vision_config", None)
+    if vision_config is None:
+        return False
+    model_type = getattr(vision_config, "model_type", "")
+    if model_type in ("timm_wrapper", "gemma3n_vision"):
+        return True
+    try:
+        from transformers.models.auto import MODEL_MAPPING
+        if vision_config.__class__ in MODEL_MAPPING:
+            vision_cls = MODEL_MAPPING[vision_config.__class__]
+            if "Timm" in vision_cls.__name__:
+                return True
+    except Exception:
+        pass
+    return False
