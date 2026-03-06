@@ -7,13 +7,8 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    checkpoint_wrapper as ptd_checkpoint_wrapper,
-)
-from torch.distributed.checkpoint.state_dict import (
-    StateDictOptions,
-    set_model_state_dict,
-)
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper as ptd_checkpoint_wrapper
+from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from transformers import AutoConfig, AutoTokenizer, Mxfp4Config
@@ -26,17 +21,8 @@ from mini_trainer.fsdp2_lazy_init import (
     set_fsdp2_lazy_init_mode,
 )
 from mini_trainer.gpt_oss_utils import freeze_router_params, is_gpt_oss_model
-from mini_trainer.osft_utils import (
-    OSFTModel,
-    _build_osft_kwargs,
-    _set_osft_dtypes,
-    create_osft_model_class,
-)
-from mini_trainer.utils import (
-    get_model_class_from_config,
-    log_rank_0,
-    patch_target_module,
-)
+from mini_trainer.osft_utils import OSFTModel, _build_osft_kwargs, _set_osft_dtypes, create_osft_model_class
+from mini_trainer.utils import get_model_class_from_config, log_rank_0, patch_target_module
 from mini_trainer.vlm_utils import (
     extract_causal_lm_from_vlm,
     has_timm_vision_tower,
@@ -74,10 +60,7 @@ def _apply_liger_kernels_if_requested(use_liger_kernels, model_config, base_mode
         return
 
     try:
-        from liger_kernel.transformers.monkey_patch import (
-            MODEL_TYPE_TO_APPLY_LIGER_FN,
-            _apply_liger_kernel,
-        )
+        from liger_kernel.transformers.monkey_patch import MODEL_TYPE_TO_APPLY_LIGER_FN, _apply_liger_kernel
     except ImportError as e:
         raise ImportError(
             "Tried to use liger kernels for OSFT, but they are not installed. "
@@ -924,10 +907,7 @@ def setup_model(
             import causal_conv1d
             import mamba_ssm
             from mamba_ssm.ops.triton.selective_state_update import selective_state_update
-            from mamba_ssm.ops.triton.ssd_combined import (
-                mamba_chunk_scan_combined,
-                mamba_split_conv1d_scan_combined,
-            )
+            from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined, mamba_split_conv1d_scan_combined
             from transformers.integrations.hub_kernels import _KERNEL_MODULE_MAPPING
 
             mamba_ssm.selective_state_update = selective_state_update

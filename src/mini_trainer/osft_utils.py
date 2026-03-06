@@ -10,18 +10,11 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from torch.distributed.checkpoint.state_dict import (
-    StateDictOptions,
-    set_model_state_dict,
-)
+from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from tqdm import tqdm
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
 
-from mini_trainer.fsdp2_lazy_init import (
-    FSDP2_LAZY_INIT_OSFT,
-    get_fsdp2_lazy_init_mode,
-    set_fsdp2_lazy_init_mode,
-)
+from mini_trainer.fsdp2_lazy_init import FSDP2_LAZY_INIT_OSFT, get_fsdp2_lazy_init_mode, set_fsdp2_lazy_init_mode
 from mini_trainer.gpt_oss_utils import is_gpt_oss_model
 from mini_trainer.utils import get_control_process_group, log_rank_0
 from mini_trainer.vlm_utils import extract_causal_lm_from_vlm, is_vlm_with_causal_lm
@@ -788,7 +781,10 @@ def _load_model_memory_efficient(
 
             if is_vlm_with_causal_lm(_pre_config):
                 log_rank_0("🔄 VLM detected – extracting CausalLM text backbone for OSFT")
-                base_model = extract_causal_lm_from_vlm(pretrained_model_name_or_path, final_base_kwargs)
+                # Filter out pretrained_model_name_or_path to avoid duplicate
+                # argument since it's passed positionally to extract_causal_lm_from_vlm
+                vlm_kwargs = {k: v for k, v in final_base_kwargs.items() if k != "pretrained_model_name_or_path"}
+                base_model = extract_causal_lm_from_vlm(pretrained_model_name_or_path, vlm_kwargs)
             else:
                 base_model = base_model_class.from_pretrained(
                     pretrained_model_name_or_path,
@@ -913,7 +909,9 @@ def create_osft_model_class(base_cls) -> type[OSFTModel]:
 
         @classmethod
         def _can_set_experts_implementation(cls):
-            return base_cls._can_set_experts_implementation()
+            if hasattr(base_cls, "_can_set_experts_implementation"):
+                return base_cls._can_set_experts_implementation()
+            return False
 
         def __init__(
             self,

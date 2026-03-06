@@ -10,10 +10,8 @@ from unittest.mock import patch
 
 import pytest
 
-from mini_trainer.utils import (
-    check_distributed_is_synchronized,
-    init_distributed_environment,
-)
+from mini_trainer.utils import (check_distributed_is_synchronized,
+                                init_distributed_environment)
 
 
 @pytest.mark.gpu

@@ -19,24 +19,18 @@ import torch.nn as nn
 
 import mini_trainer.osft_utils as osft_module
 from mini_trainer.api_train import run_training
-from mini_trainer.osft_utils import (
-    MODEL_CONFIGS,
-    _get_model_patterns_from_name,
-    _load_model_memory_efficient,
-    auto_generate_target_osft_config,
-    create_osft_model_class,
-    get_model_config,
-    is_osft_param,
-    optim_wrapper,
-)
+from mini_trainer.osft_utils import (MODEL_CONFIGS,
+                                     _get_model_patterns_from_name,
+                                     _load_model_memory_efficient,
+                                     auto_generate_target_osft_config,
+                                     create_osft_model_class, get_model_config,
+                                     is_osft_param, optim_wrapper)
 from mini_trainer.setup_model_for_training import setup_model
 from mini_trainer.training_types import TorchrunArgs, TrainingArgs
-from tests.test_utils.orthogonality import (
-    OrthogonalityTracker,
-    check_gradient_orthogonality,
-    check_parameter_orthogonality,
-    compute_angle_differences,
-)
+from tests.test_utils.orthogonality import (OrthogonalityTracker,
+                                            check_gradient_orthogonality,
+                                            check_parameter_orthogonality,
+                                            compute_angle_differences)
 
 
 class TestOSFTAPIValidation:

@@ -7,7 +7,8 @@ import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer, LlamaConfig, LlamaForCausalLM
 
-from mini_trainer.setup_model_for_training import setup_model, setup_training_components
+from mini_trainer.setup_model_for_training import (setup_model,
+                                                   setup_training_components)
 from mini_trainer.utils import patch_target_module
 
 
@@ -85,9 +86,8 @@ class TestMixedPrecisionDtypes:
             tokenizer.save_pretrained(model_path)
 
             # Patch loss function for none reduction
-            from mini_trainer.none_reduction_losses import (
-                hf_fixed_cross_entropy_none_reduction,
-            )
+            from mini_trainer.none_reduction_losses import \
+                hf_fixed_cross_entropy_none_reduction
 
             patch_target_module(
                 "transformers.loss.loss_utils.fixed_cross_entropy",

@@ -20,9 +20,7 @@ import torch
 
 from mini_trainer.batch_metrics import BatchMetrics
 from mini_trainer.train import save_model, take_gradient_step
-from mini_trainer.utils import (
-    patch_target_module,
-)
+from mini_trainer.utils import patch_target_module
 
 
 class TestTakeGradientStep:

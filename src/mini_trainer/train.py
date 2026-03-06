@@ -8,9 +8,7 @@ from typing import Annotated, Literal
 
 import torch
 import torch.distributed as dist
-from torch.distributed._tensor.api import (
-    DTensor as _DTensor,
-)  # works if DTensor is available
+from torch.distributed._tensor.api import DTensor as _DTensor  # works if DTensor is available
 from tqdm import tqdm
 from typer import Option, Typer
 
@@ -119,10 +117,7 @@ def save_model(
     from safetensors.torch import save_file
     from transformers import AutoTokenizer
 
-    from mini_trainer.gpt_oss_utils import (
-        convert_dequantized_to_quantized_format_correct,
-        is_gpt_oss_model,
-    )
+    from mini_trainer.gpt_oss_utils import convert_dequantized_to_quantized_format_correct, is_gpt_oss_model
 
     # Only on rank 0
     suffix_text = f" ({suffix})" if suffix else ""
@@ -145,10 +140,7 @@ def save_model(
     # processes weights on the GPU device in batches before de-allocating the memory being consumed
     # Users may also face issues here if they lack the CPU memory required to store the original
     # FP32 state dict on CPU.
-    from torch.distributed.checkpoint.state_dict import (
-        StateDictOptions,
-        get_model_state_dict,
-    )
+    from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 
     state_dict = get_model_state_dict(
         fsdp_model,

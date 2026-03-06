@@ -210,8 +210,13 @@ def has_mrope(config) -> bool:
         if cfg is None:
             continue
         for attr in ("rope_scaling", "rope_parameters"):
-            rope_dict = getattr(cfg, attr, None)
-            if isinstance(rope_dict, dict) and "mrope_section" in rope_dict:
+            rope_obj = getattr(cfg, attr, None)
+            if rope_obj is None:
+                continue
+            # Handle both dict and RopeParameters objects
+            if isinstance(rope_obj, dict) and "mrope_section" in rope_obj:
+                return True
+            if not isinstance(rope_obj, dict) and hasattr(rope_obj, "mrope_section"):
                 return True
     return False
 

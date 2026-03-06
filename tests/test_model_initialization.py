@@ -17,12 +17,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from mini_trainer.setup_model_for_training import (
-    align_model_and_tokenizer,
-    setup_model,
-    setup_training_components,
-    wrap_fsdp2,
-)
+from mini_trainer.setup_model_for_training import (align_model_and_tokenizer,
+                                                   setup_model,
+                                                   setup_training_components,
+                                                   wrap_fsdp2)
 
 
 class TestAlignModelAndTokenizer:
