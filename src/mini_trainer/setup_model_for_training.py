@@ -456,9 +456,7 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     # CheckpointError from tensor count mismatches.
     is_vlm_direct = hasattr(model, "model") and hasattr(model.model, "language_model")
     if is_vlm_direct:
-        log_rank_0(
-            f"🔄 [Phase 2] Skipping activation checkpointing for VLM ({len(layers)} blocks)"
-        )
+        log_rank_0(f"🔄 [Phase 2] Skipping activation checkpointing for VLM ({len(layers)} blocks)")
     else:
         log_rank_0(f"🔄 [Phase 2] Applying activation checkpointing to {len(layers)} blocks")
         for idx, block in enumerate(layers):
