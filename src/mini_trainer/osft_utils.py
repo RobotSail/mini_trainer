@@ -775,11 +775,17 @@ def _load_model_memory_efficient(
             log_rank_0(f"📥 Loading base model to CPU in {load_dtype}...")
 
             # Check if this is a VLM wrapping a CausalLM text backbone
-            from transformers import AutoConfig
+            _is_vlm = False
+            try:
+                from transformers import AutoConfig
 
-            _pre_config = AutoConfig.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
+                _pre_config = AutoConfig.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
+                _is_vlm = is_vlm_with_causal_lm(_pre_config)
+            except (OSError, ValueError):
+                # Config loading can fail for local-only or mock paths
+                pass
 
-            if is_vlm_with_causal_lm(_pre_config):
+            if _is_vlm:
                 log_rank_0("🔄 VLM detected – extracting CausalLM text backbone for OSFT")
                 # Filter out pretrained_model_name_or_path to avoid duplicate
                 # argument since it's passed positionally to extract_causal_lm_from_vlm
