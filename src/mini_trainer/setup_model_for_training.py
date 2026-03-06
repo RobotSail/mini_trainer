@@ -900,8 +900,10 @@ def setup_model(
     model_config = AutoConfig.from_pretrained(model_name_or_path)
     is_gpt_oss = is_gpt_oss_model(model_config)
 
-    # The Hub kernel for mamba-ssm is incompatible with causal_conv1d v1.6.0
-    # (different C API). Use local packages instead.
+    # Pre-populate the transformers Hub kernel cache with locally installed
+    # mamba_ssm and causal_conv1d packages. The Hub kernel versions may be
+    # compiled against a different PyTorch/CUDA build, causing runtime errors.
+    # Using local packages ensures ABI compatibility.
     if getattr(model_config, "model_type", None) == "granitemoehybrid":
         try:
             import causal_conv1d
@@ -917,8 +919,8 @@ def setup_model(
             _KERNEL_MODULE_MAPPING["causal-conv1d"] = causal_conv1d
             _KERNEL_MODULE_MAPPING["mamba-ssm"] = mamba_ssm
             log_rank_0("Using local mamba_ssm/causal_conv1d instead of Hub kernels")
-        except ImportError:
-            log_rank_0("mamba_ssm or causal_conv1d not installed; GraniteMoeHybrid will use slow (torch) path")
+        except (ImportError, AttributeError) as e:
+            log_rank_0(f"Could not patch mamba kernels ({e}); GraniteMoeHybrid may use Hub kernels")
 
     # Set up quantization config for GPT-OSS models
     if is_gpt_oss:
