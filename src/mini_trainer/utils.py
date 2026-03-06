@@ -160,6 +160,13 @@ def get_model_class_from_config(model_path):
     if text_config is not None and text_config.__class__ in mapping:
         return mapping[text_config.__class__]
 
+    # Fallback: for VLMs with no CausalLM class at all (e.g. Qwen3-VL-2B),
+    # check the ImageTextToText mapping so they can be loaded directly.
+    from transformers.models.auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING
+
+    if config_class in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING:
+        return MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING[config_class]
+
     raise ValueError(f"Model class {config_class} not found in mapping {mapping}")
 
 

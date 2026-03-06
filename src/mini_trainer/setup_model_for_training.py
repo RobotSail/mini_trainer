@@ -40,7 +40,9 @@ from mini_trainer.utils import (
 from mini_trainer.vlm_utils import (
     extract_causal_lm_from_vlm,
     has_mrope,
+    is_vlm_for_direct_loading,
     is_vlm_with_causal_lm,
+    load_vlm_for_text_training,
 )
 
 
@@ -443,8 +445,13 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
             print(f"WARNING: Failed to disable HuggingFace cache for model {model.__class__.__name__}: {e}")
 
     # Find the transformer block container
-    # Support common architectures: Llama (model.layers), GPT-2 (transformer.h)
-    if hasattr(model, "model") and hasattr(model.model, "layers"):
+    # Support common architectures:
+    #   - VLM direct load (model.model.language_model.layers) e.g. Qwen3-VL
+    #   - Llama-style (model.model.layers)
+    #   - GPT-2-style (transformer.h)
+    if hasattr(model, "model") and hasattr(model.model, "language_model") and hasattr(model.model.language_model, "layers"):
+        layers = model.model.language_model.layers
+    elif hasattr(model, "model") and hasattr(model.model, "layers"):
         layers = model.model.layers
     elif hasattr(model, "transformer") and hasattr(model.transformer, "h"):
         layers = model.transformer.h
@@ -822,9 +829,10 @@ def setup_sft_model_distributed(
     state_dict = None
     buffer_dict = None
 
-    # Check if this is a VLM wrapping a CausalLM text backbone
+    # Check if this is a VLM wrapping a CausalLM text backbone, or a direct VLM
     _model_config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
     is_vlm = is_vlm_with_causal_lm(_model_config)
+    is_direct_vlm = is_vlm_for_direct_loading(_model_config)
 
     if dist.get_rank() == 0:
         log_rank_0("rank 0: loading model to CPU")
@@ -833,6 +841,9 @@ def setup_sft_model_distributed(
                 if is_vlm:
                     # VLM model: load full VLM and extract CausalLM text backbone
                     cpu_model = extract_causal_lm_from_vlm(model_name_or_path, base_model_args)
+                elif is_direct_vlm:
+                    # VLM with no CausalLM class: load directly for text-only training
+                    cpu_model = load_vlm_for_text_training(model_name_or_path, base_model_args)
                 else:
                     # Standard CausalLM: load directly
                     cpu_model = ModelClass.from_pretrained(**base_model_args)
@@ -858,8 +869,14 @@ def setup_sft_model_distributed(
 
     # All ranks: Create model on meta device
     log_rank_0("creating model on meta device")
-    with torch.device("meta"):
-        model = ModelClass.from_config(config)
+    if is_direct_vlm:
+        from transformers import AutoModelForImageTextToText
+
+        with torch.device("meta"):
+            model = AutoModelForImageTextToText.from_config(config)
+    else:
+        with torch.device("meta"):
+            model = ModelClass.from_config(config)
 
     # Align model with tokenizer
     model = align_model_and_tokenizer(model, tokenizer)
@@ -1024,12 +1041,26 @@ def setup_model(
             # non-distributed path: direct loading
             if is_vlm_with_causal_lm(model_config):
                 model = extract_causal_lm_from_vlm(model_name_or_path, base_model_args)
+            elif is_vlm_for_direct_loading(model_config):
+                model = load_vlm_for_text_training(model_name_or_path, base_model_args)
             else:
                 model = ModelClass.from_pretrained(**base_model_args)
             return align_model_and_tokenizer(model, tokenizer)
 
     def load_osft_model():
         """Load a model with OSFT (Orthogonal Subspace Fine-Tuning) support."""
+        # Direct VLMs (no CausalLM class) are not supported for OSFT yet.
+        # OSFT wraps the base model class and modifies internal weights, which
+        # requires a CausalLM-compatible architecture. Direct VLMs have a
+        # different layer structure (model.model.language_model.layers) that
+        # would need significant OSFT adapter changes.
+        if is_vlm_for_direct_loading(model_config):
+            raise ValueError(
+                f"OSFT is not supported for direct VLM models (e.g. {model_name_or_path}). "
+                "This model has no standalone CausalLM class and cannot be wrapped by OSFT. "
+                "Use SFT training instead (osft=False)."
+            )
+
         log_rank_0("loading OSFT model")
         # If osft_output_dtype is not specified, use train_dtype for consistency
         effective_osft_output_dtype = osft_output_dtype if osft_output_dtype is not None else train_dtype
@@ -1146,6 +1177,7 @@ def setup_model(
         "Phi3ForCausalLM",  # covers phi3 and phi4
         "Qwen3ForCausalLM",
         "Qwen3_5ForCausalLM",
+        "Qwen3VLForConditionalGeneration",  # direct VLM loading (no CausalLM class)
     ]:
         log_rank_0(
             f"\033[38;2;255;255;0mWarning: Model class name: {class_name} is not in the list of supported models.\033[0m",
