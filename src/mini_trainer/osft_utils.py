@@ -24,6 +24,7 @@ from mini_trainer.fsdp2_lazy_init import (
 )
 from mini_trainer.gpt_oss_utils import is_gpt_oss_model
 from mini_trainer.utils import get_control_process_group, log_rank_0
+from mini_trainer.vlm_utils import extract_causal_lm_from_vlm, is_vlm_with_causal_lm
 
 # Memory optimization constants
 OSFT_CACHE_CLEAR_INTERVAL = int(
@@ -782,42 +783,16 @@ def _load_model_memory_efficient(
 
             # Check if this is a VLM wrapping a CausalLM text backbone
             from transformers import AutoConfig
-            from transformers.models.auto import MODEL_FOR_CAUSAL_LM_MAPPING
 
             _pre_config = AutoConfig.from_pretrained(
                 pretrained_model_name_or_path, trust_remote_code=True
             )
-            _text_cfg = getattr(_pre_config, "text_config", None)
-            _is_vlm = (
-                _text_cfg is not None
-                and _text_cfg.__class__ in MODEL_FOR_CAUSAL_LM_MAPPING
-                and _pre_config.__class__ not in MODEL_FOR_CAUSAL_LM_MAPPING
-            )
 
-            if _is_vlm:
-                # VLM model: load full VLM and extract CausalLM text backbone
-                from transformers import AutoModelForImageTextToText
-
+            if is_vlm_with_causal_lm(_pre_config):
                 log_rank_0("🔄 VLM detected – extracting CausalLM text backbone for OSFT")
-                # Filter out None quantization_config to avoid interfering with
-                # the model's built-in quantization handling (e.g. FP8 auto-dequant)
-                vlm_kwargs = {
-                    k: v for k, v in final_base_kwargs.items()
-                    if not (k == "quantization_config" and v is None)
-                }
-                vlm = AutoModelForImageTextToText.from_pretrained(
-                    pretrained_model_name_or_path,
-                    *model_args,
-                    **vlm_kwargs,
+                base_model = extract_causal_lm_from_vlm(
+                    pretrained_model_name_or_path, final_base_kwargs
                 )
-                causal_lm_class = MODEL_FOR_CAUSAL_LM_MAPPING[_text_cfg.__class__]
-                base_model = causal_lm_class(_text_cfg)
-                base_model.model = vlm.model.language_model
-                base_model.lm_head = vlm.lm_head
-                del vlm
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                log_rank_0(f"   ✅ Extracted {causal_lm_class.__name__}")
             else:
                 base_model = base_model_class.from_pretrained(
                     pretrained_model_name_or_path,

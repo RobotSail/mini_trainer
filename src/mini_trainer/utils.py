@@ -139,7 +139,12 @@ def init_distributed_environment():
 
 
 def get_model_class_from_config(model_path):
-    """Get the actual model class (not just the name) from a pretrained path."""
+    """Get the actual model class (not just the name) from a pretrained path.
+
+    Note: vlm_utils.is_vlm_with_causal_lm() handles the broader VLM detection
+    (deciding *whether* to extract).  This function resolves the model CLASS
+    regardless of VLM status, falling back to text_config when needed.
+    """
     # get the model class from config
     # TODO: make the `trust_remote_code` setting configurable somehow
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)

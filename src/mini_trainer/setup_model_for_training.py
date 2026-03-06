@@ -32,81 +32,16 @@ from mini_trainer.osft_utils import (
     _set_osft_dtypes,
     create_osft_model_class,
 )
-from transformers.models.auto import MODEL_FOR_CAUSAL_LM_MAPPING
-
 from mini_trainer.utils import (
     get_model_class_from_config,
     log_rank_0,
     patch_target_module,
 )
-
-
-def _is_vlm_wrapping_causal_lm(config) -> bool:
-    """Check if a model config is a VLM config wrapping a CausalLM text backbone.
-
-    Some models (e.g. Ministral-3-3B) use a VLM architecture
-    (Mistral3ForConditionalGeneration) as a wrapper around a CausalLM text
-    model (Ministral3ForCausalLM).  The top-level config is NOT in the
-    MODEL_FOR_CAUSAL_LM_MAPPING but the nested text_config IS.
-    """
-    if config.__class__ in MODEL_FOR_CAUSAL_LM_MAPPING:
-        return False
-    text_config = getattr(config, "text_config", None)
-    return text_config is not None and text_config.__class__ in MODEL_FOR_CAUSAL_LM_MAPPING
-
-
-def _extract_causal_lm_from_vlm(model_path: str, load_kwargs: dict) -> torch.nn.Module:
-    """Load a VLM model and extract the CausalLM text backbone.
-
-    Loads the full VLM (e.g. Mistral3ForConditionalGeneration), then creates a
-    standalone CausalLM model (e.g. Ministral3ForCausalLM) by transferring the
-    language_model and lm_head weights.
-
-    Args:
-        model_path: HuggingFace model name or path.
-        load_kwargs: Keyword arguments forwarded to from_pretrained.
-
-    Returns:
-        A standalone CausalLM model.
-    """
-    from transformers import AutoModelForImageTextToText
-
-    log_rank_0(f"🔄 VLM detected – loading full VLM to extract CausalLM text backbone")
-    # Filter out None quantization_config to avoid interfering with
-    # the model's built-in quantization handling (e.g. FP8 auto-dequant)
-    vlm_kwargs = {
-        k: v for k, v in load_kwargs.items()
-        if not (k == "quantization_config" and v is None)
-    }
-    vlm = AutoModelForImageTextToText.from_pretrained(model_path, **vlm_kwargs)
-
-    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-    text_config = config.text_config
-    causal_lm_class = MODEL_FOR_CAUSAL_LM_MAPPING[text_config.__class__]
-
-    log_rank_0(f"   Extracting {causal_lm_class.__name__} from {type(vlm).__name__}")
-    text_model = causal_lm_class(text_config)
-
-    # Transfer weights: VLM stores the text backbone at model.language_model
-    if hasattr(vlm, "model") and hasattr(vlm.model, "language_model"):
-        text_model.model = vlm.model.language_model
-    else:
-        raise ValueError(
-            f"Cannot extract language model from {type(vlm).__name__}: "
-            f"expected vlm.model.language_model attribute"
-        )
-
-    if hasattr(vlm, "lm_head"):
-        text_model.lm_head = vlm.lm_head
-    else:
-        raise ValueError(f"Cannot extract lm_head from {type(vlm).__name__}")
-
-    del vlm
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    log_rank_0(f"   ✅ Extracted {causal_lm_class.__name__} successfully")
-    return text_model
+from mini_trainer.vlm_utils import (
+    extract_causal_lm_from_vlm,
+    has_mrope,
+    is_vlm_with_causal_lm,
+)
 
 
 def _distributed_initialized() -> bool:
@@ -889,7 +824,7 @@ def setup_sft_model_distributed(
 
     # Check if this is a VLM wrapping a CausalLM text backbone
     _model_config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
-    is_vlm = _is_vlm_wrapping_causal_lm(_model_config)
+    is_vlm = is_vlm_with_causal_lm(_model_config)
 
     if dist.get_rank() == 0:
         log_rank_0("rank 0: loading model to CPU")
@@ -897,7 +832,7 @@ def setup_sft_model_distributed(
             with torch.no_grad():
                 if is_vlm:
                     # VLM model: load full VLM and extract CausalLM text backbone
-                    cpu_model = _extract_causal_lm_from_vlm(model_name_or_path, base_model_args)
+                    cpu_model = extract_causal_lm_from_vlm(model_name_or_path, base_model_args)
                 else:
                     # Standard CausalLM: load directly
                     cpu_model = ModelClass.from_pretrained(**base_model_args)
@@ -1005,9 +940,7 @@ def setup_model(
     # causes Flash Attention 2's _is_packed_sequence() to misinterpret them as packed
     # sequences, leading to incorrect cu_seqlens computation and CUDA illegal memory
     # access. Force SDPA for these models.
-    _text_config = getattr(model_config, "text_config", model_config)
-    _rope_params = getattr(_text_config, "rope_parameters", {}) or {}
-    _uses_mrope = "mrope_section" in _rope_params
+    _uses_mrope = has_mrope(model_config)
 
     # Check if flash_attn is available and set appropriate attention implementation
     try:
@@ -1089,8 +1022,8 @@ def setup_model(
             )
         else:
             # non-distributed path: direct loading
-            if _is_vlm_wrapping_causal_lm(model_config):
-                model = _extract_causal_lm_from_vlm(model_name_or_path, base_model_args)
+            if is_vlm_with_causal_lm(model_config):
+                model = extract_causal_lm_from_vlm(model_name_or_path, base_model_args)
             else:
                 model = ModelClass.from_pretrained(**base_model_args)
             return align_model_and_tokenizer(model, tokenizer)
