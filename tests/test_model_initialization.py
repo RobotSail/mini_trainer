@@ -109,9 +109,9 @@ class TestWrapFSDP2:
         model.config = MagicMock()
         model.config.use_cache = True
 
-        # Mock transformer layers
+        # Mock transformer layers (standard CausalLM structure: model.model.layers)
         layers = [MagicMock() for _ in range(4)]
-        model.model = MagicMock()
+        model.model = MagicMock(spec=[])  # spec=[] prevents auto-creating attributes
         model.model.layers = layers
 
         return model
