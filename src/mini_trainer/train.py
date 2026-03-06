@@ -1239,7 +1239,7 @@ def main(
         batch_size=batch_size,
         max_tokens_per_gpu=max_tokens_per_gpu,
         seed=seed,
-        pad_token_id=model.config.pad_token_id,
+        pad_token_id=getattr(getattr(model.config, "text_config", model.config), "pad_token_id", None),
         validation_split=validation_split,
         pretraining_config=pretraining_config,
     )

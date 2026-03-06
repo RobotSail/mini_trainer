@@ -449,11 +449,21 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
             "This likely means we need to update the code to support this model."
         )
 
-    # Apply activation checkpointing to each block
-    log_rank_0(f"🔄 [Phase 2] Applying activation checkpointing to {len(layers)} blocks")
-    for idx, block in enumerate(layers):
-        # preserve_rng_state needs to be true so that the backward pass can be accurate
-        layers[idx] = ptd_checkpoint_wrapper(block, preserve_rng_state=True)
+    # Apply activation checkpointing to each block.
+    # VLM models (detected by language_model path) may have non-deterministic
+    # tensor counts during reentrant recomputation (e.g., M-RoPE), so we skip
+    # activation checkpointing for them. This uses more memory but avoids
+    # CheckpointError from tensor count mismatches.
+    is_vlm_direct = hasattr(model, "model") and hasattr(model.model, "language_model")
+    if is_vlm_direct:
+        log_rank_0(
+            f"🔄 [Phase 2] Skipping activation checkpointing for VLM ({len(layers)} blocks)"
+        )
+    else:
+        log_rank_0(f"🔄 [Phase 2] Applying activation checkpointing to {len(layers)} blocks")
+        for idx, block in enumerate(layers):
+            # preserve_rng_state needs to be true so that the backward pass can be accurate
+            layers[idx] = ptd_checkpoint_wrapper(block, preserve_rng_state=True)
 
     # Build 1D device mesh over all ranks
     world_size = dist.get_world_size()
@@ -577,12 +587,21 @@ def finalize_model_initialization(model: torch.nn.Module, context: ModelInitiali
     return model
 
 
+def _get_text_config(model):
+    """Get the text-relevant config, falling back to text_config for VLMs."""
+    config = model.config
+    if not hasattr(config, "vocab_size") and hasattr(config, "text_config"):
+        return config.text_config
+    return config
+
+
 def align_model_and_tokenizer(model, tokenizer):
     """
     Aligns the model's vocabulary and special tokens with the tokenizer.
     """
-    if len(tokenizer) > model.config.vocab_size:
-        print(f"WARNING: tokenizer has {len(tokenizer)} tokens but model has {model.config.vocab_size} vocab size")
+    text_config = _get_text_config(model)
+    if len(tokenizer) > text_config.vocab_size:
+        print(f"WARNING: tokenizer has {len(tokenizer)} tokens but model has {text_config.vocab_size} vocab size")
         model.resize_token_embeddings(
             int(8 * math.ceil(len(tokenizer) / 8.0))
         )  # make the vocab size multiple of 8 for sharding the embedding layer.
@@ -603,8 +622,8 @@ def align_model_and_tokenizer(model, tokenizer):
                 "Cannot proceed with training - please configure the tokenizer properly."
             )
 
-    # Step 2: Sync all special tokens from tokenizer to model.config
-    # This ensures model.config always reflects tokenizer's special tokens
+    # Step 2: Sync all special tokens from tokenizer to text_config
+    # This ensures the config always reflects tokenizer's special tokens
     special_tokens = {
         "pad": ("pad_token_id", "Syncing model pad token id"),
         "bos": ("bos_token_id", "Syncing model bos token id"),
@@ -612,13 +631,13 @@ def align_model_and_tokenizer(model, tokenizer):
     }
 
     for token_type, (token_attr, message) in special_tokens.items():
-        model_token = getattr(model.config, token_attr)
+        model_token = getattr(text_config, token_attr, None)
         tokenizer_token = getattr(tokenizer, token_attr)
 
-        # Always sync tokenizer -> model.config when tokenizer has a valid value
+        # Always sync tokenizer -> config when tokenizer has a valid value
         if tokenizer_token is not None and model_token != tokenizer_token:
             log_rank_0(f"{message}: {model_token} -> {tokenizer_token}")
-            setattr(model.config, token_attr, tokenizer_token)
+            setattr(text_config, token_attr, tokenizer_token)
 
     return model
 
@@ -1042,18 +1061,6 @@ def setup_model(
 
     def load_osft_model():
         """Load a model with OSFT (Orthogonal Subspace Fine-Tuning) support."""
-        # Direct VLMs (no CausalLM class) are not supported for OSFT yet.
-        # OSFT wraps the base model class and modifies internal weights, which
-        # requires a CausalLM-compatible architecture. Direct VLMs have a
-        # different layer structure (model.model.language_model.layers) that
-        # would need significant OSFT adapter changes.
-        if is_vlm_for_direct_loading(model_config):
-            raise ValueError(
-                f"OSFT is not supported for direct VLM models (e.g. {model_name_or_path}). "
-                "This model has no standalone CausalLM class and cannot be wrapped by OSFT. "
-                "Use SFT training instead (osft=False)."
-            )
-
         log_rank_0("loading OSFT model")
         # If osft_output_dtype is not specified, use train_dtype for consistency
         effective_osft_output_dtype = osft_output_dtype if osft_output_dtype is not None else train_dtype
