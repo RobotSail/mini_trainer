@@ -39,11 +39,11 @@ from mini_trainer.utils import (
 )
 from mini_trainer.vlm_utils import (
     extract_causal_lm_from_vlm,
-    needs_sdpa,
     has_timm_vision_tower,
     is_vlm_for_direct_loading,
     is_vlm_with_causal_lm,
     load_vlm_for_text_training,
+    needs_sdpa,
 )
 
 
@@ -450,7 +450,11 @@ def wrap_fsdp2(model: torch.nn.Module) -> torch.nn.Module:
     #   - VLM direct load (model.model.language_model.layers) e.g. Qwen3-VL
     #   - Llama-style (model.model.layers)
     #   - GPT-2-style (transformer.h)
-    if hasattr(model, "model") and hasattr(model.model, "language_model") and hasattr(model.model.language_model, "layers"):
+    if (
+        hasattr(model, "model")
+        and hasattr(model.model, "language_model")
+        and hasattr(model.model.language_model, "layers")
+    ):
         layers = model.model.language_model.layers
     elif hasattr(model, "model") and hasattr(model.model, "layers"):
         layers = model.model.layers
@@ -917,7 +921,6 @@ def setup_model(
     # (different C API). Use local packages instead.
     if getattr(model_config, "model_type", None) == "granitemoehybrid":
         try:
-            from transformers.integrations.hub_kernels import _KERNEL_MODULE_MAPPING
             import causal_conv1d
             import mamba_ssm
             from mamba_ssm.ops.triton.selective_state_update import selective_state_update
@@ -925,6 +928,7 @@ def setup_model(
                 mamba_chunk_scan_combined,
                 mamba_split_conv1d_scan_combined,
             )
+            from transformers.integrations.hub_kernels import _KERNEL_MODULE_MAPPING
 
             mamba_ssm.selective_state_update = selective_state_update
             mamba_ssm.mamba_chunk_scan_combined = mamba_chunk_scan_combined
@@ -934,10 +938,7 @@ def setup_model(
             _KERNEL_MODULE_MAPPING["mamba-ssm"] = mamba_ssm
             log_rank_0("Using local mamba_ssm/causal_conv1d instead of Hub kernels")
         except ImportError:
-            log_rank_0(
-                "mamba_ssm or causal_conv1d not installed; "
-                "GraniteMoeHybrid will use slow (torch) path"
-            )
+            log_rank_0("mamba_ssm or causal_conv1d not installed; GraniteMoeHybrid will use slow (torch) path")
 
     # Set up quantization config for GPT-OSS models
     if is_gpt_oss:
@@ -958,36 +959,36 @@ def setup_model(
     # towers (TimmWrapperModel rejects flash_attention_2).
     _needs_sdpa = needs_sdpa(model_config)
 
-    # Check if flash_attn is available and set appropriate attention implementation
-    try:
-        import flash_attn as _  # noqa: F401
+    # Handle models that need SDPA (doesn't require flash_attn)
+    if _needs_sdpa:
+        base_model_args["attn_implementation"] = "sdpa"
+        log_rank_0(f"Using SDPA for {model_name_or_path} (model incompatible with Flash Attention 2)")
+    else:
+        # Check if flash_attn is available for non-SDPA models
+        try:
+            import flash_attn as _
 
-        if _needs_sdpa:
-            base_model_args["attn_implementation"] = "sdpa"
-            log_rank_0(
-                f"Using SDPA for {model_name_or_path} (model incompatible with Flash Attention 2)"
-            )
-        elif is_gpt_oss:
-            # vllm-flash-attn3 requires Hopper (SM 9.0+) GPUs;
-            # GPT-OSS only supports flash-attn3 or eager
-            major, _ = torch.cuda.get_device_capability(0)
-            if major >= 9:
-                base_model_args["attn_implementation"] = "kernels-community/vllm-flash-attn3"
-                log_rank_0("Set attention implementation to vllm-flash-attn3 for GPT-OSS")
+            if is_gpt_oss:
+                # vllm-flash-attn3 requires Hopper (SM 9.0+) GPUs;
+                # GPT-OSS only supports flash-attn3 or eager
+                major, _ = torch.cuda.get_device_capability(0)
+                if major >= 9:
+                    base_model_args["attn_implementation"] = "kernels-community/vllm-flash-attn3"
+                    log_rank_0("Set attention implementation to vllm-flash-attn3 for GPT-OSS")
+                else:
+                    base_model_args["attn_implementation"] = "eager"
+                    log_rank_0(
+                        f"GPT-OSS: flash-attn3 requires Hopper (SM 9.0+) GPUs, "
+                        f"but found SM {major}.x. Using eager attention instead."
+                    )
             else:
-                base_model_args["attn_implementation"] = "eager"
-                log_rank_0(
-                    f"GPT-OSS: flash-attn3 requires Hopper (SM 9.0+) GPUs, "
-                    f"but found SM {major}.x. Using eager attention instead."
-                )
-        else:
-            base_model_args["attn_implementation"] = "flash_attention_2"
+                base_model_args["attn_implementation"] = "flash_attention_2"
 
-    except ImportError as e:
-        if os.environ.get("TESTING", "false").lower() == "true":
-            base_model_args["attn_implementation"] = "sdpa"
-        else:
-            raise e
+        except ImportError as e:
+            if os.environ.get("TESTING", "false").lower() == "true":
+                base_model_args["attn_implementation"] = "sdpa"
+            else:
+                raise e
 
     # For models with timm vision towers: set vision config to eager
     # while keeping the text model's attention implementation.
@@ -998,10 +999,7 @@ def setup_model(
             "text_config": attn_impl,
             "vision_config": "eager",
         }
-        log_rank_0(
-            f"Model has timm vision tower — using eager attention for vision, "
-            f"{attn_impl} for text model."
-        )
+        log_rank_0(f"Model has timm vision tower — using eager attention for vision, {attn_impl} for text model.")
 
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
 

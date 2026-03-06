@@ -88,10 +88,12 @@ def load_vlm_for_text_training(model_path: str, load_kwargs: dict) -> nn.Module:
     log_rank_0("🔄 VLM detected (no CausalLM class) – loading directly for text-only training")
 
     # Filter out None quantization_config to avoid interfering with
-    # the model's built-in quantization handling
+    # the model's built-in quantization handling.
+    # Also filter out pretrained_model_name_or_path since model_path is passed positionally.
     filtered_kwargs = {
-        k: v for k, v in load_kwargs.items()
-        if not (k == "quantization_config" and v is None)
+        k: v
+        for k, v in load_kwargs.items()
+        if k != "pretrained_model_name_or_path" and not (k == "quantization_config" and v is None)
     }
     model = AutoModelForImageTextToText.from_pretrained(model_path, **filtered_kwargs)
 
@@ -131,8 +133,7 @@ def _find_text_backbone(vlm_model: nn.Module) -> nn.Module:
 
     available = [name for name, _ in inner.named_children()]
     raise ValueError(
-        f"Cannot find text backbone in {type(vlm_model).__name__}. "
-        f"Available sub-modules on inner model: {available}"
+        f"Cannot find text backbone in {type(vlm_model).__name__}. Available sub-modules on inner model: {available}"
     )
 
 
@@ -155,10 +156,12 @@ def extract_causal_lm_from_vlm(model_path: str, load_kwargs: dict) -> nn.Module:
     log_rank_0("🔄 VLM detected – loading full VLM to extract CausalLM text backbone")
 
     # Filter out None quantization_config to avoid interfering with
-    # the model's built-in quantization handling (e.g. FP8 auto-dequant)
+    # the model's built-in quantization handling (e.g. FP8 auto-dequant).
+    # Also filter out pretrained_model_name_or_path since model_path is passed positionally.
     vlm_kwargs = {
-        k: v for k, v in load_kwargs.items()
-        if not (k == "quantization_config" and v is None)
+        k: v
+        for k, v in load_kwargs.items()
+        if k != "pretrained_model_name_or_path" and not (k == "quantization_config" and v is None)
     }
     vlm = AutoModelForImageTextToText.from_pretrained(model_path, **vlm_kwargs)
 
@@ -237,6 +240,7 @@ def needs_sdpa(config) -> bool:
             return True
         try:
             from transformers.models.auto import MODEL_MAPPING
+
             if vision_config.__class__ in MODEL_MAPPING:
                 vision_cls = MODEL_MAPPING[vision_config.__class__]
                 if "Timm" in vision_cls.__name__:
@@ -267,6 +271,7 @@ def has_timm_vision_tower(config) -> bool:
         return True
     try:
         from transformers.models.auto import MODEL_MAPPING
+
         if vision_config.__class__ in MODEL_MAPPING:
             vision_cls = MODEL_MAPPING[vision_config.__class__]
             if "Timm" in vision_cls.__name__:

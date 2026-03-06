@@ -350,6 +350,8 @@ MODEL_NAME_MAPPINGS = {
     "gptneo": "gpt-neo",  # Handle both "gpt-neo" and "gptneo" variants
     "gpt-oss": "gpt-oss",
     "opt": "opt",
+    "qwen3_5": "qwen3_5",  # specific BEFORE generic
+    "qwen3.5": "qwen3_5",  # specific BEFORE generic
     "qwen": "qwen",
     "gemma": "gemma",
     "phi4": "phi3",
@@ -359,8 +361,6 @@ MODEL_NAME_MAPPINGS = {
     "mistral": "mistral",
     "granite": "granite",
     "gpt2": "gpt2",
-    "qwen3_5": "qwen3_5",
-    "qwen3.5": "qwen3_5",
 }
 
 
@@ -784,15 +784,11 @@ def _load_model_memory_efficient(
             # Check if this is a VLM wrapping a CausalLM text backbone
             from transformers import AutoConfig
 
-            _pre_config = AutoConfig.from_pretrained(
-                pretrained_model_name_or_path, trust_remote_code=True
-            )
+            _pre_config = AutoConfig.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
 
             if is_vlm_with_causal_lm(_pre_config):
                 log_rank_0("🔄 VLM detected – extracting CausalLM text backbone for OSFT")
-                base_model = extract_causal_lm_from_vlm(
-                    pretrained_model_name_or_path, final_base_kwargs
-                )
+                base_model = extract_causal_lm_from_vlm(pretrained_model_name_or_path, final_base_kwargs)
             else:
                 base_model = base_model_class.from_pretrained(
                     pretrained_model_name_or_path,
